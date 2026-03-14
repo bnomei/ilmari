@@ -392,6 +392,7 @@ mod tests {
         run_git(repo.path(), &["init"]);
         run_git(repo.path(), &["config", "user.email", "ilmari@example.test"]);
         run_git(repo.path(), &["config", "user.name", "Ilmari Tests"]);
+        run_git(repo.path(), &["branch", "-M", "main"]);
 
         fs::write(repo.path().join("tracked.txt"), "alpha\n").expect("staged file should exist");
         run_git(repo.path(), &["add", "tracked.txt"]);
