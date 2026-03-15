@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::model::{AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord, SubtaskProcess};
 
-const PS_FORMAT: &str = "pid=,ppid=,%cpu=,rss=,comm=";
+const PS_FORMAT: &str = "pid=,ppid=,%cpu=,rss=,command=";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessSnapshot {
@@ -141,6 +141,8 @@ impl ProcessTree {
             }
             AgentKind::OpenCode => command_matches(&process.command, "opencode"),
             AgentKind::Pi => command_equals_any(&process.command, &["pi", "pi-agent"]),
+            AgentKind::GeminiCli => command_matches(&process.command, "gemini"),
+            AgentKind::Auggie => command_matches(&process.command, "auggie"),
         }
     }
 
@@ -261,22 +263,26 @@ fn parse_cpu_tenths(value: &str, field: &'static str) -> Result<u32, ProcessSnap
 }
 
 fn command_matches(command: &str, expected: &str) -> bool {
-    let normalized = normalized_command_name(command);
-    normalized == expected || normalized.starts_with(&format!("{expected}-"))
+    command_tokens(command)
+        .any(|token| token == expected || token.starts_with(&format!("{expected}-")))
 }
 
 fn command_equals_any(command: &str, expected: &[&str]) -> bool {
-    let normalized = normalized_command_name(command);
-    expected.iter().any(|candidate| normalized == *candidate)
+    command_tokens(command).any(|token| expected.iter().any(|candidate| token == *candidate))
 }
 
-fn normalized_command_name(command: &str) -> String {
+fn command_tokens(command: &str) -> impl Iterator<Item = String> + '_ {
     command
-        .trim()
-        .rsplit(|character: char| character == '/' || character.is_whitespace())
-        .find(|segment| !segment.is_empty())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
+        .split_whitespace()
+        .map(|token| token.trim_matches(['"', '\'']))
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .unwrap_or(token)
+                .to_ascii_lowercase()
+        })
 }
 
 fn display_command_label(command: &str) -> String {
@@ -377,6 +383,37 @@ mod tests {
         ]);
 
         assert!(tree.usage_for_session(&session_record(100, AgentKind::Codex)).is_none());
+    }
+
+    #[test]
+    fn process_tree_resolves_node_wrapped_agent_commands_from_full_command_lines() {
+        let tree = ProcessTree::from_snapshots(vec![
+            snapshot(100, 55, 1, 1024, "zsh"),
+            snapshot(
+                101,
+                100,
+                220,
+                64 * 1024,
+                "node --no-warnings=DEP0040 /opt/homebrew/bin/gemini",
+            ),
+            snapshot(
+                102,
+                100,
+                180,
+                48 * 1024,
+                "node /Users/test/.nvm/versions/node/v22.21.1/bin/auggie",
+            ),
+        ]);
+
+        let gemini = tree
+            .usage_for_session(&session_record(100, AgentKind::GeminiCli))
+            .expect("gemini should resolve");
+        let auggie = tree
+            .usage_for_session(&session_record(100, AgentKind::Auggie))
+            .expect("auggie should resolve");
+
+        assert_eq!(gemini.agent, ResourceUsage { cpu_tenths_percent: 220, memory_kib: 64 * 1024 });
+        assert_eq!(auggie.agent, ResourceUsage { cpu_tenths_percent: 180, memory_kib: 48 * 1024 });
     }
 
     #[test]

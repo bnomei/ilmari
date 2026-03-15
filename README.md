@@ -7,7 +7,7 @@
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
-Minimal tmux popup radar for Codex, Amp, Claude Code, OpenCode, and Pi.
+Minimal tmux popup radar for Codex, Amp, Claude Code, OpenCode, Pi, Gemini CLI, and Auggie.
 
 Ilmari exists for the moment when a tmux workspace has multiple agent panes and
 you need to answer three questions quickly:

@@ -11,12 +11,21 @@ pub enum AgentKind {
     ClaudeCode,
     OpenCode,
     Pi,
+    GeminiCli,
+    Auggie,
 }
 
 impl AgentKind {
     #[cfg(test)]
-    pub const SUPPORTED_KINDS: [Self; 5] =
-        [Self::Codex, Self::Amp, Self::ClaudeCode, Self::OpenCode, Self::Pi];
+    pub const SUPPORTED_KINDS: [Self; 7] = [
+        Self::Codex,
+        Self::Amp,
+        Self::ClaudeCode,
+        Self::OpenCode,
+        Self::Pi,
+        Self::GeminiCli,
+        Self::Auggie,
+    ];
 
     pub fn display_name(self) -> &'static str {
         match self {
@@ -25,6 +34,8 @@ impl AgentKind {
             Self::ClaudeCode => "Claude Code",
             Self::OpenCode => "OpenCode",
             Self::Pi => "Pi",
+            Self::GeminiCli => "Gemini CLI",
+            Self::Auggie => "Auggie",
         }
     }
 }
@@ -208,6 +219,8 @@ mod tests {
         assert_eq!(AgentKind::ClaudeCode.display_name(), "Claude Code");
         assert_eq!(AgentKind::OpenCode.display_name(), "OpenCode");
         assert_eq!(AgentKind::Pi.display_name(), "Pi");
+        assert_eq!(AgentKind::GeminiCli.display_name(), "Gemini CLI");
+        assert_eq!(AgentKind::Auggie.display_name(), "Auggie");
         assert_eq!(
             AgentKind::SUPPORTED_KINDS,
             [
@@ -216,6 +229,8 @@ mod tests {
                 AgentKind::ClaudeCode,
                 AgentKind::OpenCode,
                 AgentKind::Pi,
+                AgentKind::GeminiCli,
+                AgentKind::Auggie,
             ]
         );
     }

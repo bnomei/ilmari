@@ -17,6 +17,9 @@ const OUTPUT_EXCERPT_MAX_CHARS: usize = 80;
 pub trait AgentAdapter {
     fn kind(&self) -> AgentKind;
     fn detect(&self, pane: &PaneSnapshot) -> bool;
+    fn detect_output(&self, _pane: &PaneSnapshot, _output_tail: &str) -> bool {
+        false
+    }
     fn classify(
         &self,
         pane: &PaneSnapshot,
@@ -50,6 +53,8 @@ impl AdapterRegistry {
                 Box::new(ClaudeCodeAdapter),
                 Box::new(OpenCodeAdapter),
                 Box::new(PiAdapter),
+                Box::new(GeminiAdapter),
+                Box::new(AuggieAdapter),
             ],
         }
     }
@@ -60,18 +65,20 @@ impl AdapterRegistry {
         pane: &PaneSnapshot,
         previous: Option<&SessionRecord>,
     ) -> Option<AgentKind> {
-        self.select_adapter(pane, previous).map(AgentAdapter::kind)
+        self.select_adapter(pane, None, previous).map(AgentAdapter::kind)
     }
 
     pub fn needs_output_tail(&self, pane: &PaneSnapshot, previous: Option<&SessionRecord>) -> bool {
         !pane.pane_dead
             && !is_shell_command(&pane.pane_current_command)
-            && self.select_adapter(pane, previous).is_some()
+            && (self.select_adapter(pane, None, previous).is_some()
+                || is_runtime_wrapped_agent_candidate(&pane.pane_current_command))
     }
 
     fn select_adapter<'a>(
         &'a self,
         pane: &PaneSnapshot,
+        output_tail: Option<&str>,
         previous: Option<&SessionRecord>,
     ) -> Option<&'a dyn AgentAdapter> {
         if let Some(previous) = previous {
@@ -83,6 +90,8 @@ impl AdapterRegistry {
             {
                 if pane.pane_dead
                     || adapter.detect(pane)
+                    || output_tail
+                        .is_some_and(|output_tail| adapter.detect_output(pane, output_tail))
                     || is_shell_command(&pane.pane_current_command)
                 {
                     return Some(adapter);
@@ -90,7 +99,14 @@ impl AdapterRegistry {
             }
         }
 
-        self.adapters.iter().find(|adapter| adapter.detect(pane)).map(Box::as_ref)
+        self.adapters
+            .iter()
+            .find(|adapter| {
+                adapter.detect(pane)
+                    || output_tail
+                        .is_some_and(|output_tail| adapter.detect_output(pane, output_tail))
+            })
+            .map(Box::as_ref)
     }
 }
 
@@ -170,7 +186,7 @@ impl SessionTracker {
         previous: Option<&SessionRecord>,
         now: Instant,
     ) -> Option<SessionRecord> {
-        let adapter = self.registry.select_adapter(pane, previous)?;
+        let adapter = self.registry.select_adapter(pane, output_tail, previous)?;
         let output_fingerprint = output_tail.and_then(full_output_fingerprint);
         let status = adapter.classify(pane, output_tail, output_fingerprint, previous);
         let detail = adapter.extract_detail(output_tail, previous);
@@ -418,6 +434,92 @@ impl AgentAdapter for PiAdapter {
     }
 }
 
+struct GeminiAdapter;
+
+impl AgentAdapter for GeminiAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::GeminiCli
+    }
+
+    fn detect(&self, pane: &PaneSnapshot) -> bool {
+        command_matches(&pane.pane_current_command, "gemini")
+            || pane_title_contains(&pane.pane_title, "gemini")
+    }
+
+    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
+        looks_like_gemini_output(output_tail)
+    }
+
+    fn classify(
+        &self,
+        pane: &PaneSnapshot,
+        output_tail: Option<&str>,
+        output_fingerprint: Option<u64>,
+        previous: Option<&SessionRecord>,
+    ) -> SessionStatus {
+        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
+    }
+
+    fn extract_detail(
+        &self,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
+    ) -> Option<Arc<AgentDetail>> {
+        reuse_detail_arc(extract_gemini_detail(output_tail), previous)
+    }
+
+    fn extract_output_excerpt(
+        &self,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
+    ) -> Option<Arc<str>> {
+        reuse_output_excerpt_arc(extract_gemini_output_excerpt(output_tail), previous)
+    }
+}
+
+struct AuggieAdapter;
+
+impl AgentAdapter for AuggieAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Auggie
+    }
+
+    fn detect(&self, pane: &PaneSnapshot) -> bool {
+        command_matches(&pane.pane_current_command, "auggie")
+            || pane_title_contains(&pane.pane_title, "auggie")
+    }
+
+    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
+        looks_like_auggie_output(output_tail)
+    }
+
+    fn classify(
+        &self,
+        pane: &PaneSnapshot,
+        output_tail: Option<&str>,
+        output_fingerprint: Option<u64>,
+        previous: Option<&SessionRecord>,
+    ) -> SessionStatus {
+        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
+    }
+
+    fn extract_detail(
+        &self,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
+    ) -> Option<Arc<AgentDetail>> {
+        reuse_detail_arc(extract_auggie_detail(output_tail), previous)
+    }
+
+    fn extract_output_excerpt(
+        &self,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
+    ) -> Option<Arc<str>> {
+        reuse_output_excerpt_arc(extract_auggie_output_excerpt(output_tail), previous)
+    }
+}
+
 fn classify_supported_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -540,6 +642,10 @@ fn is_shell_command(command: &str) -> bool {
     matches!(normalized.as_str(), "fish" | "nu") || normalized == "sh" || normalized.ends_with("sh")
 }
 
+fn is_runtime_wrapped_agent_candidate(command: &str) -> bool {
+    command_equals_any(command, &["node"])
+}
+
 fn command_matches(command: &str, expected: &str) -> bool {
     let normalized = normalized_command_name(command);
     normalized == expected || normalized.starts_with(&format!("{expected}-"))
@@ -556,6 +662,20 @@ fn pane_title_contains(title: &str, needle: &str) -> bool {
 
 fn normalized_command_name(command: &str) -> String {
     command.trim().rsplit('/').next().unwrap_or_default().to_ascii_lowercase()
+}
+
+fn looks_like_gemini_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("gemini cli v")
+        || lower.contains("gemini code assist")
+        || output_tail.lines().any(|line| gemini_footer_model_pattern().is_match(line.trim()))
+}
+
+fn looks_like_auggie_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("get started with auggie")
+        || lower.contains("for automation, use 'auggie --print")
+        || lower.contains("tip: use 'auggie session continue'")
 }
 
 fn classify_output_tail(output_tail: &str) -> Option<SessionStatus> {
@@ -652,6 +772,28 @@ fn extract_pi_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
 }
 
+fn extract_gemini_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = output_tail.lines().rev().find_map(|line| {
+        gemini_footer_model_pattern()
+            .captures(line.trim())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })?;
+
+    Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
+fn extract_auggie_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = extract_auggie_selected_model(output_tail)
+        .or_else(|| extract_auggie_using_model(output_tail))
+        .or_else(|| extract_auggie_footer_model(output_tail))?;
+
+    Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
 fn extract_codex_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
     extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
@@ -743,6 +885,60 @@ fn extract_pi_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     })
 }
 
+fn extract_gemini_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
+        let lower = normalized.to_ascii_lowercase();
+        is_common_output_noise(raw, normalized)
+            || looks_like_gemini_output(raw)
+            || lower.contains("logged in with google")
+            || lower.starts_with("? for shortcuts")
+            || is_gemini_shortcut_footer(&lower)
+            || lower.contains("gemini.md file")
+            || lower.contains("no sandbox (see /docs)")
+            || lower.contains("request cancelled")
+            || lower.starts_with("type your message or @path/to/file")
+            || gemini_footer_model_pattern().is_match(normalized)
+            || raw.trim_start().starts_with('>')
+    })
+}
+
+fn is_gemini_shortcut_footer(lower: &str) -> bool {
+    (lower.contains("accept edits") || lower.contains("show diff")) && lower.contains("tab")
+}
+
+fn extract_auggie_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
+        let lower = normalized.to_ascii_lowercase();
+        is_common_output_noise(raw, normalized)
+            || looks_like_auggie_output(raw)
+            || lower.starts_with("version ")
+            || lower.starts_with("new:")
+            || lower.starts_with("you can ask questions")
+            || lower.starts_with("use ctrl + enter")
+            || lower.starts_with("use vim mode")
+            || lower.starts_with("indexing disabled.")
+            || lower.starts_with("to get the most out of auggie")
+            || lower.starts_with("using model:")
+            || lower.starts_with("message will be queued and run after current task")
+            || lower.starts_with("executing tools...")
+            || lower.starts_with("terminal - ")
+            || lower == "command completed"
+            || lower.starts_with("save model setting to")
+            || lower.starts_with("save setting to")
+            || lower.starts_with("local settings")
+            || lower.starts_with("project settings")
+            || lower.starts_with("user settings")
+            || lower.starts_with("[insert]")
+            || lower.starts_with("[↑↓] navigate")
+            || lower.starts_with("select model")
+            || raw.contains('▇')
+            || raw.contains("$$")
+            || auggie_footer_model_pattern().is_match(raw)
+    })
+}
+
 fn extract_output_excerpt_from_tail<F>(output_tail: &str, mut is_noise: F) -> Option<String>
 where
     F: FnMut(&str, &str) -> bool,
@@ -800,10 +996,23 @@ fn is_common_output_noise(raw: &str, normalized: &str) -> bool {
 }
 
 fn normalize_output_line(line: &str) -> String {
-    line.trim_matches(|c: char| is_box_chrome_char(c) || c.is_whitespace())
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let trimmed = line.trim_matches(|c: char| is_box_chrome_char(c) || c.is_whitespace());
+    let trimmed = trim_leading_output_marker(trimmed).unwrap_or(trimmed);
+
+    trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn trim_leading_output_marker(line: &str) -> Option<&str> {
+    let mut chars = line.chars();
+    let marker = chars.next()?;
+    let remainder = chars.as_str();
+    if !matches!(marker, '✦' | '●' | '◊' | '•' | 'ℹ' | '~' | '⎿')
+        || !remainder.starts_with(char::is_whitespace)
+    {
+        return None;
+    }
+
+    Some(remainder.trim_start())
 }
 
 fn is_box_chrome_char(c: char) -> bool {
@@ -814,6 +1023,10 @@ fn is_box_chrome_char(c: char) -> bool {
             | '╮'
             | '╯'
             | '╰'
+            | '╔'
+            | '╗'
+            | '╝'
+            | '║'
             | '╹'
             | '╻'
             | '┆'
@@ -821,6 +1034,7 @@ fn is_box_chrome_char(c: char) -> bool {
             | '─'
             | '═'
             | '█'
+            | '▇'
             | '▌'
             | '▐'
             | '▕'
@@ -829,6 +1043,10 @@ fn is_box_chrome_char(c: char) -> bool {
             | '▉'
             | '▀'
             | '▄'
+            | '▗'
+            | '▟'
+            | '▜'
+            | '▝'
             | '▁'
             | '▔'
     )
@@ -927,6 +1145,8 @@ fn looks_like_waiting_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         || looks_like_claude_prompt(recent_lines, output_tail)
         || looks_like_opencode_home_screen(recent_lines, output_tail)
         || looks_like_pi_prompt(recent_lines, output_tail)
+        || looks_like_gemini_prompt(recent_lines, output_tail)
+        || looks_like_auggie_prompt(recent_lines, output_tail)
 }
 
 fn looks_like_codex_bottom_prompt(recent_lines: &[&str]) -> bool {
@@ -1005,6 +1225,34 @@ fn looks_like_pi_idle(output_tail: &str) -> bool {
     (lower.contains("pi v") || lower.contains("warning: no models available"))
         && lower.contains("ctrl+l to select model")
         && pi_footer_pattern().is_match(output_tail)
+}
+
+fn looks_like_gemini_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    let has_prompt = recent_lines.iter().any(|line| line.starts_with('>'));
+
+    (has_prompt
+        && recent_lines.iter().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("type your message") || lower.contains("/model")
+        })
+        && lower.contains("? for shortcuts"))
+        || (lower.contains("action required") && lower.contains("allow execution of"))
+}
+
+fn looks_like_auggie_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+
+    (recent_lines.iter().any(|line| is_prompt_line(line))
+        && recent_lines.iter().any(|line| lower_is_auggie_footer(line)))
+        || (lower.contains("select model") && lower.contains("[esc] cancel"))
+        || (lower.contains("save model setting to") && lower.contains("[enter] select"))
+        || lower.contains("message will be queued and run after current task")
+}
+
+fn lower_is_auggie_footer(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("[insert]") && lower.contains('?') && lower.contains('[') && lower.contains(']')
 }
 
 fn output_has_recent_motion(
@@ -1141,6 +1389,38 @@ fn pi_footer_pattern() -> &'static Regex {
     })
 }
 
+fn gemini_footer_model_pattern() -> &'static Regex {
+    static GEMINI_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    GEMINI_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(r"(?i)/model\s+(?P<model>.+?)\s*$")
+            .expect("gemini footer model regex should compile")
+    })
+}
+
+fn auggie_using_model_pattern() -> &'static Regex {
+    static AUGGIE_USING_MODEL: OnceLock<Regex> = OnceLock::new();
+    AUGGIE_USING_MODEL.get_or_init(|| {
+        Regex::new(r"(?i)\busing model:\s*(?P<model>.+?)\s*$")
+            .expect("auggie using model regex should compile")
+    })
+}
+
+fn auggie_footer_model_pattern() -> &'static Regex {
+    static AUGGIE_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    AUGGIE_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(r"\[(?P<model>[^\]]+)\]\s+~\s*$")
+            .expect("auggie footer model regex should compile")
+    })
+}
+
+fn auggie_selected_model_pattern() -> &'static Regex {
+    static AUGGIE_SELECTED_MODEL: OnceLock<Regex> = OnceLock::new();
+    AUGGIE_SELECTED_MODEL.get_or_init(|| {
+        Regex::new(r"^(?:●|•)?\s*(?P<model>.+?)(?:\s+\([^)]+\))*\s+\$+\s*$")
+            .expect("auggie selected model regex should compile")
+    })
+}
+
 fn extract_claude_model_label(output_tail: &str) -> Option<String> {
     if let Some(label) = output_tail.lines().rev().find_map(|line| {
         claude_model_set_pattern()
@@ -1226,6 +1506,37 @@ fn extract_pi_footer_effort(output_tail: &str) -> Option<String> {
     })
 }
 
+fn extract_auggie_using_model(output_tail: &str) -> Option<String> {
+    output_tail.lines().rev().find_map(|line| {
+        auggie_using_model_pattern()
+            .captures(line.trim())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })
+}
+
+fn extract_auggie_footer_model(output_tail: &str) -> Option<String> {
+    output_tail.lines().rev().find_map(|line| {
+        auggie_footer_model_pattern()
+            .captures(line.trim())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })
+}
+
+fn extract_auggie_selected_model(output_tail: &str) -> Option<String> {
+    output_tail.lines().find_map(|line| {
+        let normalized = normalize_output_line(line.trim());
+        auggie_selected_model_pattern()
+            .captures(normalized.as_str())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })
+}
+
 fn normalize_detail_label(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1234,9 +1545,11 @@ fn normalize_detail_label(value: &str) -> String {
 mod tests {
     use super::{
         classify_output_tail, extract_amp_detail, extract_amp_output_excerpt,
-        extract_claude_detail, extract_claude_output_excerpt, extract_codex_detail,
-        extract_codex_output_excerpt, extract_opencode_detail, extract_opencode_output_excerpt,
-        extract_pi_detail, extract_pi_output_excerpt, AdapterRegistry, SessionTracker,
+        extract_auggie_detail, extract_auggie_output_excerpt, extract_claude_detail,
+        extract_claude_output_excerpt, extract_codex_detail, extract_codex_output_excerpt,
+        extract_gemini_detail, extract_gemini_output_excerpt, extract_opencode_detail,
+        extract_opencode_output_excerpt, extract_pi_detail, extract_pi_output_excerpt,
+        AdapterRegistry, SessionTracker,
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
@@ -1271,6 +1584,60 @@ mod tests {
         assert_eq!(registry.detect_kind(&pi, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_title, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_agent, None), Some(AgentKind::Pi));
+    }
+
+    #[test]
+    fn registry_captures_output_for_node_wrapped_agent_candidates() {
+        let registry = AdapterRegistry::v1();
+        let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (bnomei)");
+
+        assert!(registry.needs_output_tail(&gemini, None));
+    }
+
+    #[test]
+    fn tracker_detects_gemini_and_auggie_from_live_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (bnomei)");
+        let auggie = snapshot_with_title("%25", "node", false, "auggie");
+        let output_tails = HashMap::from([
+            (
+                gemini.pane_id.clone(),
+                "\
+✦ Hello. I'm Gemini CLI, your senior software engineering assistant. How can I help you today?
+
+? for shortcuts
+>   Type your message or @path/to/file
+~                             no sandbox (see /docs)                              /model Auto (Gemini 3)
+"
+                .to_string(),
+            ),
+            (
+                auggie.pane_id.clone(),
+                "\
+› hello
+
+● Hi
+
+  Hello! What would you like help with?
+
+◊ Using model: GPT-5.4
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+›
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+ [INSERT] ? to show shortcuts                                                                [GPT-5.4]  ~
+"
+                .to_string(),
+            ),
+        ]);
+
+        let records = tracker.refresh(&[gemini, auggie], &output_tails, now);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AgentKind::GeminiCli);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[1].kind, AgentKind::Auggie);
+        assert_eq!(records[1].status, SessionStatus::WaitingInput);
     }
 
     #[test]
@@ -1534,6 +1901,49 @@ You:
 ";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn gemini_prompt_marks_waiting_input() {
+        let output_tail = "\
+? for shortcuts
+>   Type your message or @path/to/file
+~                             no sandbox (see /docs)                              /model Auto (Gemini 3)
+";
+
+        assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn gemini_action_prompt_marks_waiting_input() {
+        let output_tail = "\
+✦ I will wait for 5 seconds and then say hello.
+
+Action Required
+Allow execution of: 'sleep, echo'?
+
+● 1. Allow once
+  2. Allow for this session
+  3. No, suggest changes (esc)
+";
+
+        assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn auggie_prompt_and_model_menu_mark_waiting_input() {
+        let prompt = "\
+›
+[INSERT] ? to show shortcuts                                                                [GPT-5.4]  ~
+";
+        let model_menu = "\
+Select model
+● GPT-5.4 (default) (current)                          $$
+[↑↓] Navigate • [Enter] Select • [/] Search • [Esc] Cancel
+";
+
+        assert_eq!(classify_output_tail(prompt), Some(SessionStatus::WaitingInput));
+        assert_eq!(classify_output_tail(model_menu), Some(SessionStatus::WaitingInput));
     }
 
     #[test]
@@ -1938,6 +2348,119 @@ gpt-5.4 xhigh fast · 40% left · ~/Sites/ilmari
     }
 
     #[test]
+    fn gemini_detail_extracts_from_footer_line() {
+        let output_tail = "\
+~                             no sandbox (see /docs)                              /model Auto (Gemini 3)
+";
+
+        assert_eq!(
+            extract_gemini_detail(Some(output_tail)),
+            Some(AgentDetail {
+                label: "Auto (Gemini 3)".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+    }
+
+    #[test]
+    fn gemini_output_excerpt_skips_prompt_and_footer() {
+        let output_tail = "\
+✦ Hello. I'm Gemini CLI, your senior software engineering assistant. How can I help you today?
+
+? for shortcuts
+>   Type your message or @path/to/file
+~                             no sandbox (see /docs)                              /model Auto (Gemini 3)
+";
+
+        assert_eq!(
+            extract_gemini_output_excerpt(Some(output_tail)),
+            Some(
+                "...ni CLI, your senior software engineering assistant. How can I help you today?"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn gemini_output_excerpt_ignores_shift_tab_footer_when_reply_is_out_of_tail() {
+        let output_tail = "\
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+shift+tab to accept edits
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+>   Type your message or @path/to/file
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+~                             no sandbox (see /docs)                              /model Auto (Gemini 3)
+";
+
+        assert_eq!(extract_gemini_output_excerpt(Some(output_tail)), None);
+    }
+
+    #[test]
+    fn auggie_detail_extracts_from_footer_and_model_menu() {
+        assert_eq!(
+            extract_auggie_detail(Some(
+                "◊ Using model: GPT-5.4\n [INSERT] ? to show shortcuts                                                                [GPT-5.4]  ~"
+            )),
+            Some(AgentDetail {
+                label: "GPT-5.4".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+
+        assert_eq!(
+            extract_auggie_detail(Some(
+                "Select model\n● GPT-5.4 (default) (current)                          $$\n[↑↓] Navigate • [Enter] Select • [/] Search • [Esc] Cancel"
+            )),
+            Some(AgentDetail {
+                label: "GPT-5.4".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+    }
+
+    #[test]
+    fn auggie_output_excerpt_prefers_latest_reply_block() {
+        let output_tail = "\
+› hello
+
+● Hi
+
+  Hello! What would you like help with?
+
+◊ Using model: GPT-5.4
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+›
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+ [INSERT] ? to show shortcuts                                                                [GPT-5.4]  ~
+";
+
+        assert_eq!(
+            extract_auggie_output_excerpt(Some(output_tail)),
+            Some("Hello! What would you like help with?".to_string())
+        );
+    }
+
+    #[test]
+    fn auggie_output_excerpt_keeps_delayed_reply_after_tool_completion() {
+        let output_tail = "\
+› say hello in 5 seconds
+
+~ I see the user wants me to say hello in 5 seconds.
+
+● Terminal - sleep 5
+  ⎿ Command completed
+
+● hello
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+›
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+ [INSERT] ? to show shortcuts                                                                [GPT-5.4]  ~
+";
+
+        assert_eq!(extract_auggie_output_excerpt(Some(output_tail)), Some("hello".to_string()));
+    }
+
+    #[test]
     fn amp_detail_extracts_smart_and_rush_modes() {
         let smart = "\
 ╭─────────────────────smart──30 skills─╮
@@ -2256,6 +2779,47 @@ Model: claude-haiku-4-5
                 .into()
             )
         );
+    }
+
+    #[test]
+    fn tracker_retains_previous_gemini_output_when_new_tail_has_only_footer_hints() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot_with_title("%26", "node", false, "◇  Ready (bnomei)");
+        let now = Instant::now();
+        let first = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(
+                pane.pane_id.clone(),
+                "\
+✦ hello
+
+? for shortcuts
+shift+tab to accept edits
+>   Type your message or @path/to/file
+~                             no sandbox (see /docs)                              /model Auto (Gemini 3)
+"
+                .to_string(),
+            )]),
+            now,
+        );
+
+        assert_eq!(first[0].output_excerpt.as_deref(), Some("hello"));
+
+        let second = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(
+                pane.pane_id.clone(),
+                "\
+shift+tab to accept edits
+>   Type your message or @path/to/file
+~                             no sandbox (see /docs)                              /model Auto (Gemini 3)
+"
+                .to_string(),
+            )]),
+            now + Duration::from_secs(5),
+        );
+
+        assert_eq!(second[0].output_excerpt.as_deref(), Some("hello"));
     }
 
     #[test]
