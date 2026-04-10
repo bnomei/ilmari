@@ -365,6 +365,7 @@ impl AgentAdapter for OpenCodeAdapter {
     fn detect(&self, pane: &PaneSnapshot) -> bool {
         command_matches(&pane.pane_current_command, "opencode")
             || pane_title_contains(&pane.pane_title, "oc |")
+            || pane_title_contains(&pane.pane_title, "opencode")
     }
 
     fn classify(
