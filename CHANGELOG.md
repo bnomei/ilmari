@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Claude Code panes are now detected reliably for wrapped binaries (e.g. Nix `.claude-unwrapped`) via improved command normalization, and for rewritten task-summary titles via branded glyph prefixes (`✳`, Braille spinners like `⠐` etc.). No process tree crawling is used for detection. (Addresses https://github.com/bnomei/ilmari/issues/1)
+- Fixed Claude Code pane detection for wrapped binaries and rewritten titles (`✳`, or confirmed Braille spinners), without process-tree crawling. (Fixes #1)
 
 ## 0.2.0 - 2026-06-05
 

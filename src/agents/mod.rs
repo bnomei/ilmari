@@ -73,7 +73,8 @@ impl AdapterRegistry {
         !pane.pane_dead
             && !is_shell_command(&pane.pane_current_command)
             && (self.select_adapter(pane, None, previous).is_some()
-                || is_runtime_wrapped_agent_candidate(&pane.pane_current_command))
+                || is_runtime_wrapped_agent_candidate(&pane.pane_current_command)
+                || is_claude_output_confirmation_candidate(pane))
     }
 
     fn select_adapter<'a>(
@@ -93,6 +94,7 @@ impl AdapterRegistry {
                     || adapter.detect(pane)
                     || output_tail
                         .is_some_and(|output_tail| adapter.detect_output(pane, output_tail))
+                    || is_claude_spinner_continuation(pane, previous)
                     || is_shell_command(&pane.pane_current_command)
                 {
                     return Some(adapter);
@@ -327,11 +329,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn detect(&self, pane: &PaneSnapshot) -> bool {
         command_matches(&pane.pane_current_command, "claude")
             || (!is_shell_command(&pane.pane_current_command)
-                && is_claude_branded_title(&pane.pane_title))
+                && !command_matches_non_claude_agent(&pane.pane_current_command)
+                && is_claude_direct_title(&pane.pane_title))
     }
 
-    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
-        looks_like_claude_output(output_tail)
+    fn detect_output(&self, pane: &PaneSnapshot, output_tail: &str) -> bool {
+        !is_shell_command(&pane.pane_current_command)
+            && !command_matches_non_claude_agent(&pane.pane_current_command)
+            && is_claude_spinner_title(&pane.pane_title)
+            && looks_like_claude_output(output_tail)
     }
 
     fn classify(
@@ -762,6 +768,11 @@ fn is_runtime_wrapped_agent_candidate(command: &str) -> bool {
     command_equals_any(command, &["node"])
 }
 
+fn is_claude_output_confirmation_candidate(pane: &PaneSnapshot) -> bool {
+    !command_matches_non_claude_agent(&pane.pane_current_command)
+        && is_claude_spinner_title(&pane.pane_title)
+}
+
 fn command_matches(command: &str, expected: &str) -> bool {
     let normalized = normalized_command_name(command);
     normalized == expected || normalized.starts_with(&format!("{expected}-"))
@@ -786,22 +797,25 @@ fn normalized_command_name(command: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn is_claude_branded_title(title: &str) -> bool {
-    if pane_title_contains(title, "claude code") {
-        return true;
-    }
-    let t = title.trim_start();
-    if t.is_empty() {
-        return false;
-    }
-    is_claude_spinner_glyph(t.chars().next().unwrap())
+fn is_claude_spinner_continuation(pane: &PaneSnapshot, previous: &SessionRecord) -> bool {
+    previous.kind == AgentKind::ClaudeCode
+        && !is_shell_command(&pane.pane_current_command)
+        && !command_matches_non_claude_agent(&pane.pane_current_command)
+        && is_claude_spinner_title(&pane.pane_title)
+}
+
+fn is_claude_direct_title(title: &str) -> bool {
+    pane_title_contains(title, "claude code") || title_starts_with(title, '✳')
+}
+
+fn is_claude_spinner_title(title: &str) -> bool {
+    title.trim_start().chars().next().is_some_and(is_claude_spinner_glyph)
 }
 
 fn is_claude_spinner_glyph(c: char) -> bool {
     matches!(
         c,
-        '✳' | '⠋'
-            | '⠙'
+        '⠋' | '⠙'
             | '⠹'
             | '⠸'
             | '⠼'
@@ -819,6 +833,20 @@ fn is_claude_spinner_glyph(c: char) -> bool {
             | '⡀'
             | '⢀'
     )
+}
+
+fn title_starts_with(title: &str, expected: char) -> bool {
+    title.trim_start().starts_with(expected)
+}
+
+fn command_matches_non_claude_agent(command: &str) -> bool {
+    command_matches(command, "codex")
+        || command_matches(command, "amp")
+        || command_matches(command, "opencode")
+        || command_equals_any(command, &["pi", "pi-agent"])
+        || command_matches(command, "gemini")
+        || command_matches(command, "auggie")
+        || command_matches(command, "grok")
 }
 
 fn looks_like_gemini_output(output_tail: &str) -> bool {
@@ -1383,7 +1411,12 @@ fn looks_like_claude_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
 
 fn looks_like_claude_output(output_tail: &str) -> bool {
     let lower = output_tail.to_ascii_lowercase();
-    lower.contains("claude code") || lower.contains("welcome to claude")
+    if lower.contains("welcome to claude code") || lower.contains("claude code v") {
+        return true;
+    }
+
+    let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
+    looks_like_claude_prompt(&recent_lines, output_tail)
 }
 
 fn looks_like_opencode_home_screen(recent_lines: &[&str], output_tail: &str) -> bool {
@@ -1914,8 +1947,11 @@ mod tests {
         let claude_wrapped = snapshot("%24", ".claude-unwrapped", false);
         let claude_task_title =
             snapshot_with_title("%25", "node", false, "✳ Plan and start MIR-1094 using Linear MCP");
+        let claude_braille_title =
+            snapshot_with_title("%26", "node", false, "⠐ Plan and start MIR-1094 using Linear MCP");
         assert_eq!(registry.detect_kind(&claude_wrapped, None), Some(AgentKind::ClaudeCode));
         assert_eq!(registry.detect_kind(&claude_task_title, None), Some(AgentKind::ClaudeCode));
+        assert_eq!(registry.detect_kind(&claude_braille_title, None), None);
         assert_eq!(registry.detect_kind(&opencode, None), Some(AgentKind::OpenCode));
         assert_eq!(registry.detect_kind(&opencode_title, None), Some(AgentKind::OpenCode));
         assert_eq!(registry.detect_kind(&pi, None), Some(AgentKind::Pi));
@@ -1929,6 +1965,15 @@ mod tests {
         let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (bnomei)");
 
         assert!(registry.needs_output_tail(&gemini, None));
+    }
+
+    #[test]
+    fn registry_captures_output_for_claude_braille_confirmation_candidates() {
+        let registry = AdapterRegistry::v1();
+        let claude_braille =
+            snapshot_with_title("%25", "2.1.76", false, "⠐ Plan and start MIR-1094");
+
+        assert!(registry.needs_output_tail(&claude_braille, None));
     }
 
     #[test]
@@ -1975,6 +2020,159 @@ mod tests {
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
         assert_eq!(records[1].kind, AgentKind::Auggie);
         assert_eq!(records[1].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn tracker_detects_claude_braille_title_only_with_claude_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane =
+            snapshot_with_title("%27", "node", false, "⠐ Plan and start MIR-1094 using Linear MCP");
+        let output_tails = HashMap::from([(
+            pane.pane_id.clone(),
+            "\
+╭─── Claude Code v2.1.76 ──────────────────────────────────────────────╮
+│      Sonnet 4.6 · Claude Pro · b@bnomei.com's Organization          │
+╰───────────────────────────────────────────────────────────────────────╯
+
+❯
+  ? for shortcuts
+  ◐ medium · /effort
+"
+            .to_string(),
+        )]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::ClaudeCode);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn tracker_does_not_detect_claude_from_generic_node_output_mentions() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%28", "node", false, "worker");
+        let output_tails = HashMap::from([(
+            pane.pane_id.clone(),
+            "Release notes mention Claude Code but this pane is not Claude.".to_string(),
+        )]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn tracker_keeps_previous_claude_from_braille_spinner_title() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let running_pane = snapshot("%29", "claude", false);
+
+        tracker.refresh(&[running_pane], &HashMap::new(), now);
+
+        let spinner_pane =
+            snapshot_with_title("%29", "node", false, "⠐ Plan and start MIR-1094 using Linear MCP");
+        let records =
+            tracker.refresh(&[spinner_pane], &HashMap::new(), now + Duration::from_secs(5));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::ClaudeCode);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn tracker_does_not_keep_previous_claude_when_command_matches_another_agent() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let running_pane = snapshot("%30", "claude", false);
+
+        tracker.refresh(&[running_pane], &HashMap::new(), now);
+
+        let codex_pane = snapshot_with_title(
+            "%30",
+            "codex",
+            false,
+            "⠐ Plan and start MIR-1094 using Linear MCP",
+        );
+        let records = tracker.refresh(&[codex_pane], &HashMap::new(), now + Duration::from_secs(5));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Codex);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn registry_does_not_let_claude_direct_title_override_explicit_non_claude_command() {
+        let registry = AdapterRegistry::v1();
+        let opencode_with_stale_claude_title =
+            snapshot_with_title("%31", "opencode", false, "✳ Plan and start MIR-1094");
+        let gemini_with_stale_claude_title =
+            snapshot_with_title("%32", "gemini", false, "Claude Code");
+
+        assert_eq!(
+            registry.detect_kind(&opencode_with_stale_claude_title, None),
+            Some(AgentKind::OpenCode)
+        );
+        assert_eq!(
+            registry.detect_kind(&gemini_with_stale_claude_title, None),
+            Some(AgentKind::GeminiCli)
+        );
+    }
+
+    #[test]
+    fn tracker_does_not_keep_previous_claude_from_stale_direct_title_when_command_matches_another_agent(
+    ) {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let running_pane = snapshot("%32", "claude", false);
+
+        tracker.refresh(&[running_pane], &HashMap::new(), now);
+
+        let opencode_pane =
+            snapshot_with_title("%32", "opencode", false, "✳ Plan and start MIR-1094");
+        let records =
+            tracker.refresh(&[opencode_pane], &HashMap::new(), now + Duration::from_secs(5));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::OpenCode);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn tracker_does_not_keep_previous_claude_from_stale_output_when_command_matches_another_agent()
+    {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let running_pane = snapshot("%31", "claude", false);
+
+        tracker.refresh(&[running_pane], &HashMap::new(), now);
+
+        let codex_pane = snapshot_with_title(
+            "%31",
+            "codex",
+            false,
+            "⠐ Plan and start MIR-1094 using Linear MCP",
+        );
+        let output_tails = HashMap::from([(
+            codex_pane.pane_id.clone(),
+            "\
+╭─── Claude Code v2.1.76 ──────────────────────────────────────────────╮
+│      Sonnet 4.6 · Claude Pro · b@bnomei.com's Organization          │
+╰───────────────────────────────────────────────────────────────────────╯
+
+❯
+  ? for shortcuts
+  ◐ medium · /effort
+"
+            .to_string(),
+        )]);
+        let records = tracker.refresh(&[codex_pane], &output_tails, now + Duration::from_secs(5));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Codex);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
     }
 
     #[test]
