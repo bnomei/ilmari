@@ -507,7 +507,7 @@ fn footer_line(key_style: Style, sep_style: Style) -> Line<'static> {
     push_item(&mut spans, "Stats", "s");
     push_item(&mut spans, "Subs", "=");
     push_item(&mut spans, "Jump", "Enter");
-    push_item(&mut spans, "Quit", "q");
+    push_item(&mut spans, "Quit", "q/Esc");
 
     Line::from(spans)
 }
@@ -1034,7 +1034,7 @@ mod tests {
 
         assert_eq!(
             text,
-            "Move:j/k | Pane:% | App:a | Bell:b | Git:g | Model:m | Time:t | Output:o | Stats:s | Subs:= | Jump:Enter | Quit:q"
+            "Move:j/k | Pane:% | App:a | Bell:b | Git:g | Model:m | Time:t | Output:o | Stats:s | Subs:= | Jump:Enter | Quit:q/Esc"
         );
         assert_eq!(line.spans[0].style.fg, Some(Color::Indexed(8)));
         assert_eq!(line.spans[2].style.fg, Some(Color::Indexed(12)));

@@ -99,6 +99,7 @@ Typical popup flow:
 - open `ilmari`
 - move selection with `j` / `k` or arrow keys
 - press `Enter` to jump to the selected pane
+- press `q` or `Esc` to quit
 
 When `ilmari` is launched as a tmux popup, activation returns you to the target
 pane and closes the popup.

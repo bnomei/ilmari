@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `Esc` now quits the popup alongside `q` (and Ctrl-C) for better muscle memory with other tmux popup tools.
+
 ## 0.2.0 - 2026-06-05
 
 ### Added

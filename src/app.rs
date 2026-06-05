@@ -285,7 +285,7 @@ impl App {
             PaneJumpKeyResult::Consumed { redraw } => redraw,
             PaneJumpKeyResult::Continue { redraw } => {
                 let normal_redraw = match (code, modifiers) {
-                    (KeyCode::Char('q'), _) => {
+                    (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
                         self.should_quit = true;
                         false
                     }
@@ -1209,15 +1209,10 @@ mod tests {
         let mut app = App::default();
         app.handle_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(app.should_quit);
-    }
 
-    #[test]
-    fn escape_does_not_mark_the_app_for_exit() {
         let mut app = App::default();
-
         app.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
-
-        assert!(!app.should_quit);
+        assert!(app.should_quit);
     }
 
     #[test]
