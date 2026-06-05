@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.2 - 2026-06-05
+
+### Fixed
+
+- Treat Grok active `Waiting...` footers as running when Grok is waiting on subagent work, so timer and spinner updates do not make Ilmari report the parent session as idle.
+
 ## 0.2.1 - 2026-06-25
 
 ### Added

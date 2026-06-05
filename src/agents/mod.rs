@@ -615,6 +615,10 @@ fn classify_grok_session(
 
     let output_tail = output_tail.unwrap_or_default();
 
+    if looks_like_grok_active_waiting_footer(output_tail) {
+        return SessionStatus::Running;
+    }
+
     if let Some(status) = classify_grok_output_tail(output_tail) {
         return status;
     }
@@ -1506,6 +1510,43 @@ fn classify_grok_output_tail(output_tail: &str) -> Option<SessionStatus> {
     (looks_like_grok_prompt(&recent_lines, output_tail)
         || extract_latest_grok_completion_excerpt(output_tail).is_some())
     .then_some(SessionStatus::WaitingInput)
+}
+
+fn looks_like_grok_active_waiting_footer(output_tail: &str) -> bool {
+    let mut saw_waiting_footer = false;
+    let mut meaningful_after_footer = false;
+
+    for raw in output_tail.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_output_line(trimmed);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if is_grok_active_waiting_footer_line(&normalized) {
+            saw_waiting_footer = true;
+            meaningful_after_footer = false;
+            continue;
+        }
+
+        if saw_waiting_footer
+            && !is_grok_output_noise(trimmed, &normalized)
+            && !is_grok_prompt_chrome_line(trimmed, &normalized)
+        {
+            meaningful_after_footer = true;
+        }
+    }
+
+    saw_waiting_footer && !meaningful_after_footer
+}
+
+fn is_grok_active_waiting_footer_line(normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+    lower.contains("waiting…") || lower.contains("waiting...")
 }
 
 fn extract_latest_grok_completion_excerpt(output_tail: &str) -> Option<String> {
@@ -3460,6 +3501,22 @@ shift+tab to accept edits
  Shift+Tab:mode  │  Ctrl+.:shortcuts
 ";
 
+    const GROK_ACTIVE_WAITING_FOOTER: &str = "\
+   ⠹ Waiting… 7m1s                                                        45m8s ⇣239k [✗]
+ ╭──────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                    │
+ ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+ Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+Enter:interject  │  Ctrl+.:shortcuts
+";
+
+    const GROK_ACTIVE_WAITING_FOOTER_UPDATED: &str = "\
+   ⠴ Waiting… 7m6s                                                       45m13s ⇣239k [✗]
+ ╭──────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                    │
+ ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+ Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+Enter:interject  │  Ctrl+.:shortcuts
+";
+
     const GROK_COMPLETION_ONLY: &str = "Turn completed in 5m57s.";
 
     const GROK_COMPACT_COMMAND_PALETTE: &str = "\
@@ -3680,6 +3737,48 @@ Try out Grok Build
         assert_eq!(records[0].kind, AgentKind::Grok);
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
         assert_eq!(records[0].output_excerpt.as_deref(), Some("Turn completed in 3.4s."));
+    }
+
+    #[test]
+    fn tracker_marks_grok_active_waiting_footer_as_running() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot("%34", "grok-macos-aarc", false);
+        let output_tails =
+            HashMap::from([(pane.pane_id.clone(), GROK_ACTIVE_WAITING_FOOTER.to_string())]);
+
+        let records = tracker.refresh(std::slice::from_ref(&pane), &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Grok);
+        assert_eq!(records[0].status, SessionStatus::Running);
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("⠹ Waiting… 7m1s 45m8s ⇣239k [✗]"));
+    }
+
+    #[test]
+    fn tracker_keeps_grok_active_waiting_footer_running_when_timer_changes() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot("%35", "grok-macos-aarc", false);
+
+        let first = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), GROK_ACTIVE_WAITING_FOOTER.to_string())]),
+            now,
+        );
+        let second = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(
+                pane.pane_id.clone(),
+                GROK_ACTIVE_WAITING_FOOTER_UPDATED.to_string(),
+            )]),
+            now + Duration::from_secs(5),
+        );
+
+        assert_eq!(first[0].status, SessionStatus::Running);
+        assert_eq!(second[0].status, SessionStatus::Running);
+        assert_ne!(second[0].output_fingerprint, first[0].output_fingerprint);
+        assert_eq!(second[0].last_changed_at, first[0].last_changed_at);
     }
 
     #[test]
