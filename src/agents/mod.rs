@@ -55,6 +55,7 @@ impl AdapterRegistry {
                 Box::new(PiAdapter),
                 Box::new(GeminiAdapter),
                 Box::new(AuggieAdapter),
+                Box::new(GrokAdapter),
             ],
         }
     }
@@ -521,6 +522,50 @@ impl AgentAdapter for AuggieAdapter {
     }
 }
 
+struct GrokAdapter;
+
+impl AgentAdapter for GrokAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Grok
+    }
+
+    fn detect(&self, pane: &PaneSnapshot) -> bool {
+        command_matches(&pane.pane_current_command, "grok")
+            || (!is_shell_command(&pane.pane_current_command)
+                && pane_title_contains(&pane.pane_title, "grok"))
+    }
+
+    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
+        looks_like_grok_output(output_tail)
+    }
+
+    fn classify(
+        &self,
+        pane: &PaneSnapshot,
+        output_tail: Option<&str>,
+        output_fingerprint: Option<u64>,
+        previous: Option<&SessionRecord>,
+    ) -> SessionStatus {
+        classify_grok_session(self, pane, output_tail, output_fingerprint, previous)
+    }
+
+    fn extract_detail(
+        &self,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
+    ) -> Option<Arc<AgentDetail>> {
+        reuse_detail_arc(extract_grok_detail(output_tail), previous)
+    }
+
+    fn extract_output_excerpt(
+        &self,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
+    ) -> Option<Arc<str>> {
+        reuse_output_excerpt_arc(extract_grok_output_excerpt(output_tail), previous)
+    }
+}
+
 fn classify_supported_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -528,6 +573,71 @@ fn classify_supported_session(
     output_fingerprint: Option<u64>,
     previous: Option<&SessionRecord>,
 ) -> SessionStatus {
+    classify_supported_session_with_tail_classifier(
+        adapter,
+        pane,
+        output_tail,
+        output_fingerprint,
+        previous,
+        classify_output_tail,
+    )
+}
+
+fn classify_grok_session(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+) -> SessionStatus {
+    if pane.pane_dead {
+        return SessionStatus::Terminated;
+    }
+
+    if previous.is_some() && is_shell_command(&pane.pane_current_command) {
+        return SessionStatus::Finished;
+    }
+
+    if let Some(retained_status) = retained_status_without_output_tail(output_tail, previous) {
+        return retained_status;
+    }
+
+    let output_tail = output_tail.unwrap_or_default();
+
+    if let Some(status) = classify_grok_output_tail(output_tail) {
+        return status;
+    }
+
+    if output_has_recent_motion(output_fingerprint, previous) {
+        return SessionStatus::Running;
+    }
+
+    if let Some(status) = classify_output_tail(output_tail) {
+        return status;
+    }
+
+    if output_is_stable(output_fingerprint, previous) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if adapter.detect(pane) {
+        return SessionStatus::WaitingInput;
+    }
+
+    SessionStatus::Unknown
+}
+
+fn classify_supported_session_with_tail_classifier<F>(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+    classify_tail: F,
+) -> SessionStatus
+where
+    F: FnOnce(&str) -> Option<SessionStatus>,
+{
     if pane.pane_dead {
         return SessionStatus::Terminated;
     }
@@ -546,7 +656,7 @@ fn classify_supported_session(
         return SessionStatus::Running;
     }
 
-    if let Some(status) = classify_output_tail(output_tail) {
+    if let Some(status) = classify_tail(output_tail) {
         return status;
     }
 
@@ -795,6 +905,24 @@ fn extract_auggie_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
 }
 
+fn extract_grok_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = output_tail.lines().rev().find_map(|line| {
+        let normalized = normalize_output_line(line.trim());
+        let lower = normalized.to_ascii_lowercase();
+        if !(lower.starts_with("grok ") || lower.contains("i'm grok") || lower.contains("i’m grok"))
+        {
+            return None;
+        }
+        grok_model_pattern()
+            .captures(&normalized)
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    });
+    label.map(|label| AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
 fn extract_codex_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
     extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
@@ -937,6 +1065,15 @@ fn extract_auggie_output_excerpt(output_tail: Option<&str>) -> Option<String> {
             || raw.contains('▇')
             || raw.contains("$$")
             || auggie_footer_model_pattern().is_match(raw)
+    })
+}
+
+fn extract_grok_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    extract_latest_grok_completion_excerpt(output_tail).or_else(|| {
+        extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
+            is_grok_output_noise(raw, normalized) || is_grok_turn_completed_line(normalized)
+        })
     })
 }
 
@@ -1251,6 +1388,139 @@ fn looks_like_auggie_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         || lower.contains("message will be queued and run after current task")
 }
 
+fn looks_like_grok_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
+    let has_recent_prompt = recent_lines.iter().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("│ ❯") || trimmed == "❯" || trimmed.starts_with("❯ ")
+    });
+    let has_recent_grok_chrome =
+        recent_lines.iter().any(|line| line.to_ascii_lowercase().contains("grok build"));
+    let has_recent_footer_hint = recent_lines.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("shift+tab:mode") || lower.contains("ctrl+.:shortcuts")
+    });
+    let has_launch_chooser = recent_lines
+        .iter()
+        .any(|line| line.to_ascii_lowercase().contains("grok build beta"))
+        && recent_lines.iter().any(|line| line.to_ascii_lowercase().contains("try out grok build"));
+
+    has_launch_chooser
+        || has_recent_grok_chrome
+            && (has_recent_prompt || has_recent_footer_hint)
+            && latest_grok_prompt_chrome_has_no_newer_output(output_tail)
+}
+
+fn looks_like_grok_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("grok build")
+        || lower.contains("try out grok build")
+        || output_tail.lines().any(|line| grok_model_pattern().is_match(line.trim()))
+}
+
+fn classify_grok_output_tail(output_tail: &str) -> Option<SessionStatus> {
+    let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
+    (looks_like_grok_prompt(&recent_lines, output_tail)
+        || extract_latest_grok_completion_excerpt(output_tail).is_some())
+    .then_some(SessionStatus::WaitingInput)
+}
+
+fn extract_latest_grok_completion_excerpt(output_tail: &str) -> Option<String> {
+    let mut latest_completion: Option<String> = None;
+    let mut meaningful_after_completion = false;
+
+    for raw in output_tail.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_output_line(trimmed);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if is_grok_turn_completed_line(&normalized) {
+            latest_completion = Some(normalized);
+            meaningful_after_completion = false;
+            continue;
+        }
+
+        if latest_completion.is_some() && !is_grok_output_noise(trimmed, &normalized) {
+            meaningful_after_completion = true;
+        }
+    }
+
+    if meaningful_after_completion {
+        return None;
+    }
+
+    latest_completion.map(|completion| clamp_excerpt_tail(&completion, OUTPUT_EXCERPT_MAX_CHARS))
+}
+
+fn is_grok_output_noise(raw: &str, normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+    is_common_output_noise(raw, normalized)
+        || normalized.starts_with('❯')
+        || lower.contains("shift+tab:mode")
+        || lower.contains("ctrl+.:shortcuts")
+        || lower.contains("enter:send")
+        || raw
+            .trim()
+            .chars()
+            .all(|c| is_box_chrome_char(c) || c.is_ascii_digit() || c.is_whitespace())
+        || raw.trim_start().starts_with('╭')
+        || raw.trim_start().starts_with('╰')
+        || raw.contains("│ ❯")
+        || lower.contains("grok build")
+        || lower.contains("try out grok build")
+}
+
+fn is_grok_turn_completed_line(normalized: &str) -> bool {
+    normalized.to_ascii_lowercase().starts_with("turn completed in ")
+}
+
+fn latest_grok_prompt_chrome_has_no_newer_output(output_tail: &str) -> bool {
+    let mut saw_prompt_chrome = false;
+    let mut meaningful_after_prompt = false;
+
+    for raw in output_tail.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_output_line(trimmed);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if is_grok_prompt_chrome_line(trimmed, &normalized) {
+            saw_prompt_chrome = true;
+            meaningful_after_prompt = false;
+            continue;
+        }
+
+        if saw_prompt_chrome
+            && !is_grok_output_noise(trimmed, &normalized)
+            && !is_grok_turn_completed_line(&normalized)
+        {
+            meaningful_after_prompt = true;
+        }
+    }
+
+    saw_prompt_chrome && !meaningful_after_prompt
+}
+
+fn is_grok_prompt_chrome_line(raw: &str, normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+    raw.contains("│ ❯")
+        || normalized.starts_with('❯')
+        || lower.contains("grok build")
+        || lower.contains("shift+tab:mode")
+        || lower.contains("ctrl+.:shortcuts")
+        || lower.contains("enter:send")
+}
+
 fn lower_is_auggie_footer(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower.contains("[insert]") && lower.contains('?') && lower.contains('[') && lower.contains(']')
@@ -1288,7 +1558,7 @@ fn waiting_pattern() -> &'static Regex {
     static WAITING: OnceLock<Regex> = OnceLock::new();
     WAITING.get_or_init(|| {
         Regex::new(
-            r"(?i)(waiting for input|press enter|continue\?|confirm|approve|y/n|select an option)",
+            r"(?i)(waiting for input|press enter|continue\?|confirm|(?:^|[^[:alnum:]-])approve(?:$|[^[:alnum:]-])|y/n|select an option)",
         )
         .expect("waiting regex should compile")
     })
@@ -1422,6 +1692,14 @@ fn auggie_selected_model_pattern() -> &'static Regex {
     })
 }
 
+fn grok_model_pattern() -> &'static Regex {
+    static GROK_MODEL: OnceLock<Regex> = OnceLock::new();
+    GROK_MODEL.get_or_init(|| {
+        Regex::new(r"(?i)\b(?P<model>grok\s+[0-9]+(?:\.[0-9]+)*)\b")
+            .expect("grok model regex should compile")
+    })
+}
+
 fn extract_claude_model_label(output_tail: &str) -> Option<String> {
     if let Some(label) = output_tail.lines().rev().find_map(|line| {
         claude_model_set_pattern()
@@ -1545,12 +1823,13 @@ fn normalize_detail_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_output_tail, extract_amp_detail, extract_amp_output_excerpt,
-        extract_auggie_detail, extract_auggie_output_excerpt, extract_claude_detail,
-        extract_claude_output_excerpt, extract_codex_detail, extract_codex_output_excerpt,
-        extract_gemini_detail, extract_gemini_output_excerpt, extract_opencode_detail,
+        classify_grok_output_tail, classify_output_tail, extract_amp_detail,
+        extract_amp_output_excerpt, extract_auggie_detail, extract_auggie_output_excerpt,
+        extract_claude_detail, extract_claude_output_excerpt, extract_codex_detail,
+        extract_codex_output_excerpt, extract_gemini_detail, extract_gemini_output_excerpt,
+        extract_grok_detail, extract_grok_output_excerpt, extract_opencode_detail,
         extract_opencode_output_excerpt, extract_pi_detail, extract_pi_output_excerpt,
-        AdapterRegistry, SessionTracker,
+        AdapterRegistry, AgentAdapter, SessionTracker,
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
@@ -2866,5 +3145,331 @@ shift+tab to accept edits
             if pane_dead { 1 } else { 0 }
         ))
         .expect("pane snapshot should parse")
+    }
+
+    // Fixtures based on live Grok panes, trimmed to the parser-relevant lines.
+    const GROK_WAITING_NARROW: &str = "\
+     ❯ hello 12:19 PM
+
+     ◆ Thought for 3.6s
+     ◆ List .
+     ◆ Thought for 0.5s
+     ◆ Read README.md
+     ◆ Thought for 0.6s
+
+     Hello! 👋 12:19 PM
+
+     Welcome to the workspace. Clean main branch, Rust
+     project.
+
+     What would you like to work on?
+
+     Turn completed in 22s.
+
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────────────────────────────────────── Grok Build ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+    const GROK_WAITING_WIDE: &str = "\
+     ❯ hello 12:16 PM
+
+     Hi! I'm Grok 4.3. 12:16 PM
+     █
+     Welcome to the workspace. What can I help you with? █
+     Turn completed in 10s. █
+
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+    const GROK_COMPACT_WAITING: &str = "\
+➜  ilmari
+  main ~/PROJECTS/ilmari │ 23K / 512K │
+    Please reply with exactly: compact fixture ready 1:40 PM
+
+    ◆ Thought for 0.7s
+
+    compact fixture ready 1:40 PM
+
+    Turn completed in 3.4s.
+
+ ╭──────────────────────────────────────────────────────────────────────╮
+ │ ❯                                                                    │
+ ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+ Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+    const GROK_COMPLETION_ONLY: &str = "Turn completed in 5m57s.";
+
+    const GROK_COMPACT_COMMAND_PALETTE: &str = "\
+────────────────────────────────────────────────────────────────────────1─
+   ❯ /compact-mode Toggle compact UI (less padding, more content)
+──────────────────────────────────────────────────────────────────────────
+╭────────────────────────────────────────────────────────────────────────╮
+│ ❯ /compact-mode                                                        │
+╰────────────────────────────────────────── Grok Build · always-approve ─╯
+Enter:send  │  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+    const GROK_BUSY_SAMPLE: &str = "\
+     ◆ Tmux Capture-pane
+     ◆ Thought for 0.5s
+     ⏳
+     ⠦ - Thinking - ... - grok
+     • Ran git ...
+     ⚠ Automatic approval review ok
+     ◆ Thought for 27.3s
+     ⠼ - Thinking...
+";
+
+    const GROK_CHOOSER_SAMPLE: &str = "\
+Grok Build Beta
+
+New worktree
+... ascii art ...
+Try out Grok Build
+";
+
+    #[test]
+    fn classify_grok_output_tail_detects_waiting_from_fixtures() {
+        assert_eq!(classify_output_tail(GROK_WAITING_NARROW), None);
+        assert_eq!(classify_output_tail(GROK_WAITING_WIDE), None);
+        assert_eq!(classify_output_tail(GROK_COMPACT_WAITING), None);
+        assert_eq!(classify_output_tail(GROK_COMPACT_COMMAND_PALETTE), None);
+        assert_eq!(classify_output_tail(GROK_COMPLETION_ONLY), None);
+        assert_eq!(
+            classify_grok_output_tail(GROK_WAITING_NARROW),
+            Some(SessionStatus::WaitingInput)
+        );
+        assert_eq!(classify_grok_output_tail(GROK_WAITING_WIDE), Some(SessionStatus::WaitingInput));
+        assert_eq!(
+            classify_grok_output_tail(GROK_COMPACT_WAITING),
+            Some(SessionStatus::WaitingInput)
+        );
+        assert_eq!(
+            classify_grok_output_tail(GROK_COMPACT_COMMAND_PALETTE),
+            Some(SessionStatus::WaitingInput)
+        );
+        assert_eq!(
+            classify_grok_output_tail(GROK_COMPLETION_ONLY),
+            Some(SessionStatus::WaitingInput)
+        );
+        // busy sample (no turn/prompt trigger) does not classify as waiting from tail alone
+        assert_eq!(classify_grok_output_tail(GROK_BUSY_SAMPLE), None);
+        // chooser screen also triggers waiting via "grok build" in looks_like (sensible for launch chooser)
+        assert_eq!(classify_output_tail(GROK_CHOOSER_SAMPLE), None);
+        assert_eq!(
+            classify_grok_output_tail(GROK_CHOOSER_SAMPLE),
+            Some(SessionStatus::WaitingInput)
+        );
+
+        // detail extraction (WIDE has version; NARROW yields None per "Grok Build" not version)
+        assert_eq!(
+            extract_grok_detail(Some(GROK_WAITING_WIDE)),
+            Some(AgentDetail { label: "Grok 4.3".to_string(), tone: AgentDetailTone::Neutral })
+        );
+        assert_eq!(extract_grok_detail(Some(GROK_WAITING_NARROW)), None);
+        assert_eq!(extract_grok_detail(Some("I asked Grok 4.3. about the project.")), None);
+    }
+
+    #[test]
+    fn grok_prompt_and_completion_do_not_override_newer_output() {
+        let output_tail = "\
+     Turn completed in 5m57s.
+
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+     Streaming another tool call after the old prompt.
+";
+
+        assert_eq!(classify_output_tail(output_tail), None);
+        assert_eq!(classify_grok_output_tail(output_tail), None);
+        assert_eq!(
+            extract_grok_output_excerpt(Some(output_tail)),
+            Some("Streaming another tool call after the old prompt.".to_string())
+        );
+    }
+
+    #[test]
+    fn grok_output_excerpt_prefers_latest_turn_completion_status() {
+        assert_eq!(
+            extract_grok_output_excerpt(Some(GROK_WAITING_NARROW)),
+            Some("Turn completed in 22s.".to_string())
+        );
+        assert_eq!(
+            extract_grok_output_excerpt(Some(GROK_WAITING_WIDE)),
+            Some("Turn completed in 10s.".to_string())
+        );
+        assert_eq!(
+            extract_grok_output_excerpt(Some(GROK_COMPACT_WAITING)),
+            Some("Turn completed in 3.4s.".to_string())
+        );
+        assert_eq!(
+            extract_grok_output_excerpt(Some(GROK_COMPLETION_ONLY)),
+            Some("Turn completed in 5m57s.".to_string())
+        );
+        assert_eq!(extract_grok_output_excerpt(Some(GROK_COMPACT_COMMAND_PALETTE)), None);
+
+        let current_pane_tail = "\
+     Final answer text.
+
+     Turn completed in 5m57s.
+
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+        assert_eq!(
+            extract_grok_output_excerpt(Some(current_pane_tail)),
+            Some("Turn completed in 5m57s.".to_string())
+        );
+    }
+
+    #[test]
+    fn grok_adapter_detects_from_command_and_title() {
+        let registry = AdapterRegistry::v1();
+        let grok_cmd = snapshot("%19", "grok-macos-aarc", false);
+        let grok_title = snapshot_with_title("%19", "node", false, "grok-easy-2nd-pane");
+        let stale_shell_title = snapshot_with_title("%19", "zsh", false, "grok-easy-2nd-pane");
+        let grok_title_build = snapshot_with_title(
+            "%20",
+            "grok-macos-aarc",
+            false,
+            "Starting New User Session with Hello Mes… - grok",
+        );
+
+        assert_eq!(registry.detect_kind(&grok_cmd, None), Some(AgentKind::Grok));
+        assert_eq!(registry.detect_kind(&grok_title, None), Some(AgentKind::Grok));
+        assert_eq!(registry.detect_kind(&grok_title_build, None), Some(AgentKind::Grok));
+        assert_eq!(registry.detect_kind(&stale_shell_title, None), None);
+    }
+
+    #[test]
+    fn grok_tail_classifier_stays_scoped_to_grok_adapter() {
+        let pane = snapshot("%21", "node", false);
+
+        assert_eq!(
+            super::CodexAdapter.classify(&pane, Some(GROK_WAITING_NARROW), None, None),
+            SessionStatus::Unknown
+        );
+        assert_eq!(
+            super::GrokAdapter.classify(&pane, Some(GROK_WAITING_NARROW), None, None),
+            SessionStatus::WaitingInput
+        );
+    }
+
+    #[test]
+    fn tracker_full_grok_from_listpanes_format_and_output_tail() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        // exact tab-separated format from tmux list-panes -F as used by ilmari and captured live
+        let pane19 = PaneSnapshot::parse(
+            "%19\t27874\t$4\t4\t@8\tzsh\t0\t/Users/bnomei/PROJECTS/ilmari\tgrok-macos-aarc\tgrok-easy-2nd-pane"
+        ).expect("parse pane19");
+        let pane20 = PaneSnapshot::parse(
+            "%20\t54502\t$4\t4\t@11\teasymode-test\t0\t/Users/bnomei/PROJECTS/ilmari\tgrok-macos-aarc\tStarting New User Session with Hello Mes… - grok"
+        ).expect("parse pane20");
+        let output_tails = HashMap::from([
+            (pane19.pane_id.clone(), GROK_WAITING_NARROW.to_string()),
+            (pane20.pane_id.clone(), GROK_WAITING_WIDE.to_string()),
+        ]);
+
+        let records = tracker.refresh(&[pane19.clone(), pane20.clone()], &output_tails, now);
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind.display_name(), "Grok");
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("Turn completed in 22s."));
+
+        assert_eq!(records[1].kind.display_name(), "Grok");
+        assert_eq!(records[1].status, SessionStatus::WaitingInput);
+        assert_eq!(records[1].output_excerpt.as_deref(), Some("Turn completed in 10s."));
+
+        // grok detail retention across refreshes with stable tail (exercises reuse_detail_arc for GrokAdapter)
+        let now2 = now + Duration::from_secs(1);
+        let records2 = tracker.refresh(&[pane19, pane20], &output_tails, now2);
+        let wide2 = records2
+            .iter()
+            .find(|r| r.kind == AgentKind::Grok && r.pane.pane_id == "%20")
+            .expect("found grok wide on second refresh");
+        assert!(wide2.detail.is_some());
+        assert_eq!(wide2.detail.as_ref().unwrap().label, "Grok 4.3");
+    }
+
+    #[test]
+    fn tracker_full_grok_from_compact_output_tail() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = PaneSnapshot::parse(
+            "%31\t27874\t$6\t6\t@17\tzsh\t0\t/Users/bnomei/PROJECTS/ilmari\tgrok-macos-aarc\tCompact Grok",
+        )
+        .expect("parse compact grok pane");
+        let output_tails =
+            HashMap::from([(pane.pane_id.clone(), GROK_COMPACT_WAITING.to_string())]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Grok);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("Turn completed in 3.4s."));
+    }
+
+    #[test]
+    fn tracker_marks_grok_finished_when_shell_return_keeps_grok_title() {
+        let mut tracker = SessionTracker::with_retention(Duration::from_secs(30));
+        let now = Instant::now();
+        let running_pane = snapshot_with_title("%32", "grok-macos-aarc", false, "Compact Grok");
+
+        tracker.refresh(&[running_pane], &HashMap::new(), now);
+
+        let shell_pane = snapshot_with_title("%32", "zsh", false, "Compact Grok");
+        let records = tracker.refresh(
+            std::slice::from_ref(&shell_pane),
+            &HashMap::new(),
+            now + Duration::from_secs(5),
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Grok);
+        assert_eq!(records[0].status, SessionStatus::Finished);
+        assert_eq!(records[0].pane.pane_id, shell_pane.pane_id);
+        assert!(records[0].retained_until.is_some());
+    }
+
+    #[test]
+    fn tracker_marks_grok_waiting_when_completion_arrives_after_busy_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot("%33", "grok-macos-aarc", false);
+        let waiting = HashMap::from([(pane.pane_id.clone(), GROK_WAITING_NARROW.to_string())]);
+        let busy = HashMap::from([(pane.pane_id.clone(), GROK_BUSY_SAMPLE.to_string())]);
+        let completed = HashMap::from([(pane.pane_id.clone(), GROK_COMPLETION_ONLY.to_string())]);
+
+        let first = tracker.refresh(std::slice::from_ref(&pane), &waiting, now);
+        assert_eq!(first[0].status, SessionStatus::WaitingInput);
+
+        let second =
+            tracker.refresh(std::slice::from_ref(&pane), &busy, now + Duration::from_secs(5));
+        assert_eq!(second[0].status, SessionStatus::Running);
+        assert_ne!(second[0].output_fingerprint, first[0].output_fingerprint);
+
+        let third =
+            tracker.refresh(std::slice::from_ref(&pane), &completed, now + Duration::from_secs(10));
+        assert_eq!(third[0].status, SessionStatus::WaitingInput);
+        assert_eq!(third[0].output_excerpt.as_deref(), Some("Turn completed in 5m57s."));
+        assert_ne!(third[0].output_fingerprint, second[0].output_fingerprint);
     }
 }

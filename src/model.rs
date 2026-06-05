@@ -13,11 +13,12 @@ pub enum AgentKind {
     Pi,
     GeminiCli,
     Auggie,
+    Grok,
 }
 
 impl AgentKind {
     #[cfg(test)]
-    pub const SUPPORTED_KINDS: [Self; 7] = [
+    pub const SUPPORTED_KINDS: [Self; 8] = [
         Self::Codex,
         Self::Amp,
         Self::ClaudeCode,
@@ -25,6 +26,7 @@ impl AgentKind {
         Self::Pi,
         Self::GeminiCli,
         Self::Auggie,
+        Self::Grok,
     ];
 
     pub fn display_name(self) -> &'static str {
@@ -36,6 +38,7 @@ impl AgentKind {
             Self::Pi => "Pi",
             Self::GeminiCli => "Gemini CLI",
             Self::Auggie => "Auggie",
+            Self::Grok => "Grok",
         }
     }
 }
@@ -221,6 +224,7 @@ mod tests {
         assert_eq!(AgentKind::Pi.display_name(), "Pi");
         assert_eq!(AgentKind::GeminiCli.display_name(), "Gemini CLI");
         assert_eq!(AgentKind::Auggie.display_name(), "Auggie");
+        assert_eq!(AgentKind::Grok.display_name(), "Grok");
         assert_eq!(
             AgentKind::SUPPORTED_KINDS,
             [
@@ -231,6 +235,7 @@ mod tests {
                 AgentKind::Pi,
                 AgentKind::GeminiCli,
                 AgentKind::Auggie,
+                AgentKind::Grok,
             ]
         );
     }

@@ -143,6 +143,7 @@ impl ProcessTree {
             AgentKind::Pi => command_equals_any(&process.command, &["pi", "pi-agent"]),
             AgentKind::GeminiCli => command_matches(&process.command, "gemini"),
             AgentKind::Auggie => command_matches(&process.command, "auggie"),
+            AgentKind::Grok => command_matches(&process.command, "grok"),
         }
     }
 
@@ -414,6 +415,22 @@ mod tests {
 
         assert_eq!(gemini.agent, ResourceUsage { cpu_tenths_percent: 220, memory_kib: 64 * 1024 });
         assert_eq!(auggie.agent, ResourceUsage { cpu_tenths_percent: 180, memory_kib: 48 * 1024 });
+    }
+
+    #[test]
+    fn process_tree_resolves_grok_variant_commands() {
+        let tree = ProcessTree::from_snapshots(vec![
+            snapshot(100, 55, 1, 1024, "zsh"),
+            snapshot(101, 100, 275, 72 * 1024, "grok-macos-aarc"),
+            snapshot(102, 101, 9, 4 * 1024, "helper"),
+        ]);
+
+        let usage = tree
+            .usage_for_session(&session_record(100, AgentKind::Grok))
+            .expect("grok should resolve");
+
+        assert_eq!(usage.agent, ResourceUsage { cpu_tenths_percent: 275, memory_kib: 72 * 1024 });
+        assert_eq!(usage.spawned, ResourceUsage { cpu_tenths_percent: 9, memory_kib: 4 * 1024 });
     }
 
     #[test]
