@@ -136,9 +136,7 @@ impl ProcessTree {
         match kind {
             AgentKind::Codex => command_matches(&process.command, "codex"),
             AgentKind::Amp => command_matches(&process.command, "amp"),
-            AgentKind::ClaudeCode => {
-                command_equals_any(&process.command, &["claude", "claude-code"])
-            }
+            AgentKind::ClaudeCode => command_matches(&process.command, "claude"),
             AgentKind::OpenCode => command_matches(&process.command, "opencode"),
             AgentKind::Pi => command_equals_any(&process.command, &["pi", "pi-agent"]),
             AgentKind::GeminiCli => command_matches(&process.command, "gemini"),
@@ -282,6 +280,7 @@ fn command_tokens(command: &str) -> impl Iterator<Item = String> + '_ {
                 .rsplit('/')
                 .find(|segment| !segment.is_empty())
                 .unwrap_or(token)
+                .trim_start_matches('.')
                 .to_ascii_lowercase()
         })
 }

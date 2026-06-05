@@ -325,8 +325,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_equals_any(&pane.pane_current_command, &["claude", "claude-code"])
-            || pane_title_contains(&pane.pane_title, "claude code")
+        command_matches(&pane.pane_current_command, "claude")
+            || (!is_shell_command(&pane.pane_current_command)
+                && is_claude_branded_title(&pane.pane_title))
+    }
+
+    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
+        looks_like_claude_output(output_tail)
     }
 
     fn classify(
@@ -772,7 +777,48 @@ fn pane_title_contains(title: &str, needle: &str) -> bool {
 }
 
 fn normalized_command_name(command: &str) -> String {
-    command.trim().rsplit('/').next().unwrap_or_default().to_ascii_lowercase()
+    command
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_claude_branded_title(title: &str) -> bool {
+    if pane_title_contains(title, "claude code") {
+        return true;
+    }
+    let t = title.trim_start();
+    if t.is_empty() {
+        return false;
+    }
+    is_claude_spinner_glyph(t.chars().next().unwrap())
+}
+
+fn is_claude_spinner_glyph(c: char) -> bool {
+    matches!(
+        c,
+        '✳' | '⠋'
+            | '⠙'
+            | '⠹'
+            | '⠸'
+            | '⠼'
+            | '⠴'
+            | '⠦'
+            | '⠧'
+            | '⠇'
+            | '⠏'
+            | '⠐'
+            | '⠈'
+            | '⠁'
+            | '⠄'
+            | '⠠'
+            | '⠂'
+            | '⡀'
+            | '⢀'
+    )
 }
 
 fn looks_like_gemini_output(output_tail: &str) -> bool {
@@ -1335,6 +1381,11 @@ fn looks_like_claude_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
             })
 }
 
+fn looks_like_claude_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("claude code") || lower.contains("welcome to claude")
+}
+
 fn looks_like_opencode_home_screen(recent_lines: &[&str], output_tail: &str) -> bool {
     let lower = output_tail.to_ascii_lowercase();
     let has_footer_hints = recent_lines.iter().any(|line| {
@@ -1859,6 +1910,12 @@ mod tests {
         assert_eq!(registry.detect_kind(&claude, None), Some(AgentKind::ClaudeCode));
         assert_eq!(registry.detect_kind(&claude_title, None), Some(AgentKind::ClaudeCode));
         assert_eq!(registry.detect_kind(&claude_code, None), Some(AgentKind::ClaudeCode));
+        // wrapped binary (e.g. nix .claude-unwrapped) and rewritten task title (glyph survives)
+        let claude_wrapped = snapshot("%24", ".claude-unwrapped", false);
+        let claude_task_title =
+            snapshot_with_title("%25", "node", false, "✳ Plan and start MIR-1094 using Linear MCP");
+        assert_eq!(registry.detect_kind(&claude_wrapped, None), Some(AgentKind::ClaudeCode));
+        assert_eq!(registry.detect_kind(&claude_task_title, None), Some(AgentKind::ClaudeCode));
         assert_eq!(registry.detect_kind(&opencode, None), Some(AgentKind::OpenCode));
         assert_eq!(registry.detect_kind(&opencode_title, None), Some(AgentKind::OpenCode));
         assert_eq!(registry.detect_kind(&pi, None), Some(AgentKind::Pi));
