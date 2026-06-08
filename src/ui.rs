@@ -550,8 +550,9 @@ fn status_role(status: SessionStatus) -> SemanticRole {
 fn detail_role(tone: AgentDetailTone) -> SemanticRole {
     match tone {
         AgentDetailTone::Neutral => SemanticRole::AgentDetailNeutral,
-        AgentDetailTone::Positive => SemanticRole::AgentDetailPositive,
-        AgentDetailTone::Warning => SemanticRole::AgentDetailWarning,
+        AgentDetailTone::AmpDeep => SemanticRole::AgentDetailAmpDeep,
+        AgentDetailTone::AmpSmart => SemanticRole::AgentDetailAmpSmart,
+        AgentDetailTone::AmpRush => SemanticRole::AgentDetailAmpRush,
     }
 }
 
@@ -845,7 +846,7 @@ mod tests {
             ),
             client_label: "Amp",
             detail: Some(
-                AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::Positive }.into(),
+                AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::AmpSmart }.into(),
             ),
             process_usage: None,
             subtasks_expanded: false,
@@ -860,7 +861,7 @@ mod tests {
         let detail_span =
             line.spans.iter().find(|span| span.content.as_ref() == "smart").expect("detail span");
 
-        assert_eq!(detail_span.style.fg, Some(Color::Indexed(2)));
+        assert_eq!(detail_span.style.fg, Some(Color::Indexed(10)));
     }
 
     #[test]
@@ -871,7 +872,7 @@ mod tests {
             output_excerpt: Some("Final visible output excerpt".to_string().into()),
             client_label: "Amp",
             detail: Some(
-                AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::Positive }.into(),
+                AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::AmpSmart }.into(),
             ),
             process_usage: Some(
                 SessionProcessUsage {

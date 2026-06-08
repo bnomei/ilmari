@@ -119,8 +119,9 @@ pub struct SessionProcessUsage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentDetailTone {
     Neutral,
-    Positive,
-    Warning,
+    AmpDeep,
+    AmpSmart,
+    AmpRush,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

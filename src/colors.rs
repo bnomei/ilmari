@@ -15,8 +15,9 @@ pub enum SemanticRole {
     StatusUnknown,
     AppLabel,
     AgentDetailNeutral,
-    AgentDetailPositive,
-    AgentDetailWarning,
+    AgentDetailAmpDeep,
+    AgentDetailAmpSmart,
+    AgentDetailAmpRush,
     GitInsertions,
     GitDeletions,
     HeadingAccent,
@@ -59,8 +60,9 @@ impl Palette {
             SemanticRole::StatusUnknown => self.ansi_color(8),
             SemanticRole::AppLabel => self.ansi_color(14),
             SemanticRole::AgentDetailNeutral => self.ansi_color(8),
-            SemanticRole::AgentDetailPositive => self.ansi_color(2),
-            SemanticRole::AgentDetailWarning => self.ansi_color(3),
+            SemanticRole::AgentDetailAmpDeep => self.ansi_color(6),
+            SemanticRole::AgentDetailAmpSmart => self.ansi_color(10),
+            SemanticRole::AgentDetailAmpRush => self.ansi_color(3),
             SemanticRole::GitInsertions => self.ansi_color(2),
             SemanticRole::GitDeletions => self.ansi_color(1),
             SemanticRole::HeadingAccent => self.ansi_color(12),
@@ -168,9 +170,14 @@ mod tests {
         assert_eq!(palette.base_style().bg, Some(Color::Reset));
         assert_eq!(palette.style_for(SemanticRole::StatusRunning).fg, Some(Color::Indexed(4)));
         assert_eq!(
-            palette.style_for(SemanticRole::AgentDetailPositive).fg,
-            Some(Color::Indexed(2))
+            palette.style_for(SemanticRole::AgentDetailAmpDeep).fg,
+            Some(Color::Indexed(6))
         );
+        assert_eq!(
+            palette.style_for(SemanticRole::AgentDetailAmpSmart).fg,
+            Some(Color::Indexed(10))
+        );
+        assert_eq!(palette.style_for(SemanticRole::AgentDetailAmpRush).fg, Some(Color::Indexed(3)));
         assert_eq!(palette.style_for(SemanticRole::AppLabel).fg, Some(Color::Indexed(14)));
         assert_eq!(palette.style_for(SemanticRole::HeadingAccent).fg, Some(Color::Indexed(12)));
     }

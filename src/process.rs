@@ -609,7 +609,7 @@ mod tests {
 
         SessionRecord {
             pane: PaneSnapshot::parse(&format!(
-                "%7\t{pane_pid}\t$1\tdev\t@7\tagents\t0\t/Users/bnomei/Sites/ilmari\tzsh\ttitle"
+                "%7\t{pane_pid}\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tzsh\ttitle"
             ))
             .expect("pane snapshot should parse"),
             kind,

@@ -1420,7 +1420,7 @@ mod tests {
         let sessions = vec![
             SessionRecord {
                 pane: PaneSnapshot::parse(
-                    "%3\t101\t$1\tdev\t@7\tagents\t0\t/Users/bnomei/Sites/ilmari\tcodex\ttitle",
+                    "%3\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
                 )
                 .expect("pane snapshot should parse"),
                 kind: crate::model::AgentKind::Codex,
@@ -1453,13 +1453,13 @@ mod tests {
             },
             SessionRecord {
                 pane: PaneSnapshot::parse(
-                    "%4\t102\t$1\tdev\t@7\tagents\t0\t/Users/bnomei/Sites/ilmari\tamp\ttitle",
+                    "%4\t102\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tamp\ttitle",
                 )
                 .expect("pane snapshot should parse"),
                 kind: crate::model::AgentKind::Amp,
                 status: SessionStatus::WaitingInput,
                 detail: Some(
-                    AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::Positive }
+                    AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::AmpSmart }
                         .into(),
                 ),
                 output_excerpt: Some(
@@ -1531,7 +1531,7 @@ mod tests {
         assert_eq!(
             model.workspace_groups[0].rows[1].detail,
             Some(
-                AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::Positive }.into(),
+                AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::AmpSmart }.into(),
             )
         );
         assert_eq!(
@@ -1626,7 +1626,7 @@ mod tests {
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![SessionRecord {
             pane: PaneSnapshot::parse(
-                "%12\t101\t$1\tdev\t@7\tagents\t0\t/Users/bnomei/Sites/ilmari\tcodex\ttitle",
+                "%12\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
             )
             .expect("pane snapshot should parse"),
             kind: crate::model::AgentKind::Codex,
@@ -2146,7 +2146,7 @@ mod tests {
     }
 
     fn session(pane_id: &str, status: SessionStatus) -> SessionRecord {
-        session_with_path(pane_id, status, "/Users/bnomei/Sites/ilmari")
+        session_with_path(pane_id, status, "/workspace/ilmari")
     }
 
     fn session_with_change(

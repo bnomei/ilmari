@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn jump_command_targets_stable_tmux_ids() {
         let target = PaneSnapshot::parse(
-            "%12\t301\t$5\tclient\t@8\tagents\t0\t/Users/bnomei/Sites/ilmari\tcodex\tworker",
+            "%12\t301\t$5\tclient\t@8\tagents\t0\t/workspace/ilmari\tcodex\tworker",
         )
         .expect("pane snapshot should parse");
 
@@ -325,16 +325,15 @@ mod tests {
 
     #[test]
     fn pane_snapshot_parser_accepts_blank_optional_fields() {
-        let snapshot =
-            PaneSnapshot::parse("%12\t\t$1\tdev\t@3\teditor\t0\t/Users/bnomei/Sites/ilmari\t\t")
-                .expect("snapshot should parse");
+        let snapshot = PaneSnapshot::parse("%12\t\t$1\tdev\t@3\teditor\t0\t/workspace/ilmari\t\t")
+            .expect("snapshot should parse");
 
         assert_eq!(snapshot.pane_id, "%12");
         assert_eq!(snapshot.pane_pid, None);
         assert_eq!(snapshot.session_id, "$1");
         assert_eq!(snapshot.window_id, "@3");
         assert!(!snapshot.pane_dead);
-        assert_eq!(snapshot.pane_current_path, PathBuf::from("/Users/bnomei/Sites/ilmari"));
+        assert_eq!(snapshot.pane_current_path, PathBuf::from("/workspace/ilmari"));
         assert_eq!(snapshot.pane_current_command, "");
         assert_eq!(snapshot.pane_title, "");
     }
@@ -342,7 +341,7 @@ mod tests {
     #[test]
     fn pane_snapshot_parser_rejects_bad_dead_flag() {
         let error = PaneSnapshot::parse(
-            "%12\t123\t$1\tdev\t@3\teditor\tnope\t/Users/bnomei/Sites/ilmari\tcodex\ttitle",
+            "%12\t123\t$1\tdev\t@3\teditor\tnope\t/workspace/ilmari\tcodex\ttitle",
         )
         .expect_err("invalid pane_dead flag should fail");
 

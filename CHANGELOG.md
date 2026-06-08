@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.2.5 - 2026-06-08
+
+### Changed
+
+- Continued the June 8 release push with updated agent CLI detection fixtures and release-readiness validation.
+- Prefer Grok reply text over `Turn completed in ...` status lines when an idle turn still has visible response content.
+
+### Fixed
+
+- Detect updated Codex status bars when model labels starting with `gpt-` are surrounded by optional usage, context, or quota fields.
+- Detect updated Amp, Auggie, Gemini, and Grok model/mode displays, including Amp `deep²`, `smart`, and `↯` mode modifiers, Gemini table footers, and Grok `Composer 2.5` footers.
+- Render Amp mode colors to match Amp itself: `deep²` bluish, `smart` green, and `rush` yellow.
+- Keep Amp compact prompt chrome, Gemini footer tables, and Grok completion chrome out of output excerpts when they are not the latest meaningful response.
+- Replace local setup paths and personal fixture labels with neutral workspace fixtures.
+
 ## 0.2.4 - 2026-06-08
 
 ### Fixed

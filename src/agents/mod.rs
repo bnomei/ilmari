@@ -888,7 +888,7 @@ fn looks_like_gemini_output(output_tail: &str) -> bool {
     let lower = output_tail.to_ascii_lowercase();
     lower.contains("gemini cli v")
         || lower.contains("gemini code assist")
-        || output_tail.lines().any(|line| gemini_footer_model_pattern().is_match(line.trim()))
+        || extract_gemini_footer_model(output_tail).is_some()
 }
 
 fn looks_like_auggie_output(output_tail: &str) -> bool {
@@ -916,10 +916,8 @@ fn extract_codex_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
         .filter(|label| !label.is_empty())
         .or_else(|| {
             output_tail.lines().rev().find_map(|line| {
-                codex_footer_model_pattern()
-                    .captures(line.trim())
-                    .and_then(|captures| captures.name("model"))
-                    .map(|matched| normalize_detail_label(matched.as_str()))
+                extract_codex_status_model(line.trim())
+                    .map(|label| normalize_detail_label(&label))
                     .filter(|label| !label.is_empty())
             })
         })?;
@@ -927,29 +925,59 @@ fn extract_codex_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
 }
 
+fn extract_codex_status_model(line: &str) -> Option<String> {
+    if !line.contains("gpt-") || !(line.contains('·') || line.contains("/model to change")) {
+        return None;
+    }
+
+    codex_status_model_pattern()
+        .captures(line)
+        .and_then(|captures| captures.name("model"))
+        .map(|matched| matched.as_str().trim().to_string())
+}
+
 fn extract_amp_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     let output_tail = output_tail?;
     let label = output_tail.lines().rev().find_map(|line| {
         let trimmed = line.trim();
         let lower = trimmed.to_ascii_lowercase();
-        let captures = if lower.contains("skills") {
-            amp_mode_pattern().captures(trimmed)
+        if lower.contains("skills") {
+            amp_mode_pattern()
+                .captures(trimmed)
+                .and_then(|captures| captures.name("mode"))
+                .map(|matched| normalize_amp_mode_label(matched.as_str(), false))
         } else {
-            amp_compact_mode_pattern().captures(trimmed)
-        };
-
-        captures
-            .and_then(|captures| captures.name("mode"))
-            .map(|matched| matched.as_str().to_ascii_lowercase())
+            amp_compact_mode_pattern().captures(trimmed).and_then(|captures| {
+                let has_bolt = captures.name("bolt").is_some();
+                let mode = captures.name("mode")?;
+                let label = normalize_amp_mode_label(mode.as_str(), has_bolt);
+                (has_bolt || label != "rush").then_some(label)
+            })
+        }
     })?;
 
-    let tone = match label.as_str() {
-        "smart" => AgentDetailTone::Positive,
-        "rush" => AgentDetailTone::Warning,
+    let mode = label.strip_prefix('↯').unwrap_or(&label);
+    let tone = match mode {
+        "deep" | "deep²" => AgentDetailTone::AmpDeep,
+        "smart" => AgentDetailTone::AmpSmart,
+        "rush" => AgentDetailTone::AmpRush,
         _ => AgentDetailTone::Neutral,
     };
 
     Some(AgentDetail { label, tone })
+}
+
+fn normalize_amp_mode_label(mode: &str, has_bolt: bool) -> String {
+    let normalized = match mode.to_ascii_lowercase().as_str() {
+        "deep2" => "deep²".to_string(),
+        other => other.to_string(),
+    };
+
+    if has_bolt {
+        format!("↯{normalized}")
+    } else {
+        normalized
+    }
 }
 
 fn extract_claude_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
@@ -996,15 +1024,64 @@ fn extract_pi_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
 
 fn extract_gemini_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     let output_tail = output_tail?;
-    let label = output_tail.lines().rev().find_map(|line| {
-        gemini_footer_model_pattern()
-            .captures(line.trim())
-            .and_then(|captures| captures.name("model"))
-            .map(|matched| normalize_detail_label(matched.as_str()))
-            .filter(|label| !label.is_empty())
-    })?;
+    let label = extract_gemini_footer_model(output_tail)?;
 
     Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
+fn extract_gemini_footer_model(output_tail: &str) -> Option<String> {
+    output_tail
+        .lines()
+        .rev()
+        .find_map(|line| extract_gemini_inline_footer_model(line.trim()))
+        .or_else(|| extract_gemini_table_footer_model(output_tail))
+}
+
+fn extract_gemini_inline_footer_model(line: &str) -> Option<String> {
+    gemini_footer_model_pattern()
+        .captures(line)
+        .and_then(|captures| captures.name("model"))
+        .map(|matched| normalize_detail_label(matched.as_str()))
+        .filter(|label| !label.is_empty())
+}
+
+fn extract_gemini_table_footer_model(output_tail: &str) -> Option<String> {
+    let lines: Vec<_> = output_tail.lines().collect();
+    let mut latest = None;
+
+    for (index, line) in lines.iter().enumerate() {
+        let normalized = normalize_output_line(line.trim());
+        if !is_gemini_table_footer_header(&normalized) {
+            continue;
+        }
+
+        for candidate in lines.iter().skip(index + 1).take(3) {
+            let normalized = normalize_output_line(candidate.trim());
+            if normalized.is_empty() {
+                continue;
+            }
+
+            if let Some(model) = extract_gemini_table_footer_row_model(&normalized) {
+                latest = Some(model);
+                break;
+            }
+        }
+    }
+
+    latest
+}
+
+fn extract_gemini_table_footer_row_model(normalized: &str) -> Option<String> {
+    gemini_table_footer_model_pattern()
+        .captures(normalized)
+        .and_then(|captures| captures.name("model"))
+        .map(|matched| normalize_detail_label(matched.as_str().trim_end_matches('…')))
+        .filter(|label| !label.is_empty())
+}
+
+fn is_gemini_table_footer_header(normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+    lower.contains("workspace") && lower.contains("sandbox") && lower.contains("/model")
 }
 
 fn extract_auggie_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
@@ -1019,12 +1096,19 @@ fn extract_auggie_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
 fn extract_grok_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     let output_tail = output_tail?;
     let label = output_tail.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
         let normalized = normalize_output_line(line.trim());
         let lower = normalized.to_ascii_lowercase();
+
+        if let Some(label) = extract_grok_footer_model(trimmed, &normalized) {
+            return Some(label);
+        }
+
         if !(lower.starts_with("grok ") || lower.contains("i'm grok") || lower.contains("i’m grok"))
         {
             return None;
         }
+
         grok_model_pattern()
             .captures(&normalized)
             .and_then(|captures| captures.name("model"))
@@ -1032,6 +1116,18 @@ fn extract_grok_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
             .filter(|label| !label.is_empty())
     });
     label.map(|label| AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
+fn extract_grok_footer_model(raw: &str, normalized: &str) -> Option<String> {
+    if !raw.trim_start().starts_with('╰') && !normalized.contains('·') {
+        return None;
+    }
+
+    grok_footer_model_pattern()
+        .captures(normalized)
+        .and_then(|captures| captures.name("model"))
+        .map(|matched| normalize_detail_label(matched.as_str()))
+        .filter(|label| !label.is_empty())
 }
 
 fn extract_codex_output_excerpt(output_tail: Option<&str>) -> Option<String> {
@@ -1055,7 +1151,7 @@ fn is_amp_output_noise(raw: &str, normalized: &str) -> bool {
     is_common_output_noise(raw, normalized)
         || raw_lower.contains("welcome to")
         || raw.trim_start().starts_with(['╭', '╰'])
-        || ((lower.contains("smart") || lower.contains("rush")) && lower.contains("skills"))
+        || (amp_mode_label_in_text(&lower) && lower.contains("skills"))
         || (normalized.contains("~/") && normalized.contains('('))
         || raw.contains('✓') && lower.contains("thinking")
         || lower.contains("of 168k")
@@ -1142,6 +1238,8 @@ fn extract_gemini_output_excerpt(output_tail: Option<&str>) -> Option<String> {
             || lower.contains("request cancelled")
             || lower.starts_with("type your message or @path/to/file")
             || gemini_footer_model_pattern().is_match(normalized)
+            || is_gemini_table_footer_header(normalized)
+            || extract_gemini_table_footer_row_model(normalized).is_some()
             || raw.trim_start().starts_with('>')
     })
 }
@@ -1184,11 +1282,23 @@ fn extract_auggie_output_excerpt(output_tail: Option<&str>) -> Option<String> {
 
 fn extract_grok_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
-    extract_latest_grok_completion_excerpt(output_tail).or_else(|| {
-        extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
-            is_grok_output_noise(raw, normalized) || is_grok_turn_completed_line(normalized)
-        })
+    extract_latest_grok_reply_excerpt(output_tail)
+        .or_else(|| extract_latest_grok_completion_excerpt(output_tail))
+}
+
+fn extract_latest_grok_reply_excerpt(output_tail: &str) -> Option<String> {
+    let output_tail = strip_grok_right_aligned_timestamps(output_tail);
+    extract_output_excerpt_from_tail(&output_tail, |raw, normalized| {
+        is_grok_output_noise(raw, normalized) || is_grok_turn_completed_line(normalized)
     })
+}
+
+fn strip_grok_right_aligned_timestamps(output_tail: &str) -> String {
+    output_tail
+        .lines()
+        .map(|line| grok_right_aligned_timestamp_pattern().replace(line, "").into_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn extract_output_excerpt_from_tail<F>(output_tail: &str, mut is_noise: F) -> Option<String>
@@ -1460,7 +1570,7 @@ fn is_prompt_footer_line(line: &str) -> bool {
 fn looks_like_amp_home_screen(recent_lines: &[&str], output_tail: &str) -> bool {
     let has_mode_skills = recent_lines.iter().any(|line| {
         let lower = line.to_ascii_lowercase();
-        (lower.contains("smart") || lower.contains("rush")) && lower.contains("skills")
+        amp_mode_label_in_text(&lower) && lower.contains("skills")
     });
     let has_workspace_footer =
         recent_lines.iter().any(|line| line.contains("~/") && line.contains('('));
@@ -1469,6 +1579,10 @@ fn looks_like_amp_home_screen(recent_lines: &[&str], output_tail: &str) -> bool 
         || output_tail.contains('╰');
 
     has_mode_skills && has_workspace_footer && has_amp_chrome
+}
+
+fn amp_mode_label_in_text(lower: &str) -> bool {
+    lower.contains("smart") || lower.contains("rush") || lower.contains("deep")
 }
 
 fn looks_like_claude_setup_screen(output_tail: &str) -> bool {
@@ -1579,7 +1693,12 @@ fn looks_like_grok_output(output_tail: &str) -> bool {
     let lower = output_tail.to_ascii_lowercase();
     lower.contains("grok build")
         || lower.contains("try out grok build")
-        || output_tail.lines().any(|line| grok_model_pattern().is_match(line.trim()))
+        || output_tail.lines().any(|line| {
+            let trimmed = line.trim();
+            let normalized = normalize_output_line(trimmed);
+            grok_model_pattern().is_match(trimmed)
+                || extract_grok_footer_model(trimmed, &normalized).is_some()
+        })
 }
 
 fn classify_grok_output_tail(output_tail: &str) -> Option<SessionStatus> {
@@ -1769,30 +1888,31 @@ fn waiting_pattern() -> &'static Regex {
 fn codex_card_model_pattern() -> &'static Regex {
     static CODEX_CARD_MODEL: OnceLock<Regex> = OnceLock::new();
     CODEX_CARD_MODEL.get_or_init(|| {
-        Regex::new(r"(?im)model:\s+(?P<model>.+?)\s+/model to change\b")
+        Regex::new(r"(?im)model:\s+(?P<model>gpt-.+?)\s+/model to change\b")
             .expect("codex card model regex should compile")
     })
 }
 
-fn codex_footer_model_pattern() -> &'static Regex {
-    static CODEX_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
-    CODEX_FOOTER_MODEL.get_or_init(|| {
-        Regex::new(r"^(?P<model>[A-Za-z0-9][^·]+?)\s+·\s+(?:weekly\s+)?\d+% left\b")
-            .expect("codex footer model regex should compile")
+fn codex_status_model_pattern() -> &'static Regex {
+    static CODEX_STATUS_MODEL: OnceLock<Regex> = OnceLock::new();
+    CODEX_STATUS_MODEL.get_or_init(|| {
+        Regex::new(r"(?i)(?P<model>gpt-[^·│/\r\n]+)")
+            .expect("codex status model regex should compile")
     })
 }
 
 fn amp_mode_pattern() -> &'static Regex {
     static AMP_MODE: OnceLock<Regex> = OnceLock::new();
     AMP_MODE.get_or_init(|| {
-        Regex::new(r"(?i)\b(?P<mode>smart|rush)\b").expect("amp mode regex should compile")
+        Regex::new(r"(?i)(?P<mode>deep²|deep2|smart|rush|deep)(?:\b|\s|─)")
+            .expect("amp mode regex should compile")
     })
 }
 
 fn amp_compact_mode_pattern() -> &'static Regex {
     static AMP_COMPACT_MODE: OnceLock<Regex> = OnceLock::new();
     AMP_COMPACT_MODE.get_or_init(|| {
-        Regex::new(r"(?i)↯\s*(?P<mode>smart|rush)\b")
+        Regex::new(r"(?i)(?P<bolt>↯\s*)?(?P<mode>deep²|deep2|smart|rush|deep)(?:\b|\s|─)")
             .expect("amp compact mode regex should compile")
     })
 }
@@ -1878,6 +1998,16 @@ fn gemini_footer_model_pattern() -> &'static Regex {
     })
 }
 
+fn gemini_table_footer_model_pattern() -> &'static Regex {
+    static GEMINI_TABLE_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    GEMINI_TABLE_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:no\s+sandbox|sandbox)\s+(?P<model>[A-Za-z0-9][A-Za-z0-9._-]*(?:\s+\([^)]+\))?)\s*(?:…|\.\.\.)?\s*$",
+        )
+        .expect("gemini table footer model regex should compile")
+    })
+}
+
 fn auggie_using_model_pattern() -> &'static Regex {
     static AUGGIE_USING_MODEL: OnceLock<Regex> = OnceLock::new();
     AUGGIE_USING_MODEL.get_or_init(|| {
@@ -1907,6 +2037,22 @@ fn grok_model_pattern() -> &'static Regex {
     GROK_MODEL.get_or_init(|| {
         Regex::new(r"(?i)\b(?P<model>grok\s+[0-9]+(?:\.[0-9]+)*)\b")
             .expect("grok model regex should compile")
+    })
+}
+
+fn grok_footer_model_pattern() -> &'static Regex {
+    static GROK_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    GROK_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(r"(?i)\b(?P<model>composer\s+[0-9]+(?:\.[0-9]+)*)\b\s*·")
+            .expect("grok footer model regex should compile")
+    })
+}
+
+fn grok_right_aligned_timestamp_pattern() -> &'static Regex {
+    static GROK_RIGHT_ALIGNED_TIMESTAMP: OnceLock<Regex> = OnceLock::new();
+    GROK_RIGHT_ALIGNED_TIMESTAMP.get_or_init(|| {
+        Regex::new(r"(?i)\s{2,}\d{1,2}:\d{2}\s(?:AM|PM)\s*$")
+            .expect("grok right-aligned timestamp regex should compile")
     })
 }
 
@@ -2088,7 +2234,7 @@ mod tests {
     #[test]
     fn registry_captures_output_for_node_wrapped_agent_candidates() {
         let registry = AdapterRegistry::v1();
-        let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (bnomei)");
+        let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (workspace)");
 
         assert!(registry.needs_output_tail(&gemini, None, None));
         assert!(registry.needs_output_tail(
@@ -2111,7 +2257,7 @@ mod tests {
     fn tracker_detects_gemini_and_auggie_from_live_output() {
         let mut tracker = SessionTracker::new();
         let now = Instant::now();
-        let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (bnomei)");
+        let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (workspace)");
         let auggie = snapshot_with_title("%25", "node", false, "auggie");
         let output_tails = HashMap::from([
             (
@@ -2189,7 +2335,7 @@ mod tests {
             pane.pane_id.clone(),
             "\
 ╭─── Claude Code v2.1.76 ──────────────────────────────────────────────╮
-│      Sonnet 4.6 · Claude Pro · b@bnomei.com's Organization          │
+│      Sonnet 4.6 · Claude Pro · example.com's Organization          │
 ╰───────────────────────────────────────────────────────────────────────╯
 
 ❯
@@ -2316,7 +2462,7 @@ mod tests {
             codex_pane.pane_id.clone(),
             "\
 ╭─── Claude Code v2.1.76 ──────────────────────────────────────────────╮
-│      Sonnet 4.6 · Claude Pro · b@bnomei.com's Organization          │
+│      Sonnet 4.6 · Claude Pro · example.com's Organization          │
 ╰───────────────────────────────────────────────────────────────────────╯
 
 ❯
@@ -2447,7 +2593,7 @@ mod tests {
 \n\
 \u{203a} Write tests for @filename\n\
 \n\
-gpt-5.4 xhigh fast \u{00b7} 40% left \u{00b7} ~/Sites/ilmari\n";
+gpt-5.4 xhigh fast \u{00b7} 40% left \u{00b7} ~/workspace\n";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
     }
@@ -2459,7 +2605,7 @@ gpt-5.4 xhigh fast \u{00b7} 40% left \u{00b7} ~/Sites/ilmari\n";
 
 › Explain this codebase
 
-gpt-5.4 xhigh fast · 20% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 20% left · ~/workspace
 ";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
@@ -2472,7 +2618,7 @@ Welcome to\n\
 Ctrl+O for\n\
 \n\
 smart 30 skills\n\
-~/Sites/ilmari (main)\n\
+~/workspace (main)\n\
 MCP 2 failed\n";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
@@ -2485,7 +2631,21 @@ Welcome to
 Ctrl+O for
 
 rush 4 skills
-~/Sites/ilmari (main)
+~/workspace (main)
+MCP 2 failed
+";
+
+        assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn amp_deep_home_screen_marks_waiting_input() {
+        let output_tail = "\
+Welcome to
+Ctrl+O for
+
+deep² 4 skills
+~/workspace (main)
 MCP 2 failed
 ";
 
@@ -2503,7 +2663,7 @@ MCP 2 failed
 
 ╭─26% of 168k · $0.45───────────────────────────────────────────────────────────────────smart──30 skills─╮
 │                                                                                                        │
-╰──────────────────────────────────────────────────────────────────────────────────~/Sites/ilmari (main)─╯
+╰──────────────────────────────────────────────────────────────────────────────────~/workspace (main)─╯
 ";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
@@ -2526,7 +2686,7 @@ with your terminal
     fn claude_prompt_screen_marks_waiting_input() {
         let output_tail = "\
 ╭─── Claude Code v2.1.76 ──────────────────────────────────────────────╮
-│      Sonnet 4.6 · Claude Pro · b@bnomei.com's Organization          │
+│      Sonnet 4.6 · Claude Pro · example.com's Organization          │
 ╰───────────────────────────────────────────────────────────────────────╯
 
 ❯
@@ -2557,7 +2717,7 @@ with your terminal
 OpenCode
 Ask anything... \"Fix a TODO in the codebase\"
 Build  Big Pickle OpenCode Zen
-~/Sites/ilmari:main             ctrl+t variants  tab agents  ctrl+p co1.2.26
+~/workspace:main             ctrl+t variants  tab agents  ctrl+p co1.2.26
 ";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
@@ -2644,7 +2804,7 @@ Select model
 pi v0.58.0
 ctrl+l to select model
 Warning: No models available. Use /login or set an API key environment variable.
-~/Sites/frigg/specs/demo
+~/workspace/specs/demo
 claude-opus-4-5 • medium
 ";
 
@@ -2672,7 +2832,7 @@ claude-opus-4-5 • medium
 pi v0.58.0
 ctrl+l to select model
 Warning: No models available. Use /login or set an API key environment variable.
-~/Sites/frigg/specs/demo
+~/workspace/specs/demo
 ↑2.2k ↓64 $0.013 (sub) 1.1%/200k (auto)                                            claude-haiku-4-5 • medium
 "
             .to_string(),
@@ -2683,7 +2843,7 @@ Warning: No models available. Use /login or set an API key environment variable.
 pi v0.58.0
 ctrl+l to select model
 Warning: No models available. Use /login or set an API key environment variable.
-~/Sites/frigg/specs/demo
+~/workspace/specs/demo
 ↑9.4k ↓689 $0.023 (sub) 1.4%/200k (auto)                                           claude-haiku-4-5 • medium
 "
             .to_string(),
@@ -2713,7 +2873,7 @@ Hello! I'm ready to help.
 
 Done! 🎉
 
-~/Sites/frigg/specs/demo
+~/workspace/specs/demo
 ↑2.2k ↓64 $0.013 (sub) 1.1%/200k (auto)                                            claude-haiku-4-5 • medium
 "
             .to_string(),
@@ -2725,7 +2885,7 @@ Hello! I'm ready to help.
 
 Done! 🎉
 
-~/Sites/frigg/specs/demo
+~/workspace/specs/demo
 ↑9.4k ↓689 $0.023 (sub) 1.4%/200k (auto)                                           claude-haiku-4-5 • medium
 "
             .to_string(),
@@ -2791,7 +2951,7 @@ Done! 🎉
             "\
 › Write tests for @filename
 
-gpt-5.4 xhigh fast · 40% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 40% left · ~/workspace
 "
             .to_string(),
         )]);
@@ -2828,7 +2988,7 @@ still working
             "\
 › Use /skills to list available skills
 
-gpt-5.4 xhigh fast · 78% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 78% left · ~/workspace
 "
             .to_string(),
         )]);
@@ -2876,7 +3036,7 @@ still working through a long tool call
             "\
 › Use /skills to list available skills
 
-gpt-5.4 xhigh fast · 78% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 78% left · ~/workspace
 "
             .to_string(),
         )]);
@@ -2902,7 +3062,7 @@ gpt-5.4 xhigh fast · 78% left · ~/Sites/ilmari
 processing task
 › Write tests for @filename
 
-gpt-5.4 xhigh fast · 40% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 40% left · ~/workspace
 "
             .to_string(),
         )]);
@@ -2912,7 +3072,7 @@ gpt-5.4 xhigh fast · 40% left · ~/Sites/ilmari
 processing task chunk 2
 › Write tests for @filename
 
-gpt-5.4 xhigh fast · 39% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 39% left · ~/workspace
 "
             .to_string(),
         )]);
@@ -2960,7 +3120,7 @@ still working through a long tool call
 
 › Explain this codebase
 
-gpt-5.4 xhigh fast · 20% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 20% left · ~/workspace
 "
             .to_string(),
         )]);
@@ -2971,7 +3131,7 @@ gpt-5.4 xhigh fast · 20% left · ~/Sites/ilmari
 
 › Explain this codebase
 
-gpt-5.4 xhigh fast · 20% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 20% left · ~/workspace
 "
             .to_string(),
         )]);
@@ -3008,7 +3168,7 @@ gpt-5.4 xhigh fast · 20% left · ~/Sites/ilmari
     fn codex_detail_extracts_from_footer_line() {
         let output_tail = "\
 › /model
-gpt-5.4 xhigh fast · 100% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 100% left · ~/workspace
 ";
 
         assert_eq!(
@@ -3038,13 +3198,56 @@ gpt-5.5 xhigh · weekly 39% left · Context 0% used
     }
 
     #[test]
+    fn codex_detail_extracts_model_before_enabled_status_items() {
+        let output_tail = "\
+› Improve documentation in @filename
+
+gpt-5.5 xhigh · 14K used · weekly 38% left · Context 2% used
+";
+
+        assert_eq!(
+            extract_codex_detail(Some(output_tail)),
+            Some(AgentDetail {
+                label: "gpt-5.5 xhigh".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+    }
+
+    #[test]
+    fn codex_detail_extracts_model_after_enabled_status_items() {
+        let output_tail = "\
+› Improve documentation in @filename
+
+weekly 39% left · approvals on · gpt-5.5 xhigh · Context 0% used
+";
+
+        assert_eq!(
+            extract_codex_detail(Some(output_tail)),
+            Some(AgentDetail {
+                label: "gpt-5.5 xhigh".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+    }
+
+    #[test]
+    fn codex_detail_ignores_plain_output_mentions_of_gpt_models() {
+        let output_tail = "\
+The model name starts with gpt-5.5, but this is not a status bar.
+";
+
+        assert_eq!(extract_codex_detail(Some(output_tail)), None);
+    }
+
+    #[test]
     fn codex_output_excerpt_skips_prompt_and_footer() {
         let output_tail = "\
 Here is the first part of the answer.
 The tracker now keeps waiting panes stable.
 › Write tests for @filename
 
-gpt-5.4 xhigh fast · 40% left · ~/Sites/ilmari
+gpt-5.4 xhigh fast · 40% left · ~/workspace
 ";
 
         assert_eq!(
@@ -3066,6 +3269,19 @@ gpt-5.4 xhigh fast · 40% left · ~/Sites/ilmari
             extract_gemini_detail(Some(output_tail)),
             Some(AgentDetail {
                 label: "Auto (Gemini 3)".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+
+        let table_footer = "\
+ workspace (/directory)   branch    sandbox      /model
+ ~/workspace              main      no sandbox   gemini-3-flash-preview   …
+";
+
+        assert_eq!(
+            extract_gemini_detail(Some(table_footer)),
+            Some(AgentDetail {
+                label: "gemini-3-flash-preview".to_string(),
                 tone: AgentDetailTone::Neutral,
             })
         );
@@ -3102,6 +3318,18 @@ shift+tab to accept edits
 ";
 
         assert_eq!(extract_gemini_output_excerpt(Some(output_tail)), None);
+
+        let table_footer = "\
+────────────────────────────────────────────────────────────────────────────
+ Shift+Tab to accept edits
+
+ >   Type your message or @path/to/file
+
+ workspace (/directory)   branch    sandbox      /model
+ ~/workspace              main      no sandbox   gemini-3-flash-preview   …
+";
+
+        assert_eq!(extract_gemini_output_excerpt(Some(table_footer)), None);
     }
 
     #[test]
@@ -3180,14 +3408,34 @@ shift+tab to accept edits
     }
 
     #[test]
-    fn amp_detail_extracts_smart_and_rush_modes() {
+    fn amp_detail_extracts_modes_and_bolt_modifier() {
         let smart = "\
 ╭─────────────────────smart──30 skills─╮
-╰────────────────~/Sites/ilmari (main)─╯
+╰────────────────~/workspace (main)─╯
 ";
         let rush = "\
 ╭──────────────────────rush──4 skills─╮
-╰────────────────~/Sites/ilmari (main)─╯
+╰────────────────~/workspace (main)─╯
+";
+        let deep = "\
+╭──────────────────────deep²──4 skills─╮
+╰────────────────~/workspace (main)─╯
+";
+        let compact_smart = "\
+╭─────────────────────────────────────────────────────────────────── smart ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let compact_deep = "\
+╭─────────────────────────────────────────────────────────────────── deep² ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let compact_bolt_smart = "\
+╭───────────────────────────────────────────────────────────────── ↯smart ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let compact_bolt_deep = "\
+╭───────────────────────────────────────────────────────────────── ↯deep² ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
 ";
         let compact_rush = "\
 ╭─────────────────────────────────────────────────────────────────── ↯rush ─╮
@@ -3200,15 +3448,35 @@ shift+tab to accept edits
 
         assert_eq!(
             extract_amp_detail(Some(smart)),
-            Some(AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::Positive })
+            Some(AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::AmpSmart })
         );
         assert_eq!(
             extract_amp_detail(Some(rush)),
-            Some(AgentDetail { label: "rush".to_string(), tone: AgentDetailTone::Warning })
+            Some(AgentDetail { label: "rush".to_string(), tone: AgentDetailTone::AmpRush })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(deep)),
+            Some(AgentDetail { label: "deep²".to_string(), tone: AgentDetailTone::AmpDeep })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(compact_smart)),
+            Some(AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::AmpSmart })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(compact_deep)),
+            Some(AgentDetail { label: "deep²".to_string(), tone: AgentDetailTone::AmpDeep })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(compact_bolt_smart)),
+            Some(AgentDetail { label: "↯smart".to_string(), tone: AgentDetailTone::AmpSmart })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(compact_bolt_deep)),
+            Some(AgentDetail { label: "↯deep²".to_string(), tone: AgentDetailTone::AmpDeep })
         );
         assert_eq!(
             extract_amp_detail(Some(compact_rush)),
-            Some(AgentDetail { label: "rush".to_string(), tone: AgentDetailTone::Warning })
+            Some(AgentDetail { label: "↯rush".to_string(), tone: AgentDetailTone::AmpRush })
         );
         assert_eq!(extract_amp_detail(Some(compact_rush_without_marker)), None);
     }
@@ -3223,7 +3491,7 @@ shift+tab to accept edits
   Could you clarify what you'd like me to help with?
 
 ╭─26% of 168k · $0.45───────────────────────────────────────────────────────────────────smart──30 skills─╮
-╰──────────────────────────────────────────────────────────────────────────────────~/Sites/ilmari (main)─╯
+╰──────────────────────────────────────────────────────────────────────────────────~/workspace (main)─╯
 ";
 
         assert_eq!(
@@ -3374,7 +3642,7 @@ shift+tab to accept edits
     fn claude_detail_extracts_model_and_effort_from_live_prompt() {
         let output_tail = "\
 ╭─── Claude Code v2.1.76 ──────────────────────────────────────────────╮
-│      Sonnet 4.6 · Claude Pro · b@bnomei.com's Organization          │
+│      Sonnet 4.6 · Claude Pro · example.com's Organization          │
 ╰───────────────────────────────────────────────────────────────────────╯
 
 ❯
@@ -3477,7 +3745,7 @@ Brewed for 41s
     fn opencode_detail_ignores_footer_hint_lines() {
         let output_tail = "\
   ┃  Build  Big Pickle OpenCode Zen
-~/Sites/ilmari:main             ctrl+t variants  tab agents  ctrl+p commands
+~/workspace:main             ctrl+t variants  tab agents  ctrl+p commands
 ";
 
         assert_eq!(
@@ -3568,7 +3836,7 @@ test
 Hello! I'm ready to help. What would you like to work on?
 
 Model: claude-haiku-4-5
-~/Sites/frigg/specs/demo (main)
+~/workspace/specs/demo (main)
 ↑2.2k ↓64 $0.013 (sub) 1.1%/200k (auto)             claude-haiku-4-5 • medium
 pi v0.58.0
 escape to interrupt
@@ -3606,7 +3874,7 @@ Model: claude-haiku-4-5
             std::slice::from_ref(&pane),
             &HashMap::from([(
                 pane.pane_id.clone(),
-                "gpt-5.4 xhigh fast · 100% left · ~/Sites/ilmari".to_string(),
+                "gpt-5.4 xhigh fast · 100% left · ~/workspace".to_string(),
             )]),
             now,
         );
@@ -3643,7 +3911,7 @@ Model: claude-haiku-4-5
     #[test]
     fn tracker_retains_previous_gemini_output_when_new_tail_has_only_footer_hints() {
         let mut tracker = SessionTracker::new();
-        let pane = snapshot_with_title("%26", "node", false, "◇  Ready (bnomei)");
+        let pane = snapshot_with_title("%26", "node", false, "◇  Ready (workspace)");
         let now = Instant::now();
         let first = tracker.refresh(
             std::slice::from_ref(&pane),
@@ -3687,7 +3955,7 @@ shift+tab to accept edits
         let pane = snapshot("%15", "codex", false);
         let now = Instant::now();
         let output_tail =
-            "gpt-5.4 xhigh fast · 100% left · ~/Sites/ilmari\nHello from the current turn.";
+            "gpt-5.4 xhigh fast · 100% left · ~/workspace\nHello from the current turn.";
         let first = tracker.refresh(
             std::slice::from_ref(&pane),
             &HashMap::from([(pane.pane_id.clone(), output_tail.to_string())]),
@@ -3720,7 +3988,7 @@ shift+tab to accept edits
         pane_title: &str,
     ) -> PaneSnapshot {
         PaneSnapshot::parse(&format!(
-            "{pane_id}\t301\t$5\tclient\t@8\tagents\t{}\t/Users/bnomei/Sites/ilmari\t{pane_current_command}\t{pane_title}",
+            "{pane_id}\t301\t$5\tclient\t@8\tagents\t{}\t/workspace/ilmari\t{pane_current_command}\t{pane_title}",
             if pane_dead { 1 } else { 0 }
         ))
         .expect("pane snapshot should parse")
@@ -3869,8 +4137,15 @@ Try out Grok Build
             extract_grok_detail(Some(GROK_WAITING_WIDE)),
             Some(AgentDetail { label: "Grok 4.3".to_string(), tone: AgentDetailTone::Neutral })
         );
+        assert_eq!(
+            extract_grok_detail(Some(
+                "╰────────────────────────────────────── Composer 2.5 · always-approve ─╯"
+            )),
+            Some(AgentDetail { label: "Composer 2.5".to_string(), tone: AgentDetailTone::Neutral })
+        );
         assert_eq!(extract_grok_detail(Some(GROK_WAITING_NARROW)), None);
         assert_eq!(extract_grok_detail(Some("I asked Grok 4.3. about the project.")), None);
+        assert_eq!(extract_grok_detail(Some("I asked Composer 2.5 about the project.")), None);
     }
 
     #[test]
@@ -3895,18 +4170,18 @@ Try out Grok Build
     }
 
     #[test]
-    fn grok_output_excerpt_prefers_latest_turn_completion_status() {
+    fn grok_output_excerpt_prefers_latest_reply_before_completion_status() {
         assert_eq!(
             extract_grok_output_excerpt(Some(GROK_WAITING_NARROW)),
-            Some("Turn completed in 22s.".to_string())
+            Some("What would you like to work on?".to_string())
         );
         assert_eq!(
             extract_grok_output_excerpt(Some(GROK_WAITING_WIDE)),
-            Some("Turn completed in 10s.".to_string())
+            Some("Welcome to the workspace. What can I help you with?".to_string())
         );
         assert_eq!(
             extract_grok_output_excerpt(Some(GROK_COMPACT_WAITING)),
-            Some("Turn completed in 3.4s.".to_string())
+            Some("compact fixture ready 1:40 PM".to_string())
         );
         assert_eq!(
             extract_grok_output_excerpt(Some(GROK_COMPLETION_ONLY)),
@@ -3928,7 +4203,33 @@ Try out Grok Build
 
         assert_eq!(
             extract_grok_output_excerpt(Some(current_pane_tail)),
-            Some("Turn completed in 5m57s.".to_string())
+            Some("Final answer text.".to_string())
+        );
+
+        let composer_tail = "\
+     ❯ hi                                                         7:58 PM
+
+     ◆ Thought for 0.0s
+
+     Hi! How can I help you today? I see you're working in the    7:58 PM
+     workspace project - happy to dig into code, debug, or
+     implement something whenever you're ready.
+
+     Turn completed in 2.2s.
+
+  ╭───────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                     │
+  ╰─────────────────────────────────────── Composer 2.5 · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
+        assert_eq!(
+            extract_grok_output_excerpt(Some(composer_tail)),
+            Some(
+                "... happy to dig into code, debug, or implement something whenever you're ready."
+                    .to_string()
+            )
         );
     }
 
@@ -3987,11 +4288,14 @@ Try out Grok Build
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind.display_name(), "Grok");
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
-        assert_eq!(records[0].output_excerpt.as_deref(), Some("Turn completed in 22s."));
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("What would you like to work on?"));
 
         assert_eq!(records[1].kind.display_name(), "Grok");
         assert_eq!(records[1].status, SessionStatus::WaitingInput);
-        assert_eq!(records[1].output_excerpt.as_deref(), Some("Turn completed in 10s."));
+        assert_eq!(
+            records[1].output_excerpt.as_deref(),
+            Some("Welcome to the workspace. What can I help you with?")
+        );
 
         // grok detail retention across refreshes with stable tail (exercises reuse_detail_arc for GrokAdapter)
         let now2 = now + Duration::from_secs(1);
@@ -4020,7 +4324,7 @@ Try out Grok Build
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AgentKind::Grok);
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
-        assert_eq!(records[0].output_excerpt.as_deref(), Some("Turn completed in 3.4s."));
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("compact fixture ready 1:40 PM"));
     }
 
     #[test]
