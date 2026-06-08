@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.3 - 2026-06-08
+
+### Fixed
+
+- Detect node-wrapped Auggie sessions via cached process identity, including `node .../bin/auggie`, without relying on pane title or output text.
+- Tighten process-based agent identity matching to executable and known wrapper paths so ordinary commands mentioning agent names do not create agent rows.
+
 ## 0.2.2 - 2026-06-05
 
 ### Fixed

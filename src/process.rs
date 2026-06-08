@@ -7,6 +7,16 @@ use thiserror::Error;
 use crate::model::{AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord, SubtaskProcess};
 
 const PS_FORMAT: &str = "pid=,ppid=,%cpu=,rss=,command=";
+const PROCESS_IDENTIFIABLE_AGENT_KINDS: [AgentKind; 8] = [
+    AgentKind::Codex,
+    AgentKind::Amp,
+    AgentKind::ClaudeCode,
+    AgentKind::OpenCode,
+    AgentKind::Pi,
+    AgentKind::GeminiCli,
+    AgentKind::Auggie,
+    AgentKind::Grok,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessSnapshot {
@@ -92,6 +102,27 @@ impl ProcessTree {
         self.usage_for_kind(session.pane.pane_pid, session.kind)
     }
 
+    pub fn agent_kind_for_pane(&self, pane_pid: Option<u32>) -> Option<AgentKind> {
+        let pane_pid = pane_pid?;
+        let mut matched_kind = None;
+
+        for pid in self.pane_processes(pane_pid) {
+            for kind in PROCESS_IDENTIFIABLE_AGENT_KINDS {
+                if !self.process_matches_kind(pid, kind) {
+                    continue;
+                }
+
+                match matched_kind {
+                    Some(previous) if previous != kind => return None,
+                    Some(_) => {}
+                    None => matched_kind = Some(kind),
+                }
+            }
+        }
+
+        matched_kind
+    }
+
     fn usage_for_kind(
         &self,
         pane_pid: Option<u32>,
@@ -128,20 +159,38 @@ impl ProcessTree {
         None
     }
 
+    fn pane_processes(&self, pane_pid: u32) -> Vec<u32> {
+        let mut pids = vec![pane_pid];
+        let mut queue: VecDeque<u32> =
+            self.children.get(&pane_pid).cloned().unwrap_or_default().into();
+
+        while let Some(pid) = queue.pop_front() {
+            pids.push(pid);
+            if let Some(children) = self.children.get(&pid) {
+                queue.extend(children.iter().copied());
+            }
+        }
+
+        pids
+    }
+
     fn process_matches_kind(&self, pid: u32, kind: AgentKind) -> bool {
         let Some(process) = self.processes.get(&pid) else {
             return false;
         };
 
         match kind {
-            AgentKind::Codex => command_matches(&process.command, "codex"),
-            AgentKind::Amp => command_matches(&process.command, "amp"),
-            AgentKind::ClaudeCode => command_matches(&process.command, "claude"),
-            AgentKind::OpenCode => command_matches(&process.command, "opencode"),
-            AgentKind::Pi => command_equals_any(&process.command, &["pi", "pi-agent"]),
-            AgentKind::GeminiCli => command_matches(&process.command, "gemini"),
-            AgentKind::Auggie => command_matches(&process.command, "auggie"),
-            AgentKind::Grok => command_matches(&process.command, "grok"),
+            AgentKind::Codex => command_executable_matches(&process.command, "codex"),
+            AgentKind::Amp => command_executable_matches(&process.command, "amp"),
+            AgentKind::ClaudeCode => command_executable_matches(&process.command, "claude"),
+            AgentKind::OpenCode => command_executable_matches(&process.command, "opencode"),
+            AgentKind::Pi => command_executable_equals_any(&process.command, &["pi", "pi-agent"]),
+            AgentKind::GeminiCli => {
+                command_executable_matches(&process.command, "gemini")
+                    || node_wrapper_path_matches(&process.command, "gemini")
+            }
+            AgentKind::Auggie => command_matches_auggie(&process.command),
+            AgentKind::Grok => command_executable_matches(&process.command, "grok"),
         }
     }
 
@@ -261,18 +310,62 @@ fn parse_cpu_tenths(value: &str, field: &'static str) -> Result<u32, ProcessSnap
     Ok((parsed * 10.0).round() as u32)
 }
 
-fn command_matches(command: &str, expected: &str) -> bool {
-    command_tokens(command)
-        .any(|token| token == expected || token.starts_with(&format!("{expected}-")))
+fn command_matches_auggie(command: &str) -> bool {
+    command_executable_matches(command, "auggie")
+        || node_wrapper_path_matches(command, "auggie")
+        || (command_executable_is(command, "node")
+            && command_references_package_path(command, "@augmentcode/auggie"))
 }
 
-fn command_equals_any(command: &str, expected: &[&str]) -> bool {
-    command_tokens(command).any(|token| expected.iter().any(|candidate| token == *candidate))
+fn command_executable_matches(command: &str, expected: &str) -> bool {
+    executable_name(command)
+        .is_some_and(|token| token == expected || token.starts_with(&format!("{expected}-")))
 }
 
-fn command_tokens(command: &str) -> impl Iterator<Item = String> + '_ {
+fn command_executable_equals_any(command: &str, expected: &[&str]) -> bool {
+    executable_name(command)
+        .is_some_and(|token| expected.iter().any(|candidate| token == *candidate))
+}
+
+fn command_executable_is(command: &str, expected: &str) -> bool {
+    executable_name(command).is_some_and(|token| token == expected)
+}
+
+fn node_wrapper_path_matches(command: &str, expected: &str) -> bool {
+    if !command_executable_is(command, "node") {
+        return false;
+    }
+
     command
         .split_whitespace()
+        .skip(1)
+        .map(|token| token.trim_matches(['"', '\'']))
+        .any(|token| path_token_executable_matches(token, expected))
+}
+
+fn command_references_package_path(command: &str, package: &str) -> bool {
+    let package = package.to_ascii_lowercase();
+    command
+        .split_whitespace()
+        .any(|token| token.trim_matches(['"', '\'']).to_ascii_lowercase().contains(&package))
+}
+
+fn path_token_executable_matches(token: &str, expected: &str) -> bool {
+    if !token.contains('/') {
+        return false;
+    }
+
+    token
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(|segment| segment.trim_start_matches('.').to_ascii_lowercase())
+        .is_some_and(|token| token == expected || token.starts_with(&format!("{expected}-")))
+}
+
+fn executable_name(command: &str) -> Option<String> {
+    command
+        .split_whitespace()
+        .next()
         .map(|token| token.trim_matches(['"', '\'']))
         .filter(|token| !token.is_empty())
         .map(|token| {
@@ -414,6 +507,67 @@ mod tests {
 
         assert_eq!(gemini.agent, ResourceUsage { cpu_tenths_percent: 220, memory_kib: 64 * 1024 });
         assert_eq!(auggie.agent, ResourceUsage { cpu_tenths_percent: 180, memory_kib: 48 * 1024 });
+    }
+
+    #[test]
+    fn process_tree_identifies_unique_agent_kind_below_pane_shell() {
+        let tree = ProcessTree::from_snapshots(vec![
+            snapshot(100, 55, 1, 1024, "zsh"),
+            snapshot(
+                101,
+                100,
+                180,
+                48 * 1024,
+                "node /Users/test/.vite-plus/packages/@augmentcode/auggie/lib/node_modules/@augmentcode/auggie/augment.mjs",
+            ),
+        ]);
+
+        assert_eq!(tree.agent_kind_for_pane(Some(100)), Some(AgentKind::Auggie));
+    }
+
+    #[test]
+    fn process_tree_identifies_node_wrapped_auggie_binary_path() {
+        let tree = ProcessTree::from_snapshots(vec![
+            snapshot(100, 55, 1, 1024, "zsh"),
+            snapshot(
+                101,
+                100,
+                180,
+                48 * 1024,
+                "node /Users/test/.nvm/versions/node/v22.21.1/bin/auggie",
+            ),
+        ]);
+
+        assert_eq!(tree.agent_kind_for_pane(Some(100)), Some(AgentKind::Auggie));
+    }
+
+    #[test]
+    fn process_tree_does_not_identify_agents_from_unrelated_command_arguments() {
+        let tree = ProcessTree::from_snapshots(vec![
+            snapshot(100, 55, 1, 1024, "zsh"),
+            snapshot(101, 100, 20, 4 * 1024, "rg codex src"),
+            snapshot(102, 100, 20, 4 * 1024, "grep gemini logs.txt"),
+            snapshot(103, 100, 20, 4 * 1024, "rg auggie src"),
+        ]);
+
+        assert_eq!(tree.agent_kind_for_pane(Some(100)), None);
+    }
+
+    #[test]
+    fn process_tree_requires_a_unique_agent_kind_for_identity() {
+        let tree = ProcessTree::from_snapshots(vec![
+            snapshot(100, 55, 1, 1024, "zsh"),
+            snapshot(101, 100, 220, 64 * 1024, "codex"),
+            snapshot(
+                102,
+                100,
+                180,
+                48 * 1024,
+                "node /Users/test/.vite-plus/packages/@augmentcode/auggie/lib/node_modules/@augmentcode/auggie/augment.mjs",
+            ),
+        ]);
+
+        assert_eq!(tree.agent_kind_for_pane(Some(100)), None);
     }
 
     #[test]

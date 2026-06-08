@@ -24,7 +24,7 @@ use crate::model::{
 };
 use crate::process::{self, ProcessTree};
 use crate::sound;
-use crate::tmux;
+use crate::tmux::{self, PaneSnapshot};
 use crate::ui;
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -159,6 +159,29 @@ impl ProcessUsageCache {
         Ok(())
     }
 
+    fn agent_kinds_for_panes(
+        &mut self,
+        panes: &[PaneSnapshot],
+        refreshed_at: Instant,
+    ) -> Result<HashMap<String, AgentKind>, process::ProcessError> {
+        if panes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        self.ensure_tree(refreshed_at)?;
+
+        let mut agent_kinds = HashMap::new();
+        if let Some(cached) = &self.cached_tree {
+            for pane in panes {
+                if let Some(kind) = cached.tree.agent_kind_for_pane(pane.pane_pid) {
+                    agent_kinds.insert(pane.pane_id.clone(), kind);
+                }
+            }
+        }
+
+        Ok(agent_kinds)
+    }
+
     fn hydrate_session(
         &mut self,
         session: &mut SessionRecord,
@@ -190,7 +213,6 @@ impl ProcessUsageCache {
     }
 
     fn release(&mut self, sessions: &mut [SessionRecord]) {
-        self.cached_tree = None;
         for session in sessions {
             session.process_usage = None;
         }
@@ -401,15 +423,39 @@ impl App {
 
         match tmux::collect_pane_snapshots() {
             Ok(panes) => {
-                let output_tails =
-                    tmux::capture_output_tails(&panes, &self.session_tracker, refreshed_at);
-                self.sessions = self.session_tracker.refresh(&panes, &output_tails, refreshed_at);
+                let mut process_warnings = Vec::new();
+                let process_kinds =
+                    match self.process_cache.agent_kinds_for_panes(&panes, refreshed_at) {
+                        Ok(process_kinds) => process_kinds,
+                        Err(error) => {
+                            process_warnings.push(format!("ps: {error}"));
+                            HashMap::new()
+                        }
+                    };
+                let output_tails = tmux::capture_output_tails_with_process_kinds(
+                    &panes,
+                    &self.session_tracker,
+                    &process_kinds,
+                );
+                self.sessions = self.session_tracker.refresh_with_process_kinds(
+                    &panes,
+                    &output_tails,
+                    &process_kinds,
+                    refreshed_at,
+                );
                 let needs_process_usage = self.needs_process_usage();
-                let process_warning = self
-                    .process_cache
-                    .hydrate(&mut self.sessions, refreshed_at, needs_process_usage)
-                    .err()
-                    .map(|error| format!("ps: {error}"));
+                if let Err(error) = self.process_cache.hydrate(
+                    &mut self.sessions,
+                    refreshed_at,
+                    needs_process_usage,
+                ) {
+                    process_warnings.push(format!("ps: {error}"));
+                }
+                let process_warning = if process_warnings.is_empty() {
+                    None
+                } else {
+                    Some(process_warnings.join("; "))
+                };
                 normalize_expanded_pane_ids(&mut self.expanded_pane_ids, &self.sessions);
                 self.emit_bells(count_alert_transitions(&previous_statuses, &self.sessions));
 
@@ -1182,13 +1228,13 @@ mod tests {
     use super::{
         build_model, count_alert_transitions, derive_path_labels, normalize_selected_pane_id,
         process_refresh_interval_from_var, quit_on_activate_from_vars, refresh_interval_from_var,
-        relabel_git_summaries, App, CachedProcessTree, DEFAULT_PROCESS_REFRESH_INTERVAL,
-        DEFAULT_REFRESH_INTERVAL,
+        relabel_git_summaries, App, CachedProcessTree, ProcessUsageCache,
+        DEFAULT_PROCESS_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL,
     };
     use crate::colors::Palette;
     use crate::git::GitSummaryReport;
     use crate::model::{
-        AgentDetail, AgentDetailTone, GitSummaryRow, ResourceUsage, SessionProcessUsage,
+        AgentDetail, AgentDetailTone, AgentKind, GitSummaryRow, ResourceUsage, SessionProcessUsage,
         SessionRecord, SessionStatus, SubtaskProcess,
     };
     use crate::process::{ProcessSnapshot, ProcessTree};
@@ -1740,7 +1786,40 @@ mod tests {
 
         assert!(!app.model.show_stats);
         assert!(app.sessions[0].process_usage.is_none());
-        assert!(app.process_cache.cached_tree.is_none());
+        assert!(app.process_cache.cached_tree.is_some());
+    }
+
+    #[test]
+    fn process_cache_resolves_agent_identity_without_hydrating_usage() {
+        let now = Instant::now();
+        let mut cache = ProcessUsageCache::new(DEFAULT_PROCESS_REFRESH_INTERVAL);
+        cache.cached_tree = Some(CachedProcessTree::new(
+            ProcessTree::from_snapshots(vec![
+                ProcessSnapshot {
+                    pid: 101,
+                    ppid: 1,
+                    cpu_tenths_percent: 0,
+                    memory_kib: 0,
+                    command: "zsh".to_string(),
+                },
+                ProcessSnapshot {
+                    pid: 201,
+                    ppid: 101,
+                    cpu_tenths_percent: 154,
+                    memory_kib: 64 * 1024,
+                    command: "node /Users/test/.vite-plus/packages/@augmentcode/auggie/lib/node_modules/@augmentcode/auggie/augment.mjs".to_string(),
+                },
+            ]),
+            now,
+        ));
+        let pane =
+            PaneSnapshot::parse("%12\t101\t$1\tdev\t@7\tagents\t0\t/tmp/project\tnode\ttask")
+                .expect("pane snapshot should parse");
+
+        let agent_kinds =
+            cache.agent_kinds_for_panes(&[pane], now).expect("cached process tree should resolve");
+
+        assert_eq!(agent_kinds.get("%12"), Some(&AgentKind::Auggie));
     }
 
     #[test]

@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
 
 use thiserror::Error;
 
 use crate::agents::SessionTracker;
+use crate::model::AgentKind;
 
 pub const LIST_PANES_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_dead}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}";
 pub const DEFAULT_CAPTURE_START: &str = "-80";
@@ -167,10 +167,10 @@ pub fn capture_output_tail(target: &str, start: &str) -> Result<String, TmuxErro
     run_tmux_command(&capture_output_tail_command(target, start))
 }
 
-pub fn capture_output_tails(
+pub fn capture_output_tails_with_process_kinds(
     panes: &[PaneSnapshot],
     tracker: &SessionTracker,
-    _now: Instant,
+    process_kinds: &HashMap<String, AgentKind>,
 ) -> HashMap<String, String> {
     let previous = tracker.records();
 
@@ -178,7 +178,11 @@ pub fn capture_output_tails(
         .iter()
         .filter_map(|pane| {
             let previous = previous.get(&pane.pane_id);
-            if !tracker.registry().needs_output_tail(pane, previous) {
+            if !tracker.registry().needs_output_tail(
+                pane,
+                previous,
+                process_kinds.get(&pane.pane_id).copied(),
+            ) {
                 return None;
             }
 

@@ -66,15 +66,21 @@ impl AdapterRegistry {
         pane: &PaneSnapshot,
         previous: Option<&SessionRecord>,
     ) -> Option<AgentKind> {
-        self.select_adapter(pane, None, previous).map(AgentAdapter::kind)
+        self.select_adapter(pane, None, previous, None).map(AgentAdapter::kind)
     }
 
-    pub fn needs_output_tail(&self, pane: &PaneSnapshot, previous: Option<&SessionRecord>) -> bool {
+    pub fn needs_output_tail(
+        &self,
+        pane: &PaneSnapshot,
+        previous: Option<&SessionRecord>,
+        identity_hint: Option<AgentKind>,
+    ) -> bool {
         !pane.pane_dead
-            && !is_shell_command(&pane.pane_current_command)
-            && (self.select_adapter(pane, None, previous).is_some()
-                || is_runtime_wrapped_agent_candidate(&pane.pane_current_command)
-                || is_claude_output_confirmation_candidate(pane))
+            && (identity_hint.is_some()
+                || (!is_shell_command(&pane.pane_current_command)
+                    && (self.select_adapter(pane, None, previous, None).is_some()
+                        || is_runtime_wrapped_agent_candidate(&pane.pane_current_command)
+                        || is_claude_output_confirmation_candidate(pane))))
     }
 
     fn select_adapter<'a>(
@@ -82,7 +88,19 @@ impl AdapterRegistry {
         pane: &PaneSnapshot,
         output_tail: Option<&str>,
         previous: Option<&SessionRecord>,
+        identity_hint: Option<AgentKind>,
     ) -> Option<&'a dyn AgentAdapter> {
+        if let Some(identity_hint) = identity_hint {
+            if let Some(adapter) = self
+                .adapters
+                .iter()
+                .find(|adapter| adapter.kind() == identity_hint)
+                .map(Box::as_ref)
+            {
+                return Some(adapter);
+            }
+        }
+
         if let Some(previous) = previous {
             if let Some(adapter) = self
                 .adapters
@@ -142,10 +160,21 @@ impl SessionTracker {
         &self.records
     }
 
+    #[cfg(test)]
     pub fn refresh(
         &mut self,
         panes: &[PaneSnapshot],
         output_tails: &HashMap<String, String>,
+        now: Instant,
+    ) -> Vec<SessionRecord> {
+        self.refresh_with_process_kinds(panes, output_tails, &HashMap::new(), now)
+    }
+
+    pub fn refresh_with_process_kinds(
+        &mut self,
+        panes: &[PaneSnapshot],
+        output_tails: &HashMap<String, String>,
+        process_kinds: &HashMap<String, AgentKind>,
         now: Instant,
     ) -> Vec<SessionRecord> {
         let previous = std::mem::take(&mut self.records);
@@ -159,6 +188,7 @@ impl SessionTracker {
                 pane,
                 output_tails.get(&pane.pane_id).map(String::as_str),
                 previous.get(&pane.pane_id),
+                process_kinds.get(&pane.pane_id).copied(),
                 now,
             ) {
                 next.insert(record.pane.pane_id.clone(), record);
@@ -187,9 +217,10 @@ impl SessionTracker {
         pane: &PaneSnapshot,
         output_tail: Option<&str>,
         previous: Option<&SessionRecord>,
+        identity_hint: Option<AgentKind>,
         now: Instant,
     ) -> Option<SessionRecord> {
-        let adapter = self.registry.select_adapter(pane, output_tail, previous)?;
+        let adapter = self.registry.select_adapter(pane, output_tail, previous, identity_hint)?;
         let output_fingerprint = output_tail.and_then(full_output_fingerprint);
         let status = adapter.classify(pane, output_tail, output_fingerprint, previous);
         let detail = adapter.extract_detail(output_tail, previous);
@@ -500,10 +531,6 @@ impl AgentAdapter for AuggieAdapter {
     fn detect(&self, pane: &PaneSnapshot) -> bool {
         command_matches(&pane.pane_current_command, "auggie")
             || pane_title_contains(&pane.pane_title, "auggie")
-    }
-
-    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
-        looks_like_auggie_output(output_tail)
     }
 
     fn classify(
@@ -2005,7 +2032,12 @@ mod tests {
         let registry = AdapterRegistry::v1();
         let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (bnomei)");
 
-        assert!(registry.needs_output_tail(&gemini, None));
+        assert!(registry.needs_output_tail(&gemini, None, None));
+        assert!(registry.needs_output_tail(
+            &snapshot_with_title("%25", "node", false, "Implement feature"),
+            None,
+            Some(AgentKind::Auggie),
+        ));
     }
 
     #[test]
@@ -2014,7 +2046,7 @@ mod tests {
         let claude_braille =
             snapshot_with_title("%25", "2.1.76", false, "⠐ Plan and start MIR-1094");
 
-        assert!(registry.needs_output_tail(&claude_braille, None));
+        assert!(registry.needs_output_tail(&claude_braille, None, None));
     }
 
     #[test]
@@ -2061,6 +2093,32 @@ mod tests {
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
         assert_eq!(records[1].kind, AgentKind::Auggie);
         assert_eq!(records[1].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn tracker_detects_process_identified_node_wrapped_auggie_without_title() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let auggie = snapshot_with_title("%25", "node", false, "Implement Bevy");
+        let process_kinds = HashMap::from([(auggie.pane_id.clone(), AgentKind::Auggie)]);
+        let output_tails = HashMap::from([(
+            auggie.pane_id.clone(),
+            "\
+─────────────────────────────────────────────────────
+› Message will be queued and run after current task • Press ↑ to edit queue
+─────────────────────────────────────────────────────
+ ? to show shortcuts                      [Opus 4.8]
+                                           ~/work/project
+"
+            .to_string(),
+        )]);
+
+        let records =
+            tracker.refresh_with_process_kinds(&[auggie], &output_tails, &process_kinds, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Auggie);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
     }
 
     #[test]
@@ -2643,8 +2701,8 @@ Done! 🎉
             retained_until: None,
         };
 
-        assert!(registry.needs_output_tail(&snapshot("%1", "codex", false), Some(&previous)));
-        assert!(!registry.needs_output_tail(&snapshot("%1", "zsh", false), Some(&previous)));
+        assert!(registry.needs_output_tail(&snapshot("%1", "codex", false), Some(&previous), None,));
+        assert!(!registry.needs_output_tail(&snapshot("%1", "zsh", false), Some(&previous), None,));
     }
 
     #[test]
