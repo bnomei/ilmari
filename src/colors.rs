@@ -169,10 +169,7 @@ mod tests {
         assert_eq!(palette.base_style().fg, Some(Color::Reset));
         assert_eq!(palette.base_style().bg, Some(Color::Reset));
         assert_eq!(palette.style_for(SemanticRole::StatusRunning).fg, Some(Color::Indexed(4)));
-        assert_eq!(
-            palette.style_for(SemanticRole::AgentDetailAmpDeep).fg,
-            Some(Color::Indexed(6))
-        );
+        assert_eq!(palette.style_for(SemanticRole::AgentDetailAmpDeep).fg, Some(Color::Indexed(6)));
         assert_eq!(
             palette.style_for(SemanticRole::AgentDetailAmpSmart).fg,
             Some(Color::Indexed(10))
