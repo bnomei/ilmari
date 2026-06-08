@@ -373,7 +373,7 @@ fn subtask_lines(
     row: &PaneRow,
     palette: &Palette,
     show_app: bool,
-    _show_detail: bool,
+    show_detail: bool,
     show_time: bool,
     show_output: bool,
     show_stats: bool,
@@ -403,12 +403,14 @@ fn subtask_lines(
                     palette.style_for(SemanticRole::MutedText),
                 );
             }
-            push_cell(
-                &mut spans,
-                &mut current_width,
-                truncate_cell(&detail_cell, DETAIL_COL_WIDTH),
-                palette.style_for(SemanticRole::MutedText),
-            );
+            if show_detail {
+                push_cell(
+                    &mut spans,
+                    &mut current_width,
+                    truncate_cell(&detail_cell, DETAIL_COL_WIDTH),
+                    palette.style_for(SemanticRole::MutedText),
+                );
+            }
             if show_stats {
                 push_cell(
                     &mut spans,
@@ -427,7 +429,11 @@ fn subtask_lines(
                 push_cell(
                     &mut spans,
                     &mut current_width,
-                    String::new(),
+                    if show_detail {
+                        String::new()
+                    } else {
+                        truncate_cell(&detail_cell, OUTPUT_COL_WIDTH)
+                    },
                     palette.style_for(SemanticRole::MutedText),
                 );
             }
@@ -1130,6 +1136,72 @@ mod tests {
         assert!(text[1].contains("[15.4%/64M]"));
         assert!(text[2].contains("tmux-mcp-rs #102"));
         assert!(text[3].contains("helper #103"));
+    }
+
+    #[test]
+    fn workspace_lines_keep_subtask_stats_before_labels_when_detail_is_hidden() {
+        let palette = Palette::default();
+        let lines = super::workspace_lines(
+            &AppModel {
+                title: "ilmari".to_string(),
+                status_line: String::new(),
+                show_app: false,
+                show_git: true,
+                show_detail: false,
+                show_time: true,
+                show_output: true,
+                show_stats: true,
+                workspace_groups: vec![WorkspaceGroup {
+                    label: "api".to_string(),
+                    git_summary: None,
+                    rows: vec![PaneRow {
+                        pane_id: "%7".to_string(),
+                        inactive_since_label: String::new(),
+                        output_excerpt: Some("working".to_string().into()),
+                        client_label: "Codex",
+                        detail: None,
+                        process_usage: Some(
+                            SessionProcessUsage {
+                                agent: ResourceUsage {
+                                    cpu_tenths_percent: 154,
+                                    memory_kib: 64 * 1024,
+                                },
+                                spawned: ResourceUsage {
+                                    cpu_tenths_percent: 8,
+                                    memory_kib: 12 * 1024,
+                                },
+                                subtasks: vec![SubtaskProcess {
+                                    pid: 102,
+                                    depth: 0,
+                                    command_label: "tmux-mcp-rs".to_string(),
+                                    usage: ResourceUsage {
+                                        cpu_tenths_percent: 8,
+                                        memory_kib: 12 * 1024,
+                                    },
+                                }],
+                            }
+                            .into(),
+                        ),
+                        subtasks_expanded: true,
+                        status: SessionStatus::Running,
+                        status_label: "running",
+                        is_jump_match: false,
+                        is_selected: false,
+                    }],
+                }],
+                refresh_interval: Duration::from_secs(5),
+                last_refresh: Instant::now(),
+                last_refresh_wallclock: SystemTime::now(),
+            },
+            &palette,
+            120,
+        );
+        let subtask_text =
+            lines[2].spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+        let stats_position = subtask_text.find("[0.8%/12M]").expect("subtask stats");
+        let label_position = subtask_text.find("tmux-mcp-rs #102").expect("subtask label");
+
+        assert!(stats_position < label_position);
     }
 
     #[test]

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.4 - 2026-06-08
+
+### Fixed
+
+- Refresh process usage when stats or subprocess expansion is enabled, clear stale cached usage when stats are hidden or `ps` fails, and keep expanded subprocess stats aligned when model details are hidden.
+
 ## 0.2.3 - 2026-06-08
 
 ### Fixed

@@ -108,6 +108,7 @@ struct ProcessUsageKey {
 struct ProcessUsageCache {
     refresh_interval: Duration,
     cached_tree: Option<CachedProcessTree>,
+    collect_tree: fn() -> Result<ProcessTree, process::ProcessError>,
 }
 
 impl CachedProcessTree {
@@ -129,7 +130,14 @@ impl CachedProcessTree {
 
 impl ProcessUsageCache {
     fn new(refresh_interval: Duration) -> Self {
-        Self { refresh_interval, cached_tree: None }
+        Self::with_collector(refresh_interval, process::collect_process_tree)
+    }
+
+    fn with_collector(
+        refresh_interval: Duration,
+        collect_tree: fn() -> Result<ProcessTree, process::ProcessError>,
+    ) -> Self {
+        Self { refresh_interval, cached_tree: None, collect_tree }
     }
 
     fn hydrate(
@@ -148,7 +156,10 @@ impl ProcessUsageCache {
             return Ok(());
         }
 
-        self.ensure_tree(refreshed_at)?;
+        if let Err(error) = self.ensure_tree(refreshed_at) {
+            self.release(sessions);
+            return Err(error);
+        }
 
         if let Some(cached) = &mut self.cached_tree {
             for session in sessions {
@@ -187,7 +198,10 @@ impl ProcessUsageCache {
         session: &mut SessionRecord,
         refreshed_at: Instant,
     ) -> Result<(), process::ProcessError> {
-        self.ensure_tree(refreshed_at)?;
+        if let Err(error) = self.ensure_tree(refreshed_at) {
+            session.process_usage = None;
+            return Err(error);
+        }
         if let Some(cached) = &mut self.cached_tree {
             session.process_usage = cached.usage_for_session(session);
         } else {
@@ -205,8 +219,13 @@ impl ProcessUsageCache {
         };
 
         if should_refresh {
-            self.cached_tree =
-                Some(CachedProcessTree::new(process::collect_process_tree()?, refreshed_at));
+            match (self.collect_tree)() {
+                Ok(tree) => self.cached_tree = Some(CachedProcessTree::new(tree, refreshed_at)),
+                Err(error) => {
+                    self.cached_tree = None;
+                    return Err(error);
+                }
+            }
         }
 
         Ok(())
@@ -216,6 +235,14 @@ impl ProcessUsageCache {
         for session in sessions {
             session.process_usage = None;
         }
+
+        if let Some(cached) = &mut self.cached_tree {
+            cached.usage_by_session.clear();
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.cached_tree = None;
     }
 }
 
@@ -665,6 +692,9 @@ impl App {
         self.show_stats_pinned = true;
         let refreshed_at = Instant::now();
         let needs_process_usage = self.needs_process_usage();
+        if self.show_stats {
+            self.process_cache.invalidate();
+        }
         if let Err(error) =
             self.process_cache.hydrate(&mut self.sessions, refreshed_at, needs_process_usage)
         {
@@ -737,11 +767,8 @@ impl App {
         else {
             return false;
         };
-        if self.sessions[index].process_usage.is_some() {
-            return true;
-        }
-
         let refreshed_at = Instant::now();
+        self.process_cache.invalidate();
         if let Err(error) =
             self.process_cache.hydrate_session(&mut self.sessions[index], refreshed_at)
         {
@@ -1242,6 +1269,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime};
     use time::UtcOffset;
 
@@ -1594,6 +1622,8 @@ mod tests {
     fn equals_toggles_selected_subtasks() {
         let now = Instant::now();
         let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![SessionRecord {
             pane: PaneSnapshot::parse(
                 "%12\t101\t$1\tdev\t@7\tagents\t0\t/Users/bnomei/Sites/ilmari\tcodex\ttitle",
@@ -1639,6 +1669,8 @@ mod tests {
     fn equals_lazily_hydrates_selected_process_usage() {
         let now = Instant::now();
         let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![session("%12", SessionStatus::Running)];
         app.process_cache.cached_tree = Some(CachedProcessTree::new(sample_process_tree(), now));
         app.selected_pane_id = Some("%12".to_string());
@@ -1653,6 +1685,40 @@ mod tests {
         assert!(app.sessions[0].process_usage.is_some());
         assert!(app.model.workspace_groups[0].rows[0].process_usage.is_some());
         assert!(app.model.workspace_groups[0].rows[0].subtasks_expanded);
+    }
+
+    #[test]
+    fn equals_refreshes_existing_process_usage_before_expanding_subtasks() {
+        let now = Instant::now();
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.sessions = vec![session("%12", SessionStatus::Running)];
+        app.sessions[0].process_usage =
+            stale_process_tree().usage_for_session(&app.sessions[0]).map(Arc::new);
+        app.process_cache.cached_tree = Some(CachedProcessTree::new(stale_process_tree(), now));
+        app.selected_pane_id = Some("%12".to_string());
+        app.sync_model("status".to_string(), Vec::new(), now, SystemTime::now());
+
+        assert!(app.sessions[0]
+            .process_usage
+            .as_ref()
+            .expect("stale process usage should be present")
+            .subtasks
+            .is_empty());
+
+        app.handle_key_event(KeyCode::Char('='), KeyModifiers::NONE);
+
+        assert!(app.expanded_pane_ids.contains("%12"));
+        assert_eq!(
+            app.sessions[0]
+                .process_usage
+                .as_ref()
+                .expect("fresh process usage should be present")
+                .subtasks
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1751,11 +1817,13 @@ mod tests {
     }
 
     #[test]
-    fn stats_toggle_hydrates_process_usage_from_cached_tree() {
+    fn stats_toggle_hydrates_process_usage_from_fresh_tree() {
         let now = Instant::now();
         let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![session("%12", SessionStatus::Running)];
-        app.process_cache.cached_tree = Some(CachedProcessTree::new(sample_process_tree(), now));
+        app.process_cache.cached_tree = Some(CachedProcessTree::new(stale_process_tree(), now));
         app.selected_pane_id = Some("%12".to_string());
         app.sync_model("status".to_string(), Vec::new(), now, SystemTime::now());
 
@@ -1766,13 +1834,20 @@ mod tests {
 
         assert!(app.model.show_stats);
         assert!(app.sessions[0].process_usage.is_some());
-        assert!(app.model.workspace_groups[0].rows[0].process_usage.is_some());
+        let process_usage = app.model.workspace_groups[0].rows[0]
+            .process_usage
+            .as_ref()
+            .expect("process usage should hydrate from fresh tree");
+        assert_eq!(process_usage.agent.cpu_tenths_percent, 154);
+        assert_eq!(process_usage.subtasks.len(), 1);
     }
 
     #[test]
     fn hiding_stats_releases_process_usage_when_no_subtasks_are_expanded() {
         let now = Instant::now();
         let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![session("%12", SessionStatus::Running)];
         app.process_cache.cached_tree = Some(CachedProcessTree::new(sample_process_tree(), now));
         app.selected_pane_id = Some("%12".to_string());
@@ -1787,6 +1862,34 @@ mod tests {
         assert!(!app.model.show_stats);
         assert!(app.sessions[0].process_usage.is_none());
         assert!(app.process_cache.cached_tree.is_some());
+    }
+
+    #[test]
+    fn process_cache_release_clears_memoized_session_usage() {
+        let now = Instant::now();
+        let mut cache = ProcessUsageCache::new(DEFAULT_PROCESS_REFRESH_INTERVAL);
+        let mut sessions = vec![session("%12", SessionStatus::Running)];
+        cache.cached_tree = Some(CachedProcessTree::new(sample_process_tree(), now));
+
+        cache.hydrate(&mut sessions, now, true).expect("cached process tree should hydrate");
+
+        assert!(sessions[0].process_usage.is_some());
+        assert!(!cache
+            .cached_tree
+            .as_ref()
+            .expect("tree should be retained")
+            .usage_by_session
+            .is_empty());
+
+        cache.release(&mut sessions);
+
+        assert!(sessions[0].process_usage.is_none());
+        assert!(cache
+            .cached_tree
+            .as_ref()
+            .expect("tree should still be retained for identity detection")
+            .usage_by_session
+            .is_empty());
     }
 
     #[test]
@@ -2099,5 +2202,28 @@ mod tests {
                 command: "tmux-mcp-rs".to_string(),
             },
         ])
+    }
+
+    fn stale_process_tree() -> ProcessTree {
+        ProcessTree::from_snapshots(vec![
+            ProcessSnapshot {
+                pid: 101,
+                ppid: 1,
+                cpu_tenths_percent: 0,
+                memory_kib: 0,
+                command: "zsh".to_string(),
+            },
+            ProcessSnapshot {
+                pid: 201,
+                ppid: 101,
+                cpu_tenths_percent: 21,
+                memory_kib: 32 * 1024,
+                command: "codex".to_string(),
+            },
+        ])
+    }
+
+    fn sample_collector() -> Result<ProcessTree, crate::process::ProcessError> {
+        Ok(sample_process_tree())
     }
 }
