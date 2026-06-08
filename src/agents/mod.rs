@@ -11,6 +11,8 @@ use crate::tmux::PaneSnapshot;
 
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(30);
 const STATUS_SIGNAL_WINDOW_BYTES: usize = 240;
+const AMP_STATUS_SIGNAL_WINDOW_LINES: usize = 12;
+const AMP_STATUS_SIGNAL_MAX_CHARS: usize = 40;
 const PROMPT_LINE_WINDOW: usize = 6;
 const OUTPUT_EXCERPT_MAX_CHARS: usize = 80;
 
@@ -221,13 +223,15 @@ impl SessionTracker {
         now: Instant,
     ) -> Option<SessionRecord> {
         let adapter = self.registry.select_adapter(pane, output_tail, previous, identity_hint)?;
-        let output_fingerprint = output_tail.and_then(full_output_fingerprint);
+        let kind = adapter.kind();
+        let output_fingerprint =
+            output_tail.and_then(|output_tail| output_fingerprint_for_kind(kind, output_tail));
         let status = adapter.classify(pane, output_tail, output_fingerprint, previous);
         let detail = adapter.extract_detail(output_tail, previous);
         let output_excerpt = adapter.extract_output_excerpt(output_tail, previous);
         let retained_until = retention_deadline(previous, status, self.retention, now)?;
         let last_changed_at = match previous {
-            Some(previous) if previous.kind == adapter.kind() && previous.status == status => {
+            Some(previous) if previous.kind == kind && previous.status == status => {
                 previous.last_changed_at
             }
             _ => now,
@@ -235,7 +239,7 @@ impl SessionTracker {
 
         Some(SessionRecord {
             pane: pane.clone(),
-            kind: adapter.kind(),
+            kind,
             status,
             detail,
             output_excerpt,
@@ -927,12 +931,14 @@ fn extract_amp_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     let output_tail = output_tail?;
     let label = output_tail.lines().rev().find_map(|line| {
         let trimmed = line.trim();
-        if !trimmed.to_ascii_lowercase().contains("skills") {
-            return None;
-        }
+        let lower = trimmed.to_ascii_lowercase();
+        let captures = if lower.contains("skills") {
+            amp_mode_pattern().captures(trimmed)
+        } else {
+            amp_compact_mode_pattern().captures(trimmed)
+        };
 
-        amp_mode_pattern()
-            .captures(trimmed)
+        captures
             .and_then(|captures| captures.name("mode"))
             .map(|matched| matched.as_str().to_ascii_lowercase())
     })?;
@@ -1040,17 +1046,20 @@ fn extract_codex_output_excerpt(output_tail: Option<&str>) -> Option<String> {
 
 fn extract_amp_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
-    extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
-        let lower = normalized.to_ascii_lowercase();
-        let raw_lower = raw.to_ascii_lowercase();
-        is_common_output_noise(raw, normalized)
-            || raw_lower.contains("welcome to")
-            || ((lower.contains("smart") || lower.contains("rush")) && lower.contains("skills"))
-            || (normalized.contains("~/") && normalized.contains('('))
-            || raw.contains('✓') && lower.contains("thinking")
-            || lower.contains("of 168k")
-            || (normalized.chars().count() == 1 && raw.trim_start().starts_with(['│', '┃']))
-    })
+    extract_output_excerpt_from_tail(output_tail, is_amp_output_noise)
+}
+
+fn is_amp_output_noise(raw: &str, normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+    let raw_lower = raw.to_ascii_lowercase();
+    is_common_output_noise(raw, normalized)
+        || raw_lower.contains("welcome to")
+        || raw.trim_start().starts_with(['╭', '╰'])
+        || ((lower.contains("smart") || lower.contains("rush")) && lower.contains("skills"))
+        || (normalized.contains("~/") && normalized.contains('('))
+        || raw.contains('✓') && lower.contains("thinking")
+        || lower.contains("of 168k")
+        || (normalized.chars().count() == 1 && raw.trim_start().starts_with(['│', '┃']))
 }
 
 fn extract_claude_output_excerpt(output_tail: Option<&str>) -> Option<String> {
@@ -1371,14 +1380,55 @@ fn reuse_output_excerpt_arc(
     }
 }
 
+fn output_fingerprint_for_kind(kind: AgentKind, output_tail: &str) -> Option<u64> {
+    match kind {
+        AgentKind::Amp => amp_output_fingerprint(output_tail),
+        _ => full_output_fingerprint(output_tail),
+    }
+}
+
 fn full_output_fingerprint(output_tail: &str) -> Option<u64> {
-    if output_tail.trim().is_empty() {
+    fingerprint_signal(output_tail)
+}
+
+fn amp_output_fingerprint(output_tail: &str) -> Option<u64> {
+    let lines: Vec<_> = output_tail.lines().collect();
+    let start = lines.len().saturating_sub(AMP_STATUS_SIGNAL_WINDOW_LINES);
+    let mut signal = Vec::new();
+
+    for raw in &lines[start..] {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_output_line(trimmed);
+        if normalized.is_empty() || is_amp_output_noise(trimmed, &normalized) {
+            continue;
+        }
+
+        signal.push(clamp_signal_head(&normalized, AMP_STATUS_SIGNAL_MAX_CHARS));
+    }
+
+    if signal.is_empty() {
+        return None;
+    }
+
+    fingerprint_signal(&signal.join("\n"))
+}
+
+fn fingerprint_signal(signal: &str) -> Option<u64> {
+    if signal.trim().is_empty() {
         return None;
     }
 
     let mut hasher = DefaultHasher::new();
-    output_tail.hash(&mut hasher);
+    signal.hash(&mut hasher);
     Some(hasher.finish())
+}
+
+fn clamp_signal_head(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn looks_like_waiting_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
@@ -1727,7 +1777,7 @@ fn codex_card_model_pattern() -> &'static Regex {
 fn codex_footer_model_pattern() -> &'static Regex {
     static CODEX_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
     CODEX_FOOTER_MODEL.get_or_init(|| {
-        Regex::new(r"^(?P<model>[A-Za-z0-9][^·]+?)\s+·\s+\d+% left\b")
+        Regex::new(r"^(?P<model>[A-Za-z0-9][^·]+?)\s+·\s+(?:weekly\s+)?\d+% left\b")
             .expect("codex footer model regex should compile")
     })
 }
@@ -1736,6 +1786,14 @@ fn amp_mode_pattern() -> &'static Regex {
     static AMP_MODE: OnceLock<Regex> = OnceLock::new();
     AMP_MODE.get_or_init(|| {
         Regex::new(r"(?i)\b(?P<mode>smart|rush)\b").expect("amp mode regex should compile")
+    })
+}
+
+fn amp_compact_mode_pattern() -> &'static Regex {
+    static AMP_COMPACT_MODE: OnceLock<Regex> = OnceLock::new();
+    AMP_COMPACT_MODE.get_or_init(|| {
+        Regex::new(r"(?i)↯\s*(?P<mode>smart|rush)\b")
+            .expect("amp compact mode regex should compile")
     })
 }
 
@@ -1831,7 +1889,7 @@ fn auggie_using_model_pattern() -> &'static Regex {
 fn auggie_footer_model_pattern() -> &'static Regex {
     static AUGGIE_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
     AUGGIE_FOOTER_MODEL.get_or_init(|| {
-        Regex::new(r"\[(?P<model>[^\]]+)\]\s+~\s*$")
+        Regex::new(r"\[(?P<model>[^\]]+)\]\s+~(?:\s*$|[/\w.-].*$)")
             .expect("auggie footer model regex should compile")
     })
 }
@@ -1975,13 +2033,13 @@ fn normalize_detail_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_grok_output_tail, classify_output_tail, extract_amp_detail,
-        extract_amp_output_excerpt, extract_auggie_detail, extract_auggie_output_excerpt,
-        extract_claude_detail, extract_claude_output_excerpt, extract_codex_detail,
-        extract_codex_output_excerpt, extract_gemini_detail, extract_gemini_output_excerpt,
-        extract_grok_detail, extract_grok_output_excerpt, extract_opencode_detail,
-        extract_opencode_output_excerpt, extract_pi_detail, extract_pi_output_excerpt,
-        AdapterRegistry, AgentAdapter, SessionTracker,
+        amp_output_fingerprint, classify_grok_output_tail, classify_output_tail,
+        extract_amp_detail, extract_amp_output_excerpt, extract_auggie_detail,
+        extract_auggie_output_excerpt, extract_claude_detail, extract_claude_output_excerpt,
+        extract_codex_detail, extract_codex_output_excerpt, extract_gemini_detail,
+        extract_gemini_output_excerpt, extract_grok_detail, extract_grok_output_excerpt,
+        extract_opencode_detail, extract_opencode_output_excerpt, extract_pi_detail,
+        extract_pi_output_excerpt, AdapterRegistry, AgentAdapter, SessionTracker,
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
@@ -2963,6 +3021,23 @@ gpt-5.4 xhigh fast · 100% left · ~/Sites/ilmari
     }
 
     #[test]
+    fn codex_detail_extracts_from_weekly_footer_line() {
+        let output_tail = "\
+› Improve documentation in @filename
+
+gpt-5.5 xhigh · weekly 39% left · Context 0% used
+";
+
+        assert_eq!(
+            extract_codex_detail(Some(output_tail)),
+            Some(AgentDetail {
+                label: "gpt-5.5 xhigh".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+    }
+
+    #[test]
     fn codex_output_excerpt_skips_prompt_and_footer() {
         let output_tail = "\
 Here is the first part of the answer.
@@ -3043,6 +3118,16 @@ shift+tab to accept edits
 
         assert_eq!(
             extract_auggie_detail(Some(
+                "◊ Using model: Opus 4.8\n ? to show shortcuts                           [Opus 4.8]  ~/workspace"
+            )),
+            Some(AgentDetail {
+                label: "Opus 4.8".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+
+        assert_eq!(
+            extract_auggie_detail(Some(
                 "Select model\n● GPT-5.4 (default) (current)                          $$\n[↑↓] Navigate • [Enter] Select • [/] Search • [Esc] Cancel"
             )),
             Some(AgentDetail {
@@ -3104,6 +3189,14 @@ shift+tab to accept edits
 ╭──────────────────────rush──4 skills─╮
 ╰────────────────~/Sites/ilmari (main)─╯
 ";
+        let compact_rush = "\
+╭─────────────────────────────────────────────────────────────────── ↯rush ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let compact_rush_without_marker = "\
+╭──────────────────────────────────────────────────────────────────── rush ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
 
         assert_eq!(
             extract_amp_detail(Some(smart)),
@@ -3113,6 +3206,11 @@ shift+tab to accept edits
             extract_amp_detail(Some(rush)),
             Some(AgentDetail { label: "rush".to_string(), tone: AgentDetailTone::Warning })
         );
+        assert_eq!(
+            extract_amp_detail(Some(compact_rush)),
+            Some(AgentDetail { label: "rush".to_string(), tone: AgentDetailTone::Warning })
+        );
+        assert_eq!(extract_amp_detail(Some(compact_rush_without_marker)), None);
     }
 
     #[test]
@@ -3132,6 +3230,133 @@ shift+tab to accept edits
             extract_amp_output_excerpt(Some(output_tail)),
             Some("Could you clarify what you'd like me to help with?".to_string())
         );
+    }
+
+    #[test]
+    fn amp_output_excerpt_skips_compact_pricing_and_mode_border() {
+        let output_tail = "\
+ ┃ hello
+
+ Hello!
+╭────────────────────────────────────────────────────────── $0.001 ─ ↯rush ─╮
+│                                                                           │
+│                                                                           │
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+
+        assert_eq!(extract_amp_output_excerpt(Some(output_tail)), Some("Hello!".to_string()));
+    }
+
+    #[test]
+    fn amp_fingerprint_ignores_compact_pricing_and_mode_border() {
+        let first = "\
+ ┃ hello
+
+ Hello!
+╭────────────────────────────────────────────────────────── $0.001 ─ ↯rush ─╮
+│                                                                           │
+│                                                                           │
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let second = "\
+ ┃ hello
+
+ Hello!
+╭────────────────────────────────────────────────────────── $0.002 ─ ↯rush ─╮
+│                                                                           │
+│                                                                           │
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+
+        assert_eq!(amp_output_fingerprint(first), amp_output_fingerprint(second));
+    }
+
+    #[test]
+    fn tracker_keeps_amp_waiting_when_compact_chrome_changes() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot("%30", "amp", false);
+        let now = Instant::now();
+        let first_output = HashMap::from([(
+            pane.pane_id.clone(),
+            "\
+ ┃ hello
+
+ Hello!
+╭────────────────────────────────────────────────────────── $0.001 ─ ↯rush ─╮
+│                                                                           │
+│                                                                           │
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+"
+            .to_string(),
+        )]);
+        let second_output = HashMap::from([(
+            pane.pane_id.clone(),
+            "\
+ ┃ hello
+
+ Hello!
+╭────────────────────────────────────────────────────────── $0.002 ─ ↯rush ─╮
+│                                                                           │
+│                                                                           │
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+"
+            .to_string(),
+        )]);
+
+        let first = tracker.refresh(std::slice::from_ref(&pane), &first_output, now);
+        assert_eq!(first[0].status, SessionStatus::WaitingInput);
+
+        let second = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &second_output,
+            now + Duration::from_secs(5),
+        );
+
+        assert_eq!(second[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn tracker_marks_amp_running_when_bottom_status_changes() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot("%30", "amp", false);
+        let now = Instant::now();
+        let waiting_output = HashMap::from([(
+            pane.pane_id.clone(),
+            "\
+ ┃ hello
+
+ Hello!
+╭────────────────────────────────────────────────────────── $0.001 ─ ↯rush ─╮
+│                                                                           │
+│                                                                           │
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+"
+            .to_string(),
+        )]);
+        let running_output = HashMap::from([(
+            pane.pane_id.clone(),
+            "\
+ ┃ hello
+
+ Hello!
+╭────────────────────────────────────────────────────────── $0.001 ─ ↯rush ─╮
+│ streaming tokens                                                          │
+│                                                                           │
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+"
+            .to_string(),
+        )]);
+
+        let first = tracker.refresh(std::slice::from_ref(&pane), &waiting_output, now);
+        assert_eq!(first[0].status, SessionStatus::WaitingInput);
+
+        let second = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &running_output,
+            now + Duration::from_secs(5),
+        );
+
+        assert_eq!(second[0].status, SessionStatus::Running);
     }
 
     #[test]
@@ -3544,7 +3769,7 @@ shift+tab to accept edits
 
     const GROK_COMPACT_WAITING: &str = "\
 ➜  ilmari
-  main ~/PROJECTS/ilmari │ 23K / 512K │
+  main ~/workspace │ 23K / 512K │
     Please reply with exactly: compact fixture ready 1:40 PM
 
     ◆ Thought for 0.7s
@@ -3746,10 +3971,11 @@ Try out Grok Build
         let now = Instant::now();
         // exact tab-separated format from tmux list-panes -F as used by ilmari and captured live
         let pane19 = PaneSnapshot::parse(
-            "%19\t27874\t$4\t4\t@8\tzsh\t0\t/Users/bnomei/PROJECTS/ilmari\tgrok-macos-aarc\tgrok-easy-2nd-pane"
-        ).expect("parse pane19");
+            "%19\t27874\t$4\t4\t@8\tzsh\t0\t/workspace/ilmari\tgrok-macos-aarc\tgrok-easy-2nd-pane",
+        )
+        .expect("parse pane19");
         let pane20 = PaneSnapshot::parse(
-            "%20\t54502\t$4\t4\t@11\teasymode-test\t0\t/Users/bnomei/PROJECTS/ilmari\tgrok-macos-aarc\tStarting New User Session with Hello Mes… - grok"
+            "%20\t54502\t$4\t4\t@11\teasymode-test\t0\t/workspace/ilmari\tgrok-macos-aarc\tStarting New User Session with Hello Mes… - grok"
         ).expect("parse pane20");
         let output_tails = HashMap::from([
             (pane19.pane_id.clone(), GROK_WAITING_NARROW.to_string()),
@@ -3783,7 +4009,7 @@ Try out Grok Build
         let mut tracker = SessionTracker::new();
         let now = Instant::now();
         let pane = PaneSnapshot::parse(
-            "%31\t27874\t$6\t6\t@17\tzsh\t0\t/Users/bnomei/PROJECTS/ilmari\tgrok-macos-aarc\tCompact Grok",
+            "%31\t27874\t$6\t6\t@17\tzsh\t0\t/workspace/ilmari\tgrok-macos-aarc\tCompact Grok",
         )
         .expect("parse compact grok pane");
         let output_tails =
