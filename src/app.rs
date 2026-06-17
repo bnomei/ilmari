@@ -90,6 +90,7 @@ struct App {
     show_detail_pinned: bool,
     show_stats_pinned: bool,
     bell_enabled: bool,
+    output_tail_capture_enabled: bool,
     hydrated: bool,
 }
 
@@ -253,6 +254,7 @@ impl Default for App {
             DEFAULT_REFRESH_INTERVAL,
             DEFAULT_PROCESS_REFRESH_INTERVAL,
             false,
+            true,
         )
     }
 }
@@ -264,6 +266,7 @@ impl App {
             refresh_interval_from_env(),
             process_refresh_interval_from_env(),
             quit_on_activate_from_env(),
+            output_tail_capture_enabled_from_env(),
         )
     }
 
@@ -274,6 +277,7 @@ impl App {
             refresh_interval,
             DEFAULT_PROCESS_REFRESH_INTERVAL,
             quit_on_activate,
+            true,
         )
     }
 
@@ -282,6 +286,7 @@ impl App {
         refresh_interval: Duration,
         process_refresh_interval: Duration,
         quit_on_activate: bool,
+        output_tail_capture_enabled: bool,
     ) -> Self {
         let mut model = AppModel::placeholder();
         model.refresh_interval = refresh_interval;
@@ -312,6 +317,7 @@ impl App {
             show_detail_pinned: false,
             show_stats_pinned: false,
             bell_enabled: true,
+            output_tail_capture_enabled,
             hydrated: false,
         }
     }
@@ -459,11 +465,15 @@ impl App {
                             HashMap::new()
                         }
                     };
-                let output_tails = tmux::capture_output_tails_with_process_kinds(
-                    &panes,
-                    &self.session_tracker,
-                    &process_kinds,
-                );
+                let output_tails = if self.output_tail_capture_enabled {
+                    tmux::capture_output_tails_with_process_kinds(
+                        &panes,
+                        &self.session_tracker,
+                        &process_kinds,
+                    )
+                } else {
+                    HashMap::new()
+                };
                 self.sessions = self.session_tracker.refresh_with_process_kinds(
                     &panes,
                     &output_tails,
@@ -1205,6 +1215,17 @@ fn quit_on_activate_from_env() -> bool {
     )
 }
 
+fn output_tail_capture_enabled_from_env() -> bool {
+    output_tail_capture_enabled_from_var(env::var("ILMARI_OUTPUT_TAIL").ok().as_deref())
+}
+
+fn output_tail_capture_enabled_from_var(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
 fn quit_on_activate_from_vars(tmux: Option<&str>, tmux_pane: Option<&str>) -> bool {
     tmux.is_some() && tmux_pane.is_none()
 }
@@ -1254,9 +1275,10 @@ fn setup_terminal_manually(stdout: &mut Stdout) -> Result<()> {
 mod tests {
     use super::{
         build_model, count_alert_transitions, derive_path_labels, normalize_selected_pane_id,
-        process_refresh_interval_from_var, quit_on_activate_from_vars, refresh_interval_from_var,
-        relabel_git_summaries, App, CachedProcessTree, ProcessUsageCache,
-        DEFAULT_PROCESS_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL,
+        output_tail_capture_enabled_from_var, process_refresh_interval_from_var,
+        quit_on_activate_from_vars, refresh_interval_from_var, relabel_git_summaries, App,
+        CachedProcessTree, ProcessUsageCache, DEFAULT_PROCESS_REFRESH_INTERVAL,
+        DEFAULT_REFRESH_INTERVAL,
     };
     use crate::colors::Palette;
     use crate::git::GitSummaryReport;
@@ -1936,6 +1958,33 @@ mod tests {
 
         app.handle_key_event(KeyCode::Char('t'), KeyModifiers::NONE);
         assert!(app.model.show_time);
+    }
+
+    #[test]
+    fn output_tail_capture_defaults_to_enabled() {
+        let app = App::default();
+
+        assert!(app.output_tail_capture_enabled);
+        assert!(output_tail_capture_enabled_from_var(None));
+        assert!(output_tail_capture_enabled_from_var(Some("")));
+        assert!(output_tail_capture_enabled_from_var(Some("true")));
+    }
+
+    #[test]
+    fn output_tail_capture_can_be_disabled_by_env_value() {
+        let app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            false,
+        );
+
+        assert!(!app.output_tail_capture_enabled);
+        assert!(!output_tail_capture_enabled_from_var(Some("0")));
+        assert!(!output_tail_capture_enabled_from_var(Some("false")));
+        assert!(!output_tail_capture_enabled_from_var(Some(" no ")));
+        assert!(!output_tail_capture_enabled_from_var(Some("OFF")));
     }
 
     #[test]

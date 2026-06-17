@@ -120,6 +120,7 @@ Ilmari currently configures through environment variables.
 | --- | --- | --- | --- |
 | `ILMARI_REFRESH_SECONDS` | Main tmux scan cadence | `5` | Positive integer seconds. Empty, invalid, or non-positive values fall back to the default. |
 | `ILMARI_PROCESS_REFRESH_SECONDS` | CPU and memory sampling cadence | `15` | Separate from the main refresh so `ilmari` does not call `ps` on every redraw. Empty, invalid, or non-positive values fall back to the default. |
+| `ILMARI_OUTPUT_TAIL` | Pane output tail capture | enabled | Set to `0`, `false`, `no`, or `off` to skip `tmux capture-pane` output tail capture. |
 | `ILMARI_TUI_PALETTE` | Primary palette override | terminal ANSI theme | Takes an 18-slot CSV palette. Takes precedence over `ILMARI_PALETTE`. |
 | `ILMARI_PALETTE` | Compatibility alias for palette override | terminal ANSI theme | Used only when `ILMARI_TUI_PALETTE` is unset. |
 
@@ -128,7 +129,17 @@ Examples:
 ```sh
 ILMARI_REFRESH_SECONDS=10 ilmari
 ILMARI_PROCESS_REFRESH_SECONDS=30 ilmari
+ILMARI_OUTPUT_TAIL=0 ilmari
 ```
+
+### Pane output privacy
+
+By default, Ilmari captures a small visible tail from supported agent panes so it
+can classify waiting states and show the latest output excerpt. That visible pane
+text may contain prompts, command output, file paths, tokens, or other sensitive
+information. If you do not want Ilmari to read pane contents, disable output tail
+capture with `ILMARI_OUTPUT_TAIL=0`; pane tails remain enabled by default unless
+that variable is set to `0`, `false`, `no`, or `off`.
 
 Ilmari uses semantic color roles in code, but by default those resolve through
 your terminal's current ANSI palette. If you want explicit colors, provide an
