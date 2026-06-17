@@ -114,7 +114,20 @@ pane and closes the popup.
 
 ## Configuration
 
-Ilmari currently configures through environment variables.
+Ilmari configures through command-line flags and environment variables. It reads
+environment defaults first, then command-line flags override the same setting for
+that run.
+
+| Flag | Purpose | Env fallback |
+| --- | --- | --- |
+| `--refresh-seconds <SECONDS>` | Main tmux scan cadence | `ILMARI_REFRESH_SECONDS` |
+| `--process-refresh-seconds <SECONDS>` | CPU and memory sampling cadence | `ILMARI_PROCESS_REFRESH_SECONDS` |
+| `--palette <CSV>` | 18-slot palette override | `ILMARI_TUI_PALETTE`, then `ILMARI_PALETTE` |
+| `--no-git` | Start with git summaries hidden | none |
+| `--no-output-tail` | Skip pane output tail capture | `ILMARI_OUTPUT_TAIL=0` |
+| `--no-bell` | Disable terminal bell alerts | none |
+| `--help` / `-h` | Print help | none |
+| `--version` / `-V` | Print version | none |
 
 | Variable | Purpose | Default | Notes |
 | --- | --- | --- | --- |

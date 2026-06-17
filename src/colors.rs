@@ -47,6 +47,10 @@ impl Palette {
         Self::from_env_map(&env)
     }
 
+    pub fn from_csv(value: &str) -> Result<Self, String> {
+        Self::parse_csv(value.trim())
+    }
+
     pub fn base_style(&self) -> Style {
         Style::default().fg(self.fg).bg(self.bg)
     }

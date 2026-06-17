@@ -1,0 +1,209 @@
+use std::time::Duration;
+
+use anyhow::{bail, Result};
+
+use crate::app::AppConfig;
+use crate::colors::Palette;
+
+pub enum CliCommand {
+    Run(AppConfig),
+    Help,
+    Version,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliOptions {
+    refresh_interval: Option<Duration>,
+    process_refresh_interval: Option<Duration>,
+    palette: Option<Palette>,
+    show_git: Option<bool>,
+    bell_enabled: Option<bool>,
+    output_tail_capture_enabled: Option<bool>,
+}
+
+impl CliOptions {
+    fn apply_to(self, mut config: AppConfig) -> AppConfig {
+        if let Some(refresh_interval) = self.refresh_interval {
+            config.refresh_interval = refresh_interval;
+        }
+        if let Some(process_refresh_interval) = self.process_refresh_interval {
+            config.process_refresh_interval = process_refresh_interval;
+        }
+        if let Some(palette) = self.palette {
+            config.palette = palette;
+        }
+        if let Some(show_git) = self.show_git {
+            config.show_git = show_git;
+        }
+        if let Some(bell_enabled) = self.bell_enabled {
+            config.bell_enabled = bell_enabled;
+        }
+        if let Some(output_tail_capture_enabled) = self.output_tail_capture_enabled {
+            config.output_tail_capture_enabled = output_tail_capture_enabled;
+        }
+        config
+    }
+}
+
+pub fn parse_args<I, S>(args: I) -> Result<CliCommand>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut args = args.into_iter().map(Into::into).peekable();
+    let mut options = CliOptions {
+        refresh_interval: None,
+        process_refresh_interval: None,
+        palette: None,
+        show_git: None,
+        bell_enabled: None,
+        output_tail_capture_enabled: None,
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help),
+            "-V" | "--version" => return Ok(CliCommand::Version),
+            "--refresh-seconds" => {
+                let value = next_value(&mut args, "--refresh-seconds")?;
+                options.refresh_interval =
+                    Some(parse_positive_seconds(&value, "--refresh-seconds")?);
+            }
+            "--process-refresh-seconds" => {
+                let value = next_value(&mut args, "--process-refresh-seconds")?;
+                options.process_refresh_interval =
+                    Some(parse_positive_seconds(&value, "--process-refresh-seconds")?);
+            }
+            "--palette" => {
+                let value = next_value(&mut args, "--palette")?;
+                options.palette = Some(parse_palette(&value)?);
+            }
+            "--no-git" => options.show_git = Some(false),
+            "--no-bell" => options.bell_enabled = Some(false),
+            "--no-output-tail" => options.output_tail_capture_enabled = Some(false),
+            _ => {
+                if let Some(value) = arg.strip_prefix("--refresh-seconds=") {
+                    options.refresh_interval =
+                        Some(parse_positive_seconds(value, "--refresh-seconds")?);
+                } else if let Some(value) = arg.strip_prefix("--process-refresh-seconds=") {
+                    options.process_refresh_interval =
+                        Some(parse_positive_seconds(value, "--process-refresh-seconds")?);
+                } else if let Some(value) = arg.strip_prefix("--palette=") {
+                    options.palette = Some(parse_palette(value)?);
+                } else {
+                    bail!("unknown argument `{arg}`; try `ilmari --help`");
+                }
+            }
+        }
+    }
+
+    Ok(CliCommand::Run(options.apply_to(AppConfig::from_env())))
+}
+
+pub fn help_text() -> &'static str {
+    concat!(
+        "ilmari ",
+        env!("CARGO_PKG_VERSION"),
+        "\n\n",
+        "Usage: ilmari [OPTIONS]\n\n",
+        "Options:\n",
+        "  --refresh-seconds <SECONDS>          Main tmux scan cadence\n",
+        "  --process-refresh-seconds <SECONDS>  CPU and memory sampling cadence\n",
+        "  --palette <CSV>                      18-slot terminal palette override\n",
+        "  --no-git                             Start with git summaries hidden\n",
+        "  --no-output-tail                     Disable tmux capture-pane output tails\n",
+        "  --no-bell                            Disable terminal bell alerts\n",
+        "  -h, --help                           Print help\n",
+        "  -V, --version                        Print version\n\n",
+        "Environment defaults:\n",
+        "  ILMARI_REFRESH_SECONDS, ILMARI_PROCESS_REFRESH_SECONDS,\n",
+        "  ILMARI_OUTPUT_TAIL, ILMARI_TUI_PALETTE, ILMARI_PALETTE\n\n",
+        "Flags override environment defaults for the same setting.\n",
+    )
+}
+
+pub fn version_text() -> &'static str {
+    concat!("ilmari ", env!("CARGO_PKG_VERSION"))
+}
+
+fn next_value<I>(args: &mut std::iter::Peekable<I>, flag: &str) -> Result<String>
+where
+    I: Iterator<Item = String>,
+{
+    let Some(value) = args.next() else {
+        bail!("{flag} requires a value");
+    };
+    if value.starts_with('-') {
+        bail!("{flag} requires a value");
+    }
+    Ok(value)
+}
+
+fn parse_positive_seconds(value: &str, flag: &str) -> Result<Duration> {
+    let parsed =
+        value.trim().parse::<u64>().ok().filter(|seconds| *seconds > 0).map(Duration::from_secs);
+    let Some(parsed) = parsed else {
+        bail!("{flag} requires a positive integer number of seconds");
+    };
+    Ok(parsed)
+}
+
+fn parse_palette(value: &str) -> Result<Palette> {
+    Palette::from_csv(value).map_err(|error| anyhow::anyhow!("invalid --palette value: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{help_text, parse_args, version_text, CliCommand};
+    use std::time::Duration;
+
+    #[test]
+    fn help_and_version_short_circuit_before_config() {
+        assert!(matches!(parse_args(["--help"]).expect("help parses"), CliCommand::Help));
+        assert!(matches!(parse_args(["--version"]).expect("version parses"), CliCommand::Version));
+        for flag in [
+            "--refresh-seconds",
+            "--process-refresh-seconds",
+            "--palette",
+            "--no-git",
+            "--no-output-tail",
+            "--no-bell",
+            "--help",
+            "--version",
+        ] {
+            assert!(help_text().contains(flag), "help should mention {flag}");
+        }
+        assert!(help_text().contains("Flags override environment defaults"));
+        assert_eq!(version_text(), concat!("ilmari ", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn flags_override_runtime_defaults() {
+        let command = parse_args([
+            "--refresh-seconds",
+            "7",
+            "--process-refresh-seconds=31",
+            "--no-git",
+            "--no-output-tail",
+            "--no-bell",
+        ])
+        .expect("flags should parse");
+
+        let CliCommand::Run(config) = command else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(config.refresh_interval, Duration::from_secs(7));
+        assert_eq!(config.process_refresh_interval, Duration::from_secs(31));
+        assert!(!config.show_git);
+        assert!(!config.output_tail_capture_enabled);
+        assert!(!config.bell_enabled);
+    }
+
+    #[test]
+    fn invalid_flag_values_are_errors() {
+        assert!(parse_args(["--refresh-seconds", "0"]).is_err());
+        assert!(parse_args(["--process-refresh-seconds=abc"]).is_err());
+        assert!(parse_args(["--unknown"]).is_err());
+    }
+}

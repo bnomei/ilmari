@@ -29,16 +29,42 @@ use crate::ui;
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
-pub fn run() -> Result<()> {
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub palette: Palette,
+    pub refresh_interval: Duration,
+    pub process_refresh_interval: Duration,
+    pub quit_on_activate: bool,
+    pub show_git: bool,
+    pub bell_enabled: bool,
+    pub output_tail_capture_enabled: bool,
+}
+
+impl AppConfig {
+    pub fn from_env() -> Self {
+        Self {
+            palette: Palette::from_env(),
+            refresh_interval: refresh_interval_from_env(),
+            process_refresh_interval: process_refresh_interval_from_env(),
+            quit_on_activate: quit_on_activate_from_env(),
+            show_git: true,
+            bell_enabled: true,
+            output_tail_capture_enabled: output_tail_capture_enabled_from_env(),
+        }
+    }
+}
+
+pub fn run(config: AppConfig) -> Result<()> {
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
-    let result = run_app(&mut terminal);
+    let result = run_app(&mut terminal, config);
     ratatui::restore();
     result
 }
 
-fn run_app(terminal: &mut DefaultTerminal) -> Result<()> {
-    let mut app = App::from_env();
+fn run_app(terminal: &mut DefaultTerminal, config: AppConfig) -> Result<()> {
+    let mut app = App::from_config(config);
     app.refresh(true);
     let mut needs_redraw = true;
 
@@ -249,24 +275,28 @@ impl ProcessUsageCache {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new_with_process_refresh(
-            Palette::default(),
-            DEFAULT_REFRESH_INTERVAL,
-            DEFAULT_PROCESS_REFRESH_INTERVAL,
-            false,
-            true,
-        )
+        Self::from_config(AppConfig {
+            palette: Palette::default(),
+            refresh_interval: DEFAULT_REFRESH_INTERVAL,
+            process_refresh_interval: DEFAULT_PROCESS_REFRESH_INTERVAL,
+            quit_on_activate: false,
+            show_git: true,
+            bell_enabled: true,
+            output_tail_capture_enabled: true,
+        })
     }
 }
 
 impl App {
-    fn from_env() -> Self {
+    fn from_config(config: AppConfig) -> Self {
         Self::new_with_process_refresh(
-            Palette::from_env(),
-            refresh_interval_from_env(),
-            process_refresh_interval_from_env(),
-            quit_on_activate_from_env(),
-            output_tail_capture_enabled_from_env(),
+            config.palette,
+            config.refresh_interval,
+            config.process_refresh_interval,
+            config.quit_on_activate,
+            config.show_git,
+            config.bell_enabled,
+            config.output_tail_capture_enabled,
         )
     }
 
@@ -278,6 +308,8 @@ impl App {
             DEFAULT_PROCESS_REFRESH_INTERVAL,
             quit_on_activate,
             true,
+            true,
+            true,
         )
     }
 
@@ -286,6 +318,8 @@ impl App {
         refresh_interval: Duration,
         process_refresh_interval: Duration,
         quit_on_activate: bool,
+        show_git: bool,
+        bell_enabled: bool,
         output_tail_capture_enabled: bool,
     ) -> Self {
         let mut model = AppModel::placeholder();
@@ -308,7 +342,7 @@ impl App {
             expanded_pane_ids: HashSet::new(),
             pane_jump_digits: None,
             show_app: false,
-            show_git: true,
+            show_git,
             show_detail: false,
             show_time: true,
             show_output: true,
@@ -316,7 +350,7 @@ impl App {
             show_app_pinned: false,
             show_detail_pinned: false,
             show_stats_pinned: false,
-            bell_enabled: true,
+            bell_enabled,
             output_tail_capture_enabled,
             hydrated: false,
         }
@@ -1977,6 +2011,8 @@ mod tests {
             DEFAULT_REFRESH_INTERVAL,
             DEFAULT_PROCESS_REFRESH_INTERVAL,
             false,
+            true,
+            true,
             false,
         );
 
