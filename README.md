@@ -147,12 +147,13 @@ ILMARI_OUTPUT_TAIL=0 ilmari
 
 ### Pane output privacy
 
-By default, Ilmari captures a small visible tail from supported agent panes so it
-can classify waiting states and show the latest output excerpt. That visible pane
-text may contain prompts, command output, file paths, tokens, or other sensitive
-information. If you do not want Ilmari to read pane contents, disable output tail
-capture with `ILMARI_OUTPUT_TAIL=0`; pane tails remain enabled by default unless
-that variable is set to `0`, `false`, `no`, or `off`.
+By default, Ilmari captures a small recent tail from supported agent panes with
+`tmux capture-pane` so it can classify waiting states and show the latest output
+excerpt. That pane buffer/history text may contain prompts, command output, file
+paths, tokens, or other sensitive information. If you do not want Ilmari to read
+pane contents, disable output tail capture with `ILMARI_OUTPUT_TAIL=0`; pane
+tails remain enabled by default unless that variable is set to `0`, `false`,
+`no`, or `off`.
 
 Ilmari uses semantic color roles in code, but by default those resolve through
 your terminal's current ANSI palette. If you want explicit colors, provide an

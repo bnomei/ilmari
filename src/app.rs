@@ -29,6 +29,9 @@ use crate::ui;
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+type PaneSnapshotCollector = fn() -> Result<Vec<PaneSnapshot>, tmux::TmuxError>;
+type OutputTailCollector =
+    fn(&[PaneSnapshot], &SessionTracker, &HashMap<String, AgentKind>) -> tmux::OutputTailCapture;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -113,6 +116,8 @@ struct App {
     should_quit: bool,
     quit_on_activate: bool,
     display_offset: UtcOffset,
+    collect_pane_snapshots: PaneSnapshotCollector,
+    capture_output_tails: OutputTailCollector,
     session_tracker: SessionTracker,
     git_cache: GitSummaryCache,
     process_cache: ProcessUsageCache,
@@ -348,6 +353,8 @@ impl App {
             should_quit: false,
             quit_on_activate,
             display_offset: display_utc_offset(),
+            collect_pane_snapshots: tmux::collect_pane_snapshots,
+            capture_output_tails: tmux::capture_output_tails_with_process_kinds,
             session_tracker: SessionTracker::new(),
             git_cache: GitSummaryCache::new(),
             process_cache: ProcessUsageCache::new(process_refresh_interval),
@@ -502,7 +509,7 @@ impl App {
         let refreshed_at_wallclock = SystemTime::now();
         let previous_statuses = current_statuses(&self.sessions);
 
-        match tmux::collect_pane_snapshots() {
+        match (self.collect_pane_snapshots)() {
             Ok(panes) => {
                 let mut runtime_warnings = Vec::new();
                 let process_kinds =
@@ -514,11 +521,7 @@ impl App {
                         }
                     };
                 let output_tail_capture = if self.output_tail_capture_enabled {
-                    tmux::capture_output_tails_with_process_kinds(
-                        &panes,
-                        &self.session_tracker,
-                        &process_kinds,
-                    )
+                    (self.capture_output_tails)(&panes, &self.session_tracker, &process_kinds)
                 } else {
                     tmux::OutputTailCapture::default()
                 };
@@ -1320,6 +1323,7 @@ mod tests {
         CachedProcessTree, ProcessUsageCache, DEFAULT_PROCESS_REFRESH_INTERVAL,
         DEFAULT_REFRESH_INTERVAL,
     };
+    use crate::agents::SessionTracker;
     use crate::colors::Palette;
     use crate::git::GitSummaryReport;
     use crate::model::{
@@ -2030,6 +2034,30 @@ mod tests {
     }
 
     #[test]
+    fn refresh_skips_output_tail_capture_when_disabled() {
+        let mut app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            true,
+            true,
+            false,
+        );
+        app.show_git = false;
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.collect_pane_snapshots = sample_panes_for_output_tail_capture;
+        app.capture_output_tails = panic_if_output_tail_capture_called;
+
+        app.refresh(false);
+
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].pane.pane_id, "%12");
+        assert!(app.sessions[0].output_excerpt.is_none());
+    }
+
+    #[test]
     fn output_visibility_toggles_with_o_and_defaults_to_enabled() {
         let mut app = App::default();
 
@@ -2341,5 +2369,20 @@ mod tests {
 
     fn sample_collector() -> Result<ProcessTree, crate::process::ProcessError> {
         Ok(sample_process_tree())
+    }
+
+    fn sample_panes_for_output_tail_capture() -> Result<Vec<PaneSnapshot>, tmux::TmuxError> {
+        Ok(vec![PaneSnapshot::parse(
+            "%12\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
+        )
+        .expect("pane snapshot should parse")])
+    }
+
+    fn panic_if_output_tail_capture_called(
+        _panes: &[PaneSnapshot],
+        _tracker: &SessionTracker,
+        _process_kinds: &HashMap<String, AgentKind>,
+    ) -> tmux::OutputTailCapture {
+        panic!("output tail capture should be skipped when disabled")
     }
 }
