@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-06-17
+
+### Added
+
+- Added runtime CLI, config, and environment wiring for pane filtering, output tails, subprocess visibility, stats, color, ticker, refresh timing, and version/help behavior. (#6)
+- Added pane output tail opt-out support and precedence coverage for CLI flags, environment variables, and config files. (#8)
+
+### Changed
+
+- Split built-in agent adapters into dedicated modules behind the shared adapter registry. (#5)
+
+### Fixed
+
+- Propagate pane output tail capture failures into the TUI model so compact rows can surface capture errors instead of silently dropping pane output. (#7)
+
 ## 0.2.5 - 2026-06-08
 
 ### Changed
