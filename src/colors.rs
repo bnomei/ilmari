@@ -42,11 +42,6 @@ impl Default for Palette {
 }
 
 impl Palette {
-    pub fn from_env() -> Self {
-        let env = std::env::vars().collect::<BTreeMap<_, _>>();
-        Self::from_env_map(&env)
-    }
-
     pub fn from_csv(value: &str) -> Result<Self, String> {
         Self::parse_csv(value.trim())
     }
@@ -74,7 +69,7 @@ impl Palette {
         })
     }
 
-    fn from_env_map(env: &BTreeMap<String, String>) -> Self {
+    pub(crate) fn from_env_map(env: &BTreeMap<String, String>) -> Self {
         let Some(value) = env.get("ILMARI_TUI_PALETTE").or_else(|| env.get("ILMARI_PALETTE"))
         else {
             return Self::default();

@@ -50,6 +50,14 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    parse_args_with_config(args, AppConfig::from_env())
+}
+
+fn parse_args_with_config<I, S>(args: I, base_config: AppConfig) -> Result<CliCommand>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut args = args.into_iter().map(Into::into).peekable();
     let mut options = CliOptions {
         refresh_interval: None,
@@ -97,7 +105,7 @@ where
         }
     }
 
-    Ok(CliCommand::Run(options.apply_to(AppConfig::from_env())))
+    Ok(CliCommand::Run(options.apply_to(base_config)))
 }
 
 pub fn help_text() -> &'static str {
@@ -154,7 +162,10 @@ fn parse_palette(value: &str) -> Result<Palette> {
 
 #[cfg(test)]
 mod tests {
-    use super::{help_text, parse_args, version_text, CliCommand};
+    use super::{help_text, parse_args, parse_args_with_config, version_text, CliCommand};
+    use crate::app::AppConfig;
+    use crate::colors::Palette;
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     #[test]
@@ -205,5 +216,45 @@ mod tests {
         assert!(parse_args(["--refresh-seconds", "0"]).is_err());
         assert!(parse_args(["--process-refresh-seconds=abc"]).is_err());
         assert!(parse_args(["--unknown"]).is_err());
+    }
+
+    #[test]
+    fn flags_override_environment_backed_config() {
+        let env_palette =
+            "#010101,#020202,#030303,#040404,#050505,#060606,#070707,#080808,#090909,#0a0a0a,#0b0b0b,#0c0c0c,#0d0d0d,#0e0e0e,#0f0f0f,#101010,#111111,#121212";
+        let flag_palette =
+            "#111111,#222222,#000000,#ff0000,#00ff00,#ffff00,#0000ff,#ff00ff,#00ffff,#cccccc,#555555,#ff5555,#55ff55,#ffff55,#5555ff,#ff55ff,#55ffff,#ffffff";
+        let mut env = BTreeMap::new();
+        env.insert("ILMARI_REFRESH_SECONDS".to_string(), "123".to_string());
+        env.insert("ILMARI_PROCESS_REFRESH_SECONDS".to_string(), "456".to_string());
+        env.insert("ILMARI_OUTPUT_TAIL".to_string(), "true".to_string());
+        env.insert("ILMARI_TUI_PALETTE".to_string(), env_palette.to_string());
+
+        let command = parse_args_with_config(
+            [
+                "--refresh-seconds",
+                "9",
+                "--process-refresh-seconds",
+                "44",
+                "--palette",
+                flag_palette,
+                "--no-git",
+                "--no-output-tail",
+                "--no-bell",
+            ],
+            AppConfig::from_env_map(&env),
+        )
+        .expect("flags should parse");
+
+        let CliCommand::Run(config) = command else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(config.refresh_interval, Duration::from_secs(9));
+        assert_eq!(config.process_refresh_interval, Duration::from_secs(44));
+        assert_eq!(config.palette, Palette::from_csv(flag_palette).expect("flag palette parses"));
+        assert!(!config.show_git);
+        assert!(!config.output_tail_capture_enabled);
+        assert!(!config.bell_enabled);
     }
 }

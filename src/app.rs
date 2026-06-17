@@ -43,14 +43,28 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Self {
+        let env = env::vars().collect::<BTreeMap<_, _>>();
+        Self::from_env_map(&env)
+    }
+
+    pub(crate) fn from_env_map(env: &BTreeMap<String, String>) -> Self {
         Self {
-            palette: Palette::from_env(),
-            refresh_interval: refresh_interval_from_env(),
-            process_refresh_interval: process_refresh_interval_from_env(),
-            quit_on_activate: quit_on_activate_from_env(),
+            palette: Palette::from_env_map(env),
+            refresh_interval: refresh_interval_from_var(
+                env.get("ILMARI_REFRESH_SECONDS").map(String::as_str),
+            ),
+            process_refresh_interval: process_refresh_interval_from_var(
+                env.get("ILMARI_PROCESS_REFRESH_SECONDS").map(String::as_str),
+            ),
+            quit_on_activate: quit_on_activate_from_vars(
+                env.get("TMUX").map(String::as_str),
+                env.get("TMUX_PANE").map(String::as_str),
+            ),
             show_git: true,
             bell_enabled: true,
-            output_tail_capture_enabled: output_tail_capture_enabled_from_env(),
+            output_tail_capture_enabled: output_tail_capture_enabled_from_var(
+                env.get("ILMARI_OUTPUT_TAIL").map(String::as_str),
+            ),
         }
     }
 }
@@ -1243,25 +1257,6 @@ fn should_alert_transition(previous: SessionStatus, current: SessionStatus) -> b
             | (SessionStatus::Unknown, SessionStatus::WaitingInput)
             | (SessionStatus::Unknown, SessionStatus::Finished)
     )
-}
-
-fn refresh_interval_from_env() -> Duration {
-    refresh_interval_from_var(env::var("ILMARI_REFRESH_SECONDS").ok().as_deref())
-}
-
-fn process_refresh_interval_from_env() -> Duration {
-    process_refresh_interval_from_var(env::var("ILMARI_PROCESS_REFRESH_SECONDS").ok().as_deref())
-}
-
-fn quit_on_activate_from_env() -> bool {
-    quit_on_activate_from_vars(
-        env::var("TMUX").ok().as_deref(),
-        env::var("TMUX_PANE").ok().as_deref(),
-    )
-}
-
-fn output_tail_capture_enabled_from_env() -> bool {
-    output_tail_capture_enabled_from_var(env::var("ILMARI_OUTPUT_TAIL").ok().as_deref())
 }
 
 fn output_tail_capture_enabled_from_var(value: Option<&str>) -> bool {
