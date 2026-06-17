@@ -9,6 +9,12 @@ use regex::Regex;
 use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
 use crate::tmux::PaneSnapshot;
 
+mod adapters;
+use adapters::{
+    AmpAdapter, AuggieAdapter, ClaudeCodeAdapter, CodexAdapter, GeminiAdapter, GrokAdapter,
+    OpenCodeAdapter, PiAdapter,
+};
+
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(30);
 const STATUS_SIGNAL_WINDOW_BYTES: usize = 240;
 const AMP_STATUS_SIGNAL_WINDOW_LINES: usize = 12;
@@ -275,336 +281,6 @@ impl SessionTracker {
             last_seen_at: previous.last_seen_at,
             retained_until: None,
         })
-    }
-}
-
-struct CodexAdapter;
-
-impl AgentAdapter for CodexAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Codex
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_matches(&pane.pane_current_command, "codex")
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_codex_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_codex_output_excerpt(output_tail), previous)
-    }
-}
-
-struct AmpAdapter;
-
-impl AgentAdapter for AmpAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Amp
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_matches(&pane.pane_current_command, "amp")
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_amp_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_amp_output_excerpt(output_tail), previous)
-    }
-}
-
-struct ClaudeCodeAdapter;
-
-impl AgentAdapter for ClaudeCodeAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::ClaudeCode
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_matches(&pane.pane_current_command, "claude")
-            || (!is_shell_command(&pane.pane_current_command)
-                && !command_matches_non_claude_agent(&pane.pane_current_command)
-                && is_claude_direct_title(&pane.pane_title))
-    }
-
-    fn detect_output(&self, pane: &PaneSnapshot, output_tail: &str) -> bool {
-        !is_shell_command(&pane.pane_current_command)
-            && !command_matches_non_claude_agent(&pane.pane_current_command)
-            && is_claude_spinner_title(&pane.pane_title)
-            && looks_like_claude_output(output_tail)
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_claude_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_claude_output_excerpt(output_tail), previous)
-    }
-}
-
-struct OpenCodeAdapter;
-
-impl AgentAdapter for OpenCodeAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::OpenCode
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_matches(&pane.pane_current_command, "opencode")
-            || pane_title_contains(&pane.pane_title, "oc |")
-            || pane_title_contains(&pane.pane_title, "opencode")
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_opencode_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_opencode_output_excerpt(output_tail), previous)
-    }
-}
-
-struct PiAdapter;
-
-impl AgentAdapter for PiAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Pi
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_equals_any(&pane.pane_current_command, &["pi", "pi-agent"])
-            || pane.pane_title.contains('π')
-            || pane_title_contains(&pane.pane_title, "pi v")
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_pi_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_pi_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_pi_output_excerpt(output_tail), previous)
-    }
-}
-
-struct GeminiAdapter;
-
-impl AgentAdapter for GeminiAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::GeminiCli
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_matches(&pane.pane_current_command, "gemini")
-            || pane_title_contains(&pane.pane_title, "gemini")
-    }
-
-    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
-        looks_like_gemini_output(output_tail)
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_gemini_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_gemini_output_excerpt(output_tail), previous)
-    }
-}
-
-struct AuggieAdapter;
-
-impl AgentAdapter for AuggieAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Auggie
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_matches(&pane.pane_current_command, "auggie")
-            || pane_title_contains(&pane.pane_title, "auggie")
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_auggie_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_auggie_output_excerpt(output_tail), previous)
-    }
-}
-
-struct GrokAdapter;
-
-impl AgentAdapter for GrokAdapter {
-    fn kind(&self) -> AgentKind {
-        AgentKind::Grok
-    }
-
-    fn detect(&self, pane: &PaneSnapshot) -> bool {
-        command_matches(&pane.pane_current_command, "grok")
-            || (!is_shell_command(&pane.pane_current_command)
-                && pane_title_contains(&pane.pane_title, "grok"))
-    }
-
-    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
-        looks_like_grok_output(output_tail)
-    }
-
-    fn classify(
-        &self,
-        pane: &PaneSnapshot,
-        output_tail: Option<&str>,
-        output_fingerprint: Option<u64>,
-        previous: Option<&SessionRecord>,
-    ) -> SessionStatus {
-        classify_grok_session(self, pane, output_tail, output_fingerprint, previous)
-    }
-
-    fn extract_detail(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<AgentDetail>> {
-        reuse_detail_arc(extract_grok_detail(output_tail), previous)
-    }
-
-    fn extract_output_excerpt(
-        &self,
-        output_tail: Option<&str>,
-        previous: Option<&SessionRecord>,
-    ) -> Option<Arc<str>> {
-        reuse_output_excerpt_arc(extract_grok_output_excerpt(output_tail), previous)
     }
 }
 
@@ -2229,6 +1905,50 @@ mod tests {
         assert_eq!(registry.detect_kind(&pi, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_title, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_agent, None), Some(AgentKind::Pi));
+    }
+
+    #[test]
+    fn registry_detects_process_title_fixtures() {
+        let registry = AdapterRegistry::v1();
+
+        for (kind, command) in process_title_fixtures() {
+            let pane = snapshot("%41", command, false);
+
+            assert_eq!(
+                registry.detect_kind(&pane, None),
+                Some(kind),
+                "command fixture should detect {kind:?}: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_detects_pane_title_fixtures() {
+        let registry = AdapterRegistry::v1();
+
+        for (kind, command, title) in pane_title_fixtures() {
+            let pane = snapshot_with_title("%42", command, false, title);
+
+            assert_eq!(
+                registry.detect_kind(&pane, None),
+                Some(kind),
+                "title fixture should detect {kind:?}: {command} / {title}"
+            );
+        }
+    }
+
+    #[test]
+    fn tracker_detects_output_snippet_fixtures() {
+        for (kind, command, title, output_tail) in output_snippet_fixtures() {
+            let mut tracker = SessionTracker::new();
+            let pane = snapshot_with_title("%43", command, false, title);
+            let output_tails = HashMap::from([(pane.pane_id.clone(), output_tail.to_string())]);
+
+            let records = tracker.refresh(&[pane], &output_tails, Instant::now());
+
+            assert_eq!(records.len(), 1, "output fixture should produce one record for {kind:?}");
+            assert_eq!(records[0].kind, kind, "output fixture should detect {kind:?}");
+        }
     }
 
     #[test]
@@ -3992,6 +3712,57 @@ shift+tab to accept edits
             if pane_dead { 1 } else { 0 }
         ))
         .expect("pane snapshot should parse")
+    }
+
+    fn process_title_fixtures() -> Vec<(AgentKind, &'static str)> {
+        include_str!("fixtures/process_titles.tsv")
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                assert_eq!(fields.len(), 2, "invalid process title fixture: {line}");
+                (fixture_kind(fields[0]), fields[1])
+            })
+            .collect()
+    }
+
+    fn pane_title_fixtures() -> Vec<(AgentKind, &'static str, &'static str)> {
+        include_str!("fixtures/pane_titles.tsv")
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let fields: Vec<_> = line.split('\t').collect();
+                assert_eq!(fields.len(), 3, "invalid pane title fixture: {line}");
+                (fixture_kind(fields[0]), fields[1], fields[2])
+            })
+            .collect()
+    }
+
+    fn output_snippet_fixtures() -> Vec<(AgentKind, &'static str, &'static str, &'static str)> {
+        vec![
+            (
+                AgentKind::ClaudeCode,
+                "node",
+                "⠐ Plan and start MIR-1094",
+                include_str!("fixtures/output_claude.txt"),
+            ),
+            (AgentKind::GeminiCli, "node", "worker", include_str!("fixtures/output_gemini.txt")),
+            (AgentKind::Grok, "node", "worker", include_str!("fixtures/output_grok.txt")),
+        ]
+    }
+
+    fn fixture_kind(value: &str) -> AgentKind {
+        match value {
+            "Codex" => AgentKind::Codex,
+            "Amp" => AgentKind::Amp,
+            "ClaudeCode" => AgentKind::ClaudeCode,
+            "OpenCode" => AgentKind::OpenCode,
+            "Pi" => AgentKind::Pi,
+            "GeminiCli" => AgentKind::GeminiCli,
+            "Auggie" => AgentKind::Auggie,
+            "Grok" => AgentKind::Grok,
+            other => panic!("unknown fixture agent kind: {other}"),
+        }
     }
 
     // Fixtures based on live Grok panes, trimmed to the parser-relevant lines.

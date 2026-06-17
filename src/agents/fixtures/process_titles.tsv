@@ -1,0 +1,13 @@
+# kind	command
+Codex	codex
+Codex	codex-aarch64-a
+Amp	amp
+ClaudeCode	claude
+ClaudeCode	claude-code
+ClaudeCode	.claude-unwrapped
+OpenCode	opencode
+Pi	pi
+Pi	pi-agent
+GeminiCli	gemini
+Auggie	auggie
+Grok	grok-macos-aarc
