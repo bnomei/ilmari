@@ -490,27 +490,30 @@ impl App {
 
         match tmux::collect_pane_snapshots() {
             Ok(panes) => {
-                let mut process_warnings = Vec::new();
+                let mut runtime_warnings = Vec::new();
                 let process_kinds =
                     match self.process_cache.agent_kinds_for_panes(&panes, refreshed_at) {
                         Ok(process_kinds) => process_kinds,
                         Err(error) => {
-                            process_warnings.push(format!("ps: {error}"));
+                            runtime_warnings.push(format!("ps: {error}"));
                             HashMap::new()
                         }
                     };
-                let output_tails = if self.output_tail_capture_enabled {
+                let output_tail_capture = if self.output_tail_capture_enabled {
                     tmux::capture_output_tails_with_process_kinds(
                         &panes,
                         &self.session_tracker,
                         &process_kinds,
                     )
                 } else {
-                    HashMap::new()
+                    tmux::OutputTailCapture::default()
                 };
+                if let Some(warning) = output_tail_capture_warning(&output_tail_capture.failures) {
+                    runtime_warnings.push(warning);
+                }
                 self.sessions = self.session_tracker.refresh_with_process_kinds(
                     &panes,
-                    &output_tails,
+                    &output_tail_capture.output_tails,
                     &process_kinds,
                     refreshed_at,
                 );
@@ -520,12 +523,12 @@ impl App {
                     refreshed_at,
                     needs_process_usage,
                 ) {
-                    process_warnings.push(format!("ps: {error}"));
+                    runtime_warnings.push(format!("ps: {error}"));
                 }
-                let process_warning = if process_warnings.is_empty() {
+                let runtime_warning = if runtime_warnings.is_empty() {
                     None
                 } else {
-                    Some(process_warnings.join("; "))
+                    Some(runtime_warnings.join("; "))
                 };
                 normalize_expanded_pane_ids(&mut self.expanded_pane_ids, &self.sessions);
                 self.emit_bells(count_alert_transitions(&previous_statuses, &self.sessions));
@@ -538,9 +541,9 @@ impl App {
                         refreshed_at,
                         force_git_refresh,
                     );
-                    (status_line(&git_report, process_warning.as_deref()), git_report.rows)
+                    (status_line(&git_report, runtime_warning.as_deref()), git_report.rows)
                 } else {
-                    (process_warning.unwrap_or_default(), Vec::new())
+                    (runtime_warning.unwrap_or_default(), Vec::new())
                 };
 
                 self.sync_model(status_line, git_summaries, refreshed_at, refreshed_at_wallclock);
@@ -1206,6 +1209,14 @@ fn status_line(git_report: &GitSummaryReport, process_warning: Option<&str>) -> 
     parts.join(" | ")
 }
 
+fn output_tail_capture_warning(failures: &[tmux::OutputTailCaptureFailure]) -> Option<String> {
+    match failures.len() {
+        0 => None,
+        1 => Some(format!("tail: 1 pane failed ({})", failures[0].pane_id)),
+        count => Some(format!("tail: {count} panes failed")),
+    }
+}
+
 fn current_statuses(sessions: &[SessionRecord]) -> HashMap<String, SessionStatus> {
     sessions.iter().map(|session| (session.pane.pane_id.clone(), session.status)).collect()
 }
@@ -1321,7 +1332,7 @@ mod tests {
         SessionRecord, SessionStatus, SubtaskProcess,
     };
     use crate::process::{ProcessSnapshot, ProcessTree};
-    use crate::tmux::PaneSnapshot;
+    use crate::tmux::{self, PaneSnapshot};
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -2227,6 +2238,31 @@ mod tests {
         assert_eq!(
             super::status_line(&report, Some("ps: snapshot failed")),
             "git: 1 workspace failed | ps: snapshot failed"
+        );
+    }
+
+    #[test]
+    fn output_tail_capture_warning_summarizes_failures() {
+        assert_eq!(super::output_tail_capture_warning(&[]), None);
+        assert_eq!(
+            super::output_tail_capture_warning(&[tmux::OutputTailCaptureFailure {
+                pane_id: "%7".to_string(),
+                error: "tmux capture-pane failed".to_string(),
+            }]),
+            Some("tail: 1 pane failed (%7)".to_string())
+        );
+        assert_eq!(
+            super::output_tail_capture_warning(&[
+                tmux::OutputTailCaptureFailure {
+                    pane_id: "%7".to_string(),
+                    error: "first".to_string(),
+                },
+                tmux::OutputTailCaptureFailure {
+                    pane_id: "%8".to_string(),
+                    error: "second".to_string(),
+                },
+            ]),
+            Some("tail: 2 panes failed".to_string())
         );
     }
 

@@ -138,6 +138,18 @@ pub enum TmuxError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputTailCaptureFailure {
+    pub pane_id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutputTailCapture {
+    pub output_tails: HashMap<String, String>,
+    pub failures: Vec<OutputTailCaptureFailure>,
+}
+
 pub fn pane_snapshot_command() -> TmuxCommand {
     TmuxCommand::new(["list-panes", "-aF", LIST_PANES_FORMAT])
 }
@@ -171,26 +183,46 @@ pub fn capture_output_tails_with_process_kinds(
     panes: &[PaneSnapshot],
     tracker: &SessionTracker,
     process_kinds: &HashMap<String, AgentKind>,
-) -> HashMap<String, String> {
+) -> OutputTailCapture {
+    capture_output_tails_with_process_kinds_using(
+        panes,
+        tracker,
+        process_kinds,
+        capture_output_tail,
+    )
+}
+
+fn capture_output_tails_with_process_kinds_using(
+    panes: &[PaneSnapshot],
+    tracker: &SessionTracker,
+    process_kinds: &HashMap<String, AgentKind>,
+    mut capture_tail: impl FnMut(&str, &str) -> Result<String, TmuxError>,
+) -> OutputTailCapture {
     let previous = tracker.records();
+    let mut capture = OutputTailCapture::default();
 
-    panes
-        .iter()
-        .filter_map(|pane| {
-            let previous = previous.get(&pane.pane_id);
-            if !tracker.registry().needs_output_tail(
-                pane,
-                previous,
-                process_kinds.get(&pane.pane_id).copied(),
-            ) {
-                return None;
+    for pane in panes {
+        let previous = previous.get(&pane.pane_id);
+        if !tracker.registry().needs_output_tail(
+            pane,
+            previous,
+            process_kinds.get(&pane.pane_id).copied(),
+        ) {
+            continue;
+        }
+
+        match capture_tail(&pane.pane_id, DEFAULT_CAPTURE_START) {
+            Ok(output_tail) => {
+                capture.output_tails.insert(pane.pane_id.clone(), output_tail);
             }
+            Err(error) => capture.failures.push(OutputTailCaptureFailure {
+                pane_id: pane.pane_id.clone(),
+                error: error.to_string(),
+            }),
+        }
+    }
 
-            capture_output_tail(&pane.pane_id, DEFAULT_CAPTURE_START)
-                .ok()
-                .map(|output_tail| (pane.pane_id.clone(), output_tail))
-        })
-        .collect()
+    capture
 }
 
 pub fn jump_command(target: &PaneSnapshot) -> TmuxCommand {
@@ -230,9 +262,12 @@ fn run_tmux_command(command: &TmuxCommand) -> Result<String, TmuxError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_output_tail_command, jump_command, pane_snapshot_command, parse_pane_snapshots,
-        PaneSnapshot, PaneSnapshotParseError, DEFAULT_CAPTURE_START, LIST_PANES_FORMAT,
+        capture_output_tail_command, capture_output_tails_with_process_kinds_using, jump_command,
+        pane_snapshot_command, parse_pane_snapshots, PaneSnapshot, PaneSnapshotParseError,
+        TmuxError, DEFAULT_CAPTURE_START, LIST_PANES_FORMAT,
     };
+    use crate::agents::SessionTracker;
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     #[test]
@@ -321,6 +356,38 @@ mod tests {
                 DEFAULT_CAPTURE_START.to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn capture_output_tails_preserves_per_pane_failures() {
+        let tracker = SessionTracker::new();
+        let panes = parse_pane_snapshots(
+            "%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent\n%2\t202\t$2\tops\t@3\tagents\t0\t/tmp/blog\tamp\treview\n",
+        )
+        .expect("tmux pane output should parse");
+
+        let capture = capture_output_tails_with_process_kinds_using(
+            &panes,
+            &tracker,
+            &HashMap::new(),
+            |target, _| {
+                if target == "%2" {
+                    return Err(TmuxError::CommandFailed {
+                        command: "tmux capture-pane".to_string(),
+                        exit_code: Some(1),
+                        stderr: "pane not found".to_string(),
+                    });
+                }
+
+                Ok(format!("tail for {target}"))
+            },
+        );
+
+        assert_eq!(capture.output_tails.get("%1").map(String::as_str), Some("tail for %1"));
+        assert!(!capture.output_tails.contains_key("%2"));
+        assert_eq!(capture.failures.len(), 1);
+        assert_eq!(capture.failures[0].pane_id, "%2");
+        assert!(capture.failures[0].error.contains("pane not found"));
     }
 
     #[test]
