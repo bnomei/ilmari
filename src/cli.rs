@@ -50,13 +50,23 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    parse_args_with_config(args, AppConfig::from_env())
+    parse_args_with_config_loader(args, AppConfig::from_env)
 }
 
+#[cfg(test)]
 fn parse_args_with_config<I, S>(args: I, base_config: AppConfig) -> Result<CliCommand>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
+{
+    parse_args_with_config_loader(args, || base_config)
+}
+
+fn parse_args_with_config_loader<I, S, F>(args: I, base_config: F) -> Result<CliCommand>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+    F: FnOnce() -> AppConfig,
 {
     let mut args = args.into_iter().map(Into::into).peekable();
     let mut options = CliOptions {
@@ -105,7 +115,7 @@ where
         }
     }
 
-    Ok(CliCommand::Run(options.apply_to(base_config)))
+    Ok(CliCommand::Run(options.apply_to(base_config())))
 }
 
 pub fn help_text() -> &'static str {
@@ -162,7 +172,10 @@ fn parse_palette(value: &str) -> Result<Palette> {
 
 #[cfg(test)]
 mod tests {
-    use super::{help_text, parse_args, parse_args_with_config, version_text, CliCommand};
+    use super::{
+        help_text, parse_args, parse_args_with_config, parse_args_with_config_loader, version_text,
+        CliCommand,
+    };
     use crate::app::AppConfig;
     use crate::colors::Palette;
     use std::collections::BTreeMap;
@@ -186,6 +199,20 @@ mod tests {
         }
         assert!(help_text().contains("Flags override environment defaults"));
         assert_eq!(version_text(), concat!("ilmari ", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn help_and_version_do_not_load_runtime_config() {
+        assert!(matches!(
+            parse_args_with_config_loader(["--help"], || panic!("config should not load"))
+                .expect("help parses"),
+            CliCommand::Help
+        ));
+        assert!(matches!(
+            parse_args_with_config_loader(["--version"], || panic!("config should not load"))
+                .expect("version parses"),
+            CliCommand::Version
+        ));
     }
 
     #[test]
