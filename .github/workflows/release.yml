@@ -14,6 +14,8 @@ env:
 
 jobs:
   build:
+    # Ilmari is a Unix/macOS tmux tool. Release artifacts intentionally cover
+    # Linux and macOS only until Windows tmux behavior is implemented and tested.
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -30,9 +32,6 @@ jobs:
             use_cross: false
           - os: macos-15
             target: aarch64-apple-darwin
-            use_cross: false
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
             use_cross: false
 
     steps:
@@ -60,23 +59,11 @@ jobs:
         shell: bash
         run: scripts/resolve-version.sh
 
-      - name: Build (unix)
-        if: runner.os != 'Windows'
+      - name: Build release binary
         run: TARGET=${{ matrix.target }} scripts/build-release.sh
 
-      - name: Build (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: scripts/build-release.ps1 -Target ${{ matrix.target }}
-
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package release artifact
         run: TARGET=${{ matrix.target }} VERSION=${{ steps.version.outputs.version }} BIN_NAME=${{ env.BIN_NAME }} scripts/package-release.sh
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: scripts/package-release.ps1 -Target ${{ matrix.target }} -Version ${{ steps.version.outputs.version }} -BinName ${{ env.BIN_NAME }}
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

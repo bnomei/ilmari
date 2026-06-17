@@ -9,6 +9,13 @@
 
 Minimal tmux popup radar for Codex, Amp, Claude Code, OpenCode, Pi, Gemini CLI, Auggie, and Grok.
 
+## Platform support
+
+Ilmari is built for Unix-like tmux environments. The supported release
+artifacts are Linux and macOS binaries, and runtime usage assumes a Unix-like
+shell with tmux available. Windows is currently out of scope: no Windows release
+artifact is published unless Windows tmux behavior is implemented and tested.
+
 Ilmari exists for the moment when a tmux workspace has multiple agent panes and
 you need to answer three questions quickly:
 
@@ -61,8 +68,9 @@ brew install bnomei/ilmari/ilmari
 
 ### GitHub Releases
 
-Download a prebuilt archive from the GitHub Releases page, extract it, and
-place `ilmari` on your `PATH`.
+Download a prebuilt Linux or macOS archive from the GitHub Releases page,
+extract it, and place `ilmari` on your `PATH`. Windows archives are not
+published because Windows runtime behavior is not supported yet.
 
 ### From source
 
