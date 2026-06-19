@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-06-19
+
+### Added
+
+- Added Antigravity CLI (`agy`) session detection, including active generation spinners, permission prompts, model footers, and sanitized output excerpts.
+- Listed Antigravity CLI as a supported agent while keeping Gemini CLI support documented for users who still have access.
+
 ## 0.3.0 - 2026-06-17
 
 ### Added

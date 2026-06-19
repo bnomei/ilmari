@@ -7,13 +7,14 @@ use thiserror::Error;
 use crate::model::{AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord, SubtaskProcess};
 
 const PS_FORMAT: &str = "pid=,ppid=,%cpu=,rss=,command=";
-const PROCESS_IDENTIFIABLE_AGENT_KINDS: [AgentKind; 8] = [
+const PROCESS_IDENTIFIABLE_AGENT_KINDS: [AgentKind; 9] = [
     AgentKind::Codex,
     AgentKind::Amp,
     AgentKind::ClaudeCode,
     AgentKind::OpenCode,
     AgentKind::Pi,
     AgentKind::GeminiCli,
+    AgentKind::AntigravityCli,
     AgentKind::Auggie,
     AgentKind::Grok,
 ];
@@ -188,6 +189,10 @@ impl ProcessTree {
             AgentKind::GeminiCli => {
                 command_executable_matches(&process.command, "gemini")
                     || node_wrapper_path_matches(&process.command, "gemini")
+            }
+            AgentKind::AntigravityCli => {
+                command_executable_matches(&process.command, "agy")
+                    || node_wrapper_path_matches(&process.command, "agy")
             }
             AgentKind::Auggie => command_matches_auggie(&process.command),
             AgentKind::Grok => command_executable_matches(&process.command, "grok"),
@@ -496,16 +501,24 @@ mod tests {
                 48 * 1024,
                 "node /Users/test/.nvm/versions/node/v22.21.1/bin/auggie",
             ),
+            snapshot(103, 100, 160, 50 * 1024, "node /opt/homebrew/bin/agy"),
         ]);
 
         let gemini = tree
             .usage_for_session(&session_record(100, AgentKind::GeminiCli))
             .expect("gemini should resolve");
+        let antigravity = tree
+            .usage_for_session(&session_record(100, AgentKind::AntigravityCli))
+            .expect("antigravity should resolve");
         let auggie = tree
             .usage_for_session(&session_record(100, AgentKind::Auggie))
             .expect("auggie should resolve");
 
         assert_eq!(gemini.agent, ResourceUsage { cpu_tenths_percent: 220, memory_kib: 64 * 1024 });
+        assert_eq!(
+            antigravity.agent,
+            ResourceUsage { cpu_tenths_percent: 160, memory_kib: 50 * 1024 }
+        );
         assert_eq!(auggie.agent, ResourceUsage { cpu_tenths_percent: 180, memory_kib: 48 * 1024 });
     }
 

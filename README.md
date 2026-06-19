@@ -7,7 +7,19 @@
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
-Minimal tmux popup radar for Codex, Amp, Claude Code, OpenCode, Pi, Gemini CLI, Auggie, and Grok.
+Minimal tmux popup radar for Codex, Amp, Claude Code, OpenCode, Pi, Gemini CLI, Antigravity CLI, Auggie, and Grok.
+
+Supported agent CLIs:
+
+- Antigravity CLI (`agy`)
+- Gemini CLI (`gemini`)
+- Codex (`codex`)
+- Amp (`amp`)
+- Claude Code (`claude`)
+- OpenCode (`opencode`)
+- Pi (`pi`, `pi-agent`)
+- Auggie (`auggie`)
+- Grok (`grok`)
 
 ## Platform support
 

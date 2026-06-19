@@ -11,8 +11,8 @@ use crate::tmux::PaneSnapshot;
 
 mod adapters;
 use adapters::{
-    AmpAdapter, AuggieAdapter, ClaudeCodeAdapter, CodexAdapter, GeminiAdapter, GrokAdapter,
-    OpenCodeAdapter, PiAdapter,
+    AmpAdapter, AntigravityAdapter, AuggieAdapter, ClaudeCodeAdapter, CodexAdapter, GeminiAdapter,
+    GrokAdapter, OpenCodeAdapter, PiAdapter,
 };
 
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(30);
@@ -62,6 +62,7 @@ impl AdapterRegistry {
                 Box::new(OpenCodeAdapter),
                 Box::new(PiAdapter),
                 Box::new(GeminiAdapter),
+                Box::new(AntigravityAdapter),
                 Box::new(AuggieAdapter),
                 Box::new(GrokAdapter),
             ],
@@ -298,6 +299,23 @@ fn classify_supported_session(
         output_fingerprint,
         previous,
         classify_output_tail,
+    )
+}
+
+fn classify_antigravity_session(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+) -> SessionStatus {
+    classify_supported_session_with_tail_classifier(
+        adapter,
+        pane,
+        output_tail,
+        output_fingerprint,
+        previous,
+        classify_antigravity_output_tail,
     )
 }
 
@@ -556,6 +574,7 @@ fn command_matches_non_claude_agent(command: &str) -> bool {
         || command_matches(command, "opencode")
         || command_equals_any(command, &["pi", "pi-agent"])
         || command_matches(command, "gemini")
+        || command_matches(command, "agy")
         || command_matches(command, "auggie")
         || command_matches(command, "grok")
 }
@@ -565,6 +584,14 @@ fn looks_like_gemini_output(output_tail: &str) -> bool {
     lower.contains("gemini cli v")
         || lower.contains("gemini code assist")
         || extract_gemini_footer_model(output_tail).is_some()
+}
+
+fn looks_like_antigravity_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("antigravity cli")
+        || looks_like_antigravity_active(output_tail)
+        || looks_like_antigravity_permission_prompt(output_tail)
+        || extract_antigravity_footer_model(output_tail).is_some()
 }
 
 fn looks_like_auggie_output(output_tail: &str) -> bool {
@@ -577,6 +604,23 @@ fn looks_like_auggie_output(output_tail: &str) -> bool {
 fn classify_output_tail(output_tail: &str) -> Option<SessionStatus> {
     let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
     if looks_like_waiting_prompt(&recent_lines, output_tail) {
+        return Some(SessionStatus::WaitingInput);
+    }
+
+    latest_recent_match(output_tail, waiting_pattern()).map(|_| SessionStatus::WaitingInput)
+}
+
+fn classify_antigravity_output_tail(output_tail: &str) -> Option<SessionStatus> {
+    if looks_like_antigravity_active(output_tail) {
+        return Some(SessionStatus::Running);
+    }
+
+    if looks_like_antigravity_permission_prompt(output_tail) {
+        return Some(SessionStatus::WaitingInput);
+    }
+
+    let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
+    if looks_like_antigravity_prompt(&recent_lines, output_tail) {
         return Some(SessionStatus::WaitingInput);
     }
 
@@ -705,6 +749,13 @@ fn extract_gemini_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
 }
 
+fn extract_antigravity_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = extract_antigravity_footer_model(output_tail)?;
+
+    Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
 fn extract_gemini_footer_model(output_tail: &str) -> Option<String> {
     output_tail
         .lines()
@@ -758,6 +809,16 @@ fn extract_gemini_table_footer_row_model(normalized: &str) -> Option<String> {
 fn is_gemini_table_footer_header(normalized: &str) -> bool {
     let lower = normalized.to_ascii_lowercase();
     lower.contains("workspace") && lower.contains("sandbox") && lower.contains("/model")
+}
+
+fn extract_antigravity_footer_model(output_tail: &str) -> Option<String> {
+    output_tail.lines().rev().find_map(|line| {
+        antigravity_footer_model_pattern()
+            .captures(line.trim())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })
 }
 
 fn extract_auggie_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
@@ -920,8 +981,45 @@ fn extract_gemini_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     })
 }
 
+fn extract_antigravity_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    extract_output_excerpt_from_tail(output_tail, is_antigravity_output_noise)
+}
+
 fn is_gemini_shortcut_footer(lower: &str) -> bool {
     (lower.contains("accept edits") || lower.contains("show diff")) && lower.contains("tab")
+}
+
+fn is_antigravity_output_noise(raw: &str, normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+    let compact = lower.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim_start();
+
+    is_common_output_noise(raw, normalized)
+        || raw.trim_start().starts_with('>')
+        || lower.contains("antigravity cli")
+        || lower.contains("antigravity starter quota")
+        || extract_antigravity_footer_model(normalized).is_some()
+        || lower.contains("? for shortcuts")
+        || lower.contains("esc to cancel")
+        || is_antigravity_spinner_line(raw)
+        || compact.starts_with("tip:")
+        || compact.starts_with("bash(")
+        || compact.starts_with("schedule(")
+        || compact == "command"
+        || compact.starts_with("requesting permission for:")
+        || compact.starts_with("do you want to proceed")
+        || is_antigravity_permission_option_line(compact)
+        || compact.contains("navigate") && compact.contains("edit command")
+}
+
+fn is_antigravity_permission_option_line(compact: &str) -> bool {
+    let Some((number, label)) = compact.split_once('.') else {
+        return false;
+    };
+    let label = label.trim_start();
+
+    matches!(number.trim(), "1" | "2" | "3" | "4")
+        && (label.starts_with("yes") || label.starts_with("no"))
 }
 
 fn extract_auggie_output_excerpt(output_tail: Option<&str>) -> Option<String> {
@@ -1333,6 +1431,40 @@ fn looks_like_gemini_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         || (lower.contains("action required") && lower.contains("allow execution of"))
 }
 
+fn looks_like_antigravity_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
+    if looks_like_antigravity_active(output_tail) {
+        return false;
+    }
+
+    let has_prompt = recent_lines.iter().any(|line| line.trim_start().starts_with('>'));
+    let has_shortcut_footer =
+        recent_lines.iter().any(|line| line.to_ascii_lowercase().contains("? for shortcuts"));
+
+    has_prompt && has_shortcut_footer && extract_antigravity_footer_model(output_tail).is_some()
+}
+
+fn looks_like_antigravity_active(output_tail: &str) -> bool {
+    let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
+    let has_cancel_footer =
+        recent_lines.iter().any(|line| line.to_ascii_lowercase().contains("esc to cancel"));
+
+    has_cancel_footer && !looks_like_antigravity_permission_prompt(output_tail)
+}
+
+fn looks_like_antigravity_permission_prompt(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("requesting permission for:") && lower.contains("do you want to proceed?")
+}
+
+fn is_antigravity_spinner_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.chars().next().is_some_and(is_braille_pattern) && trimmed.contains("...")
+}
+
+fn is_braille_pattern(c: char) -> bool {
+    ('\u{2800}'..='\u{28ff}').contains(&c)
+}
+
 fn looks_like_auggie_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
     let lower = output_tail.to_ascii_lowercase();
 
@@ -1684,6 +1816,16 @@ fn gemini_table_footer_model_pattern() -> &'static Regex {
     })
 }
 
+fn antigravity_footer_model_pattern() -> &'static Regex {
+    static ANTIGRAVITY_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    ANTIGRAVITY_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?P<model>(?:Gemini|Claude|GPT|Grok|OpenAI|Anthropic)[A-Za-z0-9 ._-]*\([^)]+\))\s*$",
+        )
+        .expect("antigravity footer model regex should compile")
+    })
+}
+
 fn auggie_using_model_pattern() -> &'static Regex {
     static AUGGIE_USING_MODEL: OnceLock<Regex> = OnceLock::new();
     AUGGIE_USING_MODEL.get_or_init(|| {
@@ -1855,8 +1997,9 @@ fn normalize_detail_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        amp_output_fingerprint, classify_grok_output_tail, classify_output_tail,
-        extract_amp_detail, extract_amp_output_excerpt, extract_auggie_detail,
+        amp_output_fingerprint, classify_antigravity_output_tail, classify_grok_output_tail,
+        classify_output_tail, extract_amp_detail, extract_amp_output_excerpt,
+        extract_antigravity_detail, extract_antigravity_output_excerpt, extract_auggie_detail,
         extract_auggie_output_excerpt, extract_claude_detail, extract_claude_output_excerpt,
         extract_codex_detail, extract_codex_output_excerpt, extract_gemini_detail,
         extract_gemini_output_excerpt, extract_grok_detail, extract_grok_output_excerpt,
@@ -1884,6 +2027,7 @@ mod tests {
         let pi = snapshot("%7", "pi", false);
         let pi_title = snapshot_with_title("%23", "node", false, "π - worktree");
         let pi_agent = snapshot("%8", "pi-agent", false);
+        let antigravity = snapshot("%9", "agy", false);
 
         assert_eq!(registry.detect_kind(&codex, None), Some(AgentKind::Codex));
         assert_eq!(registry.detect_kind(&codex_variant, None), Some(AgentKind::Codex));
@@ -1905,6 +2049,7 @@ mod tests {
         assert_eq!(registry.detect_kind(&pi, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_title, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_agent, None), Some(AgentKind::Pi));
+        assert_eq!(registry.detect_kind(&antigravity, None), Some(AgentKind::AntigravityCli));
     }
 
     #[test]
@@ -2017,6 +2162,48 @@ mod tests {
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
         assert_eq!(records[1].kind, AgentKind::Auggie);
         assert_eq!(records[1].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn tracker_detects_antigravity_from_live_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%27", "node", false, "worker");
+        let output_tails = HashMap::from([(
+            pane.pane_id.clone(),
+            "\
+Antigravity CLI 1.0.10
+Gemini 3.5 Flash (Medium)
+
+────────────────────────────────────────────────────────────
+> Say exactly: hello
+
+  hello
+
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                           Gemini 3.5 Flash (Medium)
+"
+            .to_string(),
+        )]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::AntigravityCli);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("hello"));
+        assert_eq!(
+            records[0].detail,
+            Some(
+                AgentDetail {
+                    label: "Gemini 3.5 Flash (Medium)".to_string(),
+                    tone: AgentDetailTone::Neutral,
+                }
+                .into()
+            )
+        );
     }
 
     #[test]
@@ -2500,6 +2687,74 @@ Allow execution of: 'sleep, echo'?
 ";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn antigravity_prompt_and_permission_mark_waiting_input() {
+        let prompt = "\
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                           Gemini 3.5 Flash (Medium)
+";
+        let permission = "\
+● Bash(sleep 20) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────────────────────────────────────────
+
+  Requesting permission for: sleep 20
+
+Do you want to proceed?
+> 1. Yes
+  2. Yes, and always allow in this conversation for commands that start with 'sleep'
+  3. Yes, and always allow for commands that start with 'sleep' (Persist to settings.json)
+  4. No
+
+  ↑/↓ Navigate · tab Amend · e edit command
+esc to cancel                                            Gemini 3.5 Flash (Medium)
+";
+
+        assert_eq!(classify_antigravity_output_tail(prompt), Some(SessionStatus::WaitingInput));
+        assert_eq!(classify_antigravity_output_tail(permission), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn antigravity_active_generation_marks_running() {
+        let loading = "\
+> Write a 100-line poem. Start immediately and do not use tools.
+⣷  Loading...
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                            Gemini 3.5 Flash (Medium)
+";
+        let streaming = "\
+> Write a 100-line poem. Start immediately and do not use tools.
+⣻  Crafting the Poem's Structure...
+└ Tip: Press ? to see keyboard shortcuts.
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                            Gemini 3.5 Flash (Medium)
+";
+        let streaming_after_status_scrolls = "\
+  The mountains stand as guardians of the sky,
+  Watching the endless ages passing by,
+  Their stony peaks are kissed by morning dew,
+  Painted in shades of purple, gold, and blue.
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                            Gemini 3.5 Flash (Medium)
+";
+
+        assert_eq!(classify_antigravity_output_tail(loading), Some(SessionStatus::Running));
+        assert_eq!(classify_antigravity_output_tail(streaming), Some(SessionStatus::Running));
+        assert_eq!(
+            classify_antigravity_output_tail(streaming_after_status_scrolls),
+            Some(SessionStatus::Running)
+        );
     }
 
     #[test]
@@ -3008,6 +3263,34 @@ gpt-5.4 xhigh fast · 40% left · ~/workspace
     }
 
     #[test]
+    fn antigravity_detail_extracts_from_header_or_footer_model() {
+        let output_tail = "\
+Antigravity CLI 1.0.10
+Gemini 3.5 Flash (Medium)
+";
+
+        assert_eq!(
+            extract_antigravity_detail(Some(output_tail)),
+            Some(AgentDetail {
+                label: "Gemini 3.5 Flash (Medium)".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+
+        let footer = "\
+? for shortcuts                                           Gemini 3.5 Flash (Medium)
+";
+
+        assert_eq!(
+            extract_antigravity_detail(Some(footer)),
+            Some(AgentDetail {
+                label: "Gemini 3.5 Flash (Medium)".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+    }
+
+    #[test]
     fn gemini_output_excerpt_skips_prompt_and_footer() {
         let output_tail = "\
 ✦ Hello. I'm Gemini CLI, your senior software engineering assistant. How can I help you today?
@@ -3050,6 +3333,45 @@ shift+tab to accept edits
 ";
 
         assert_eq!(extract_gemini_output_excerpt(Some(table_footer)), None);
+    }
+
+    #[test]
+    fn antigravity_output_excerpt_skips_prompt_status_and_footer() {
+        let output_tail = "\
+Antigravity CLI 1.0.10
+Gemini 3.5 Flash (Medium)
+
+────────────────────────────────────────────────────────────
+> Write a 100-line poem. Start immediately and do not use tools.
+
+  The morning opens silver at the gate,
+  And every quiet window learns to wait.
+
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                           Gemini 3.5 Flash (Medium)
+";
+
+        assert_eq!(
+            extract_antigravity_output_excerpt(Some(output_tail)),
+            Some(
+                "The morning opens silver at the gate, And every quiet window learns to wait."
+                    .to_string()
+            )
+        );
+
+        let active_tail = "\
+> Write a 100-line poem. Start immediately and do not use tools.
+⣻  Crafting the Poem's Structure...
+└ Tip: Press ? to see keyboard shortcuts.
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                            Gemini 3.5 Flash (Medium)
+";
+
+        assert_eq!(extract_antigravity_output_excerpt(Some(active_tail)), None);
     }
 
     #[test]
@@ -3747,6 +4069,12 @@ shift+tab to accept edits
                 include_str!("fixtures/output_claude.txt"),
             ),
             (AgentKind::GeminiCli, "node", "worker", include_str!("fixtures/output_gemini.txt")),
+            (
+                AgentKind::AntigravityCli,
+                "node",
+                "worker",
+                include_str!("fixtures/output_antigravity.txt"),
+            ),
             (AgentKind::Grok, "node", "worker", include_str!("fixtures/output_grok.txt")),
         ]
     }
@@ -3759,6 +4087,7 @@ shift+tab to accept edits
             "OpenCode" => AgentKind::OpenCode,
             "Pi" => AgentKind::Pi,
             "GeminiCli" => AgentKind::GeminiCli,
+            "AntigravityCli" => AgentKind::AntigravityCli,
             "Auggie" => AgentKind::Auggie,
             "Grok" => AgentKind::Grok,
             other => panic!("unknown fixture agent kind: {other}"),
