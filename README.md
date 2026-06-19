@@ -21,6 +21,20 @@ Supported agent CLIs:
 - Auggie (`auggie`)
 - Grok (`grok`)
 
+Planned agent CLI support, PRs welcome:
+
+- GitHub Copilot CLI (`copilot`): help wanted in [issue #10](https://github.com/bnomei/ilmari/issues/10)
+- Cursor CLI (`cursor`): help wanted in [issue #11](https://github.com/bnomei/ilmari/issues/11)
+- Aider (`aider`): help wanted in [issue #12](https://github.com/bnomei/ilmari/issues/12)
+- Cline CLI (`cline`): help wanted in [issue #13](https://github.com/bnomei/ilmari/issues/13)
+- Goose CLI (`goose`): help wanted in [issue #14](https://github.com/bnomei/ilmari/issues/14)
+- Kiro CLI (`kiro-cli`): help wanted in [issue #15](https://github.com/bnomei/ilmari/issues/15)
+- OpenHands CLI (`openhands`): help wanted in [issue #16](https://github.com/bnomei/ilmari/issues/16)
+
+These clients are scaffolded behind `AgentSupport::Planned` and are not enabled
+until a PR validates the CLI in tmux and adds real pane metadata and output-tail
+fixtures.
+
 ## Platform support
 
 Ilmari is built for Unix-like tmux environments. The supported release

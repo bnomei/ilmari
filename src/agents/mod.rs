@@ -11,8 +11,9 @@ use crate::tmux::PaneSnapshot;
 
 mod adapters;
 use adapters::{
-    AmpAdapter, AntigravityAdapter, AuggieAdapter, ClaudeCodeAdapter, CodexAdapter, GeminiAdapter,
-    GrokAdapter, OpenCodeAdapter, PiAdapter,
+    AiderAdapter, AmpAdapter, AntigravityAdapter, AuggieAdapter, ClaudeCodeAdapter,
+    ClineCliAdapter, CodexAdapter, CursorCliAdapter, GeminiAdapter, GitHubCopilotCliAdapter,
+    GooseCliAdapter, GrokAdapter, KiroCliAdapter, OpenCodeAdapter, OpenHandsCliAdapter, PiAdapter,
 };
 
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(30);
@@ -55,20 +56,46 @@ pub struct AdapterRegistry {
 impl AdapterRegistry {
     pub fn v1() -> Self {
         Self {
-            adapters: vec![
-                Box::new(CodexAdapter),
-                Box::new(AmpAdapter),
-                Box::new(ClaudeCodeAdapter),
-                Box::new(OpenCodeAdapter),
-                Box::new(PiAdapter),
-                Box::new(GeminiAdapter),
-                Box::new(AntigravityAdapter),
-                Box::new(AuggieAdapter),
-                Box::new(GrokAdapter),
-            ],
+            adapters: all_adapters()
+                .into_iter()
+                .filter(|adapter| adapter.kind().is_enabled())
+                .collect(),
         }
     }
 
+    #[cfg(test)]
+    fn all_for_tests() -> Self {
+        Self { adapters: all_adapters() }
+    }
+
+    #[cfg(test)]
+    fn enabled_kinds(&self) -> Vec<AgentKind> {
+        self.adapters.iter().map(|adapter| adapter.kind()).collect()
+    }
+}
+
+fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
+    vec![
+        Box::new(CodexAdapter),
+        Box::new(AmpAdapter),
+        Box::new(ClaudeCodeAdapter),
+        Box::new(OpenCodeAdapter),
+        Box::new(PiAdapter),
+        Box::new(GeminiAdapter),
+        Box::new(AntigravityAdapter),
+        Box::new(AuggieAdapter),
+        Box::new(GrokAdapter),
+        Box::new(GitHubCopilotCliAdapter),
+        Box::new(CursorCliAdapter),
+        Box::new(AiderAdapter),
+        Box::new(ClineCliAdapter),
+        Box::new(GooseCliAdapter),
+        Box::new(KiroCliAdapter),
+        Box::new(OpenHandsCliAdapter),
+    ]
+}
+
+impl AdapterRegistry {
     #[cfg(test)]
     pub fn detect_kind(
         &self,
@@ -577,6 +604,13 @@ fn command_matches_non_claude_agent(command: &str) -> bool {
         || command_matches(command, "agy")
         || command_matches(command, "auggie")
         || command_matches(command, "grok")
+        || command_matches(command, "copilot")
+        || command_matches(command, "cursor")
+        || command_matches(command, "aider")
+        || command_matches(command, "cline")
+        || command_matches(command, "goose")
+        || command_matches(command, "kiro-cli")
+        || command_matches(command, "openhands")
 }
 
 fn looks_like_gemini_output(output_tail: &str) -> bool {
@@ -2050,6 +2084,38 @@ mod tests {
         assert_eq!(registry.detect_kind(&pi_title, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_agent, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&antigravity, None), Some(AgentKind::AntigravityCli));
+    }
+
+    #[test]
+    fn registry_keeps_planned_adapter_scaffolds_disabled_by_default() {
+        let registry = AdapterRegistry::v1();
+
+        assert_eq!(registry.enabled_kinds(), AgentKind::enabled_kinds().collect::<Vec<_>>());
+        for (kind, command) in planned_command_fixtures() {
+            let pane = snapshot("%40", command, false);
+
+            assert!(!kind.is_enabled(), "{kind:?} should stay disabled until its issue is done");
+            assert_eq!(
+                registry.detect_kind(&pane, None),
+                None,
+                "planned scaffold should not be active yet: {kind:?} / {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn planned_adapter_scaffolds_detect_primary_commands_when_all_adapters_are_loaded() {
+        let registry = AdapterRegistry::all_for_tests();
+
+        for (kind, command) in planned_command_fixtures() {
+            let pane = snapshot("%44", command, false);
+
+            assert_eq!(
+                registry.detect_kind(&pane, None),
+                Some(kind),
+                "planned scaffold should be ready for {kind:?}: {command}"
+            );
+        }
     }
 
     #[test]
@@ -4076,6 +4142,18 @@ shift+tab to accept edits
                 include_str!("fixtures/output_antigravity.txt"),
             ),
             (AgentKind::Grok, "node", "worker", include_str!("fixtures/output_grok.txt")),
+        ]
+    }
+
+    fn planned_command_fixtures() -> Vec<(AgentKind, &'static str)> {
+        vec![
+            (AgentKind::GitHubCopilotCli, "copilot"),
+            (AgentKind::CursorCli, "cursor"),
+            (AgentKind::Aider, "aider"),
+            (AgentKind::ClineCli, "cline"),
+            (AgentKind::GooseCli, "goose"),
+            (AgentKind::KiroCli, "kiro-cli"),
+            (AgentKind::OpenHandsCli, "openhands"),
         ]
     }
 

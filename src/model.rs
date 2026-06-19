@@ -15,11 +15,23 @@ pub enum AgentKind {
     AntigravityCli,
     Auggie,
     Grok,
+    GitHubCopilotCli,
+    CursorCli,
+    Aider,
+    ClineCli,
+    GooseCli,
+    KiroCli,
+    OpenHandsCli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSupport {
+    Enabled,
+    Planned { issue: u32 },
 }
 
 impl AgentKind {
-    #[cfg(test)]
-    pub const SUPPORTED_KINDS: [Self; 9] = [
+    pub const ALL_KINDS: [Self; 16] = [
         Self::Codex,
         Self::Amp,
         Self::ClaudeCode,
@@ -29,7 +41,48 @@ impl AgentKind {
         Self::AntigravityCli,
         Self::Auggie,
         Self::Grok,
+        Self::GitHubCopilotCli,
+        Self::CursorCli,
+        Self::Aider,
+        Self::ClineCli,
+        Self::GooseCli,
+        Self::KiroCli,
+        Self::OpenHandsCli,
     ];
+
+    pub const fn support(self) -> AgentSupport {
+        match self {
+            Self::Codex
+            | Self::Amp
+            | Self::ClaudeCode
+            | Self::OpenCode
+            | Self::Pi
+            | Self::GeminiCli
+            | Self::AntigravityCli
+            | Self::Auggie
+            | Self::Grok => AgentSupport::Enabled,
+            Self::GitHubCopilotCli => AgentSupport::Planned { issue: 10 },
+            Self::CursorCli => AgentSupport::Planned { issue: 11 },
+            Self::Aider => AgentSupport::Planned { issue: 12 },
+            Self::ClineCli => AgentSupport::Planned { issue: 13 },
+            Self::GooseCli => AgentSupport::Planned { issue: 14 },
+            Self::KiroCli => AgentSupport::Planned { issue: 15 },
+            Self::OpenHandsCli => AgentSupport::Planned { issue: 16 },
+        }
+    }
+
+    pub const fn is_enabled(self) -> bool {
+        matches!(self.support(), AgentSupport::Enabled)
+    }
+
+    pub fn enabled_kinds() -> impl Iterator<Item = Self> {
+        Self::ALL_KINDS.into_iter().filter(|kind| kind.is_enabled())
+    }
+
+    #[cfg(test)]
+    pub fn planned_kinds() -> impl Iterator<Item = Self> {
+        Self::ALL_KINDS.into_iter().filter(|kind| !kind.is_enabled())
+    }
 
     pub fn display_name(self) -> &'static str {
         match self {
@@ -42,6 +95,13 @@ impl AgentKind {
             Self::AntigravityCli => "Antigravity",
             Self::Auggie => "Auggie",
             Self::Grok => "Grok",
+            Self::GitHubCopilotCli => "GitHub Copilot CLI",
+            Self::CursorCli => "Cursor CLI",
+            Self::Aider => "Aider",
+            Self::ClineCli => "Cline CLI",
+            Self::GooseCli => "Goose CLI",
+            Self::KiroCli => "Kiro CLI",
+            Self::OpenHandsCli => "OpenHands CLI",
         }
     }
 }
@@ -201,7 +261,7 @@ impl AppModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentKind, AppModel, SessionStatus};
+    use super::{AgentKind, AgentSupport, AppModel, SessionStatus};
     use std::time::Duration;
 
     #[test]
@@ -230,9 +290,16 @@ mod tests {
         assert_eq!(AgentKind::AntigravityCli.display_name(), "Antigravity");
         assert_eq!(AgentKind::Auggie.display_name(), "Auggie");
         assert_eq!(AgentKind::Grok.display_name(), "Grok");
+        assert_eq!(AgentKind::GitHubCopilotCli.display_name(), "GitHub Copilot CLI");
+        assert_eq!(AgentKind::CursorCli.display_name(), "Cursor CLI");
+        assert_eq!(AgentKind::Aider.display_name(), "Aider");
+        assert_eq!(AgentKind::ClineCli.display_name(), "Cline CLI");
+        assert_eq!(AgentKind::GooseCli.display_name(), "Goose CLI");
+        assert_eq!(AgentKind::KiroCli.display_name(), "Kiro CLI");
+        assert_eq!(AgentKind::OpenHandsCli.display_name(), "OpenHands CLI");
         assert_eq!(
-            AgentKind::SUPPORTED_KINDS,
-            [
+            AgentKind::enabled_kinds().collect::<Vec<_>>(),
+            vec![
                 AgentKind::Codex,
                 AgentKind::Amp,
                 AgentKind::ClaudeCode,
@@ -244,6 +311,48 @@ mod tests {
                 AgentKind::Grok,
             ]
         );
+    }
+
+    #[test]
+    fn planned_agent_kinds_are_issue_tracked_but_disabled() {
+        let planned = [
+            (AgentKind::GitHubCopilotCli, 10),
+            (AgentKind::CursorCli, 11),
+            (AgentKind::Aider, 12),
+            (AgentKind::ClineCli, 13),
+            (AgentKind::GooseCli, 14),
+            (AgentKind::KiroCli, 15),
+            (AgentKind::OpenHandsCli, 16),
+        ];
+
+        assert_eq!(
+            AgentKind::planned_kinds().collect::<Vec<_>>(),
+            planned.map(|(kind, _issue)| kind).to_vec()
+        );
+        for (kind, issue) in planned {
+            assert_eq!(kind.support(), AgentSupport::Planned { issue });
+            assert!(!kind.is_enabled());
+        }
+
+        for kind in AgentKind::enabled_kinds() {
+            assert_eq!(kind.support(), AgentSupport::Enabled);
+            assert!(kind.is_enabled());
+        }
+    }
+
+    #[test]
+    fn all_agent_kinds_have_support_and_display_metadata() {
+        assert_eq!(AgentKind::ALL_KINDS.len(), 16);
+        for kind in AgentKind::ALL_KINDS {
+            assert!(!kind.display_name().is_empty());
+            match kind.support() {
+                AgentSupport::Enabled => assert!(kind.is_enabled()),
+                AgentSupport::Planned { issue } => {
+                    assert!((10..=16).contains(&issue));
+                    assert!(!kind.is_enabled());
+                }
+            }
+        }
     }
 
     #[test]

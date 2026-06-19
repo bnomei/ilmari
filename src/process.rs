@@ -7,18 +7,6 @@ use thiserror::Error;
 use crate::model::{AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord, SubtaskProcess};
 
 const PS_FORMAT: &str = "pid=,ppid=,%cpu=,rss=,command=";
-const PROCESS_IDENTIFIABLE_AGENT_KINDS: [AgentKind; 9] = [
-    AgentKind::Codex,
-    AgentKind::Amp,
-    AgentKind::ClaudeCode,
-    AgentKind::OpenCode,
-    AgentKind::Pi,
-    AgentKind::GeminiCli,
-    AgentKind::AntigravityCli,
-    AgentKind::Auggie,
-    AgentKind::Grok,
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessSnapshot {
     pub pid: u32,
@@ -108,7 +96,7 @@ impl ProcessTree {
         let mut matched_kind = None;
 
         for pid in self.pane_processes(pane_pid) {
-            for kind in PROCESS_IDENTIFIABLE_AGENT_KINDS {
+            for kind in AgentKind::enabled_kinds() {
                 if !self.process_matches_kind(pid, kind) {
                     continue;
                 }
@@ -196,6 +184,13 @@ impl ProcessTree {
             }
             AgentKind::Auggie => command_matches_auggie(&process.command),
             AgentKind::Grok => command_executable_matches(&process.command, "grok"),
+            AgentKind::GitHubCopilotCli => command_executable_matches(&process.command, "copilot"),
+            AgentKind::CursorCli => command_executable_matches(&process.command, "cursor"),
+            AgentKind::Aider => command_executable_matches(&process.command, "aider"),
+            AgentKind::ClineCli => command_executable_matches(&process.command, "cline"),
+            AgentKind::GooseCli => command_executable_matches(&process.command, "goose"),
+            AgentKind::KiroCli => command_executable_matches(&process.command, "kiro-cli"),
+            AgentKind::OpenHandsCli => command_executable_matches(&process.command, "openhands"),
         }
     }
 
@@ -552,6 +547,40 @@ mod tests {
         ]);
 
         assert_eq!(tree.agent_kind_for_pane(Some(100)), Some(AgentKind::Auggie));
+    }
+
+    #[test]
+    fn planned_process_matchers_exist_but_are_not_auto_identified() {
+        let planned = [
+            (AgentKind::GitHubCopilotCli, "copilot"),
+            (AgentKind::CursorCli, "cursor"),
+            (AgentKind::Aider, "aider"),
+            (AgentKind::ClineCli, "cline"),
+            (AgentKind::GooseCli, "goose"),
+            (AgentKind::KiroCli, "kiro-cli"),
+            (AgentKind::OpenHandsCli, "openhands"),
+        ];
+
+        for (kind, command) in planned {
+            let tree = ProcessTree::from_snapshots(vec![
+                snapshot(100, 55, 1, 1024, "zsh"),
+                snapshot(101, 100, 180, 48 * 1024, command),
+            ]);
+
+            let usage = tree
+                .usage_for_session(&session_record(100, kind))
+                .expect("planned matcher should resolve when explicitly requested");
+
+            assert_eq!(
+                usage.agent,
+                ResourceUsage { cpu_tenths_percent: 180, memory_kib: 48 * 1024 }
+            );
+            assert_eq!(
+                tree.agent_kind_for_pane(Some(100)),
+                None,
+                "{kind:?} should not be auto-identified until enabled"
+            );
+        }
     }
 
     #[test]
