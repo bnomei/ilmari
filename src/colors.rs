@@ -1,12 +1,22 @@
 use std::collections::BTreeMap;
 
+#[cfg(feature = "tui")]
 use ratatui::style::{Color, Style};
 
 const PALETTE_CSV_LEN: usize = 18;
 const PALETTE_SLOT_ORDER: &str =
     "fg,bg,black,red,green,yellow,blue,magenta,cyan,white,bright_black,bright_red,bright_green,bright_yellow,bright_blue,bright_magenta,bright_cyan,bright_white";
 
+#[cfg(not(feature = "tui"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Color {
+    Reset,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub enum SemanticRole {
     StatusRunning,
     StatusWaitingInput,
@@ -46,10 +56,12 @@ impl Palette {
         Self::parse_csv(value.trim())
     }
 
+    #[cfg(feature = "tui")]
     pub fn base_style(&self) -> Style {
         Style::default().fg(self.fg).bg(self.bg)
     }
 
+    #[cfg(feature = "tui")]
     pub fn style_for(&self, role: SemanticRole) -> Style {
         self.base_style().fg(match role {
             SemanticRole::StatusRunning => self.ansi_color(4),
@@ -103,6 +115,7 @@ impl Palette {
         Ok(Self { fg, bg, ansi })
     }
 
+    #[cfg(feature = "tui")]
     fn ansi_color(&self, idx: usize) -> Color {
         self.ansi[idx]
     }
@@ -155,7 +168,7 @@ fn parse_hex_channel(value: &str) -> Result<u8, String> {
     Err(format!("invalid rgb: component {trimmed} (expected 2 or 4 hex digits)"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 mod tests {
     use super::{Palette, SemanticRole};
     use ratatui::style::Color;

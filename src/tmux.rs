@@ -225,6 +225,7 @@ fn capture_output_tails_with_process_kinds_using(
     capture
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub fn jump_command(target: &PaneSnapshot) -> TmuxCommand {
     TmuxCommand::new([
         "switch-client",
@@ -241,8 +242,14 @@ pub fn jump_command(target: &PaneSnapshot) -> TmuxCommand {
     ])
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub fn jump_to_pane(target: &PaneSnapshot) -> Result<(), TmuxError> {
     run_tmux_command(&jump_command(target))?;
+    Ok(())
+}
+
+pub fn set_global_option(name: &str, value: &str) -> Result<(), TmuxError> {
+    run_tmux_command(&TmuxCommand::new(["set-option", "-gq", name, value]))?;
     Ok(())
 }
 

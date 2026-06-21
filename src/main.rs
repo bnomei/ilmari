@@ -3,10 +3,14 @@ mod app;
 mod cli;
 mod colors;
 mod git;
+mod ipc;
+mod mcp;
 mod model;
 mod process;
+#[cfg(feature = "tui")]
 mod sound;
 mod tmux;
+#[cfg(feature = "tui")]
 mod ui;
 
 fn main() -> anyhow::Result<()> {

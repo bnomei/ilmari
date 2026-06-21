@@ -1,30 +1,42 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
-use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
+#[cfg(feature = "tui")]
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+#[cfg(feature = "tui")]
 use crossterm::execute;
+#[cfg(feature = "tui")]
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+#[cfg(feature = "tui")]
 use ratatui::{DefaultTerminal, Frame};
+#[cfg(feature = "tui")]
+use std::io::{self, Stdout};
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::agents::SessionTracker;
 use crate::colors::Palette;
 use crate::git::{GitSummaryCache, GitSummaryReport};
+use crate::ipc::{
+    self, IpcConfig, IpcError, IpcServer, PublishedState, PublishedStateHandle, StateBuildOptions,
+};
+use crate::mcp::{self, McpConfig, McpServer};
 use crate::model::{
     AgentKind, AppModel, GitSummaryRow, PaneRow, SessionProcessUsage, SessionRecord, SessionStatus,
     WorkspaceGroup,
 };
 use crate::process::{self, ProcessTree};
+#[cfg(feature = "tui")]
 use crate::sound;
 use crate::tmux::{self, PaneSnapshot};
+#[cfg(feature = "tui")]
 use crate::ui;
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -39,9 +51,12 @@ pub struct AppConfig {
     pub refresh_interval: Duration,
     pub process_refresh_interval: Duration,
     pub quit_on_activate: bool,
+    pub tui_enabled: bool,
     pub show_git: bool,
     pub bell_enabled: bool,
     pub output_tail_capture_enabled: bool,
+    pub ipc: IpcConfig,
+    pub mcp: McpConfig,
 }
 
 impl AppConfig {
@@ -63,16 +78,29 @@ impl AppConfig {
                 env.get("TMUX").map(String::as_str),
                 env.get("TMUX_PANE").map(String::as_str),
             ),
+            tui_enabled: tui_enabled_from_var(env.get("ILMARI_TUI").map(String::as_str)),
             show_git: true,
             bell_enabled: true,
             output_tail_capture_enabled: output_tail_capture_enabled_from_var(
                 env.get("ILMARI_OUTPUT_TAIL").map(String::as_str),
             ),
+            ipc: IpcConfig::from_env_map(env),
+            mcp: McpConfig::from_env_map(env),
         }
     }
 }
 
 pub fn run(config: AppConfig) -> Result<()> {
+    #[cfg(feature = "tui")]
+    if config.tui_enabled {
+        return run_tui(config);
+    }
+
+    run_headless(config)
+}
+
+#[cfg(feature = "tui")]
+fn run_tui(config: AppConfig) -> Result<()> {
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     let result = run_app(&mut terminal, config);
@@ -80,6 +108,24 @@ pub fn run(config: AppConfig) -> Result<()> {
     result
 }
 
+fn run_headless(mut config: AppConfig) -> Result<()> {
+    config.tui_enabled = false;
+    config.bell_enabled = false;
+    let mut app = App::from_config(config);
+    app.refresh(true);
+
+    loop {
+        let timeout = app.poll_timeout();
+        if !timeout.is_zero() {
+            thread::sleep(timeout);
+        }
+        if app.refresh_due() {
+            app.refresh(false);
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
 fn run_app(terminal: &mut DefaultTerminal, config: AppConfig) -> Result<()> {
     let mut app = App::from_config(config);
     app.refresh(true);
@@ -108,6 +154,7 @@ fn run_app(terminal: &mut DefaultTerminal, config: AppConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 struct App {
     model: AppModel,
     status_line: String,
@@ -136,6 +183,13 @@ struct App {
     show_stats_pinned: bool,
     bell_enabled: bool,
     output_tail_capture_enabled: bool,
+    published_state: PublishedStateHandle,
+    published_revision: u64,
+    _ipc_server: Option<IpcServer>,
+    mcp_server: Option<McpServer>,
+    headless_warning: Option<String>,
+    ipc_warning: Option<String>,
+    mcp_warning: Option<String>,
     hydrated: bool,
 }
 
@@ -174,6 +228,7 @@ impl CachedProcessTree {
     }
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 impl ProcessUsageCache {
     fn new(refresh_interval: Duration) -> Self {
         Self::with_collector(refresh_interval, process::collect_process_tree)
@@ -299,13 +354,17 @@ impl Default for App {
             refresh_interval: DEFAULT_REFRESH_INTERVAL,
             process_refresh_interval: DEFAULT_PROCESS_REFRESH_INTERVAL,
             quit_on_activate: false,
+            tui_enabled: cfg!(feature = "tui"),
             show_git: true,
             bell_enabled: true,
             output_tail_capture_enabled: true,
+            ipc: IpcConfig::disabled(),
+            mcp: McpConfig::disabled(),
         })
     }
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 impl App {
     fn from_config(config: AppConfig) -> Self {
         Self::new_with_process_refresh(
@@ -313,22 +372,33 @@ impl App {
             config.refresh_interval,
             config.process_refresh_interval,
             config.quit_on_activate,
+            config.tui_enabled,
             config.show_git,
             config.bell_enabled,
             config.output_tail_capture_enabled,
+            config.ipc,
+            config.mcp,
         )
     }
 
     #[cfg(test)]
-    fn new(palette: Palette, refresh_interval: Duration, quit_on_activate: bool) -> Self {
+    fn new(
+        palette: Palette,
+        refresh_interval: Duration,
+        quit_on_activate: bool,
+        tui_enabled: bool,
+    ) -> Self {
         Self::new_with_process_refresh(
             palette,
             refresh_interval,
             DEFAULT_PROCESS_REFRESH_INTERVAL,
             quit_on_activate,
+            tui_enabled,
             true,
             true,
             true,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
         )
     }
 
@@ -337,13 +407,21 @@ impl App {
         refresh_interval: Duration,
         process_refresh_interval: Duration,
         quit_on_activate: bool,
+        tui_enabled: bool,
         show_git: bool,
         bell_enabled: bool,
         output_tail_capture_enabled: bool,
+        ipc_config: IpcConfig,
+        mcp_config: McpConfig,
     ) -> Self {
         let mut model = AppModel::placeholder();
         model.refresh_interval = refresh_interval;
         let status_line = model.status_line.clone();
+        let published_state = PublishedStateHandle::new(PublishedState::empty(refresh_interval));
+        let (ipc_server, ipc_warning) = start_ipc_server(&ipc_config, published_state.clone());
+        let (mcp_server, mcp_warning) = start_mcp_server(&mcp_config, published_state.clone());
+        let headless_warning = (!tui_enabled && !ipc_config.enabled && !mcp_config.enabled)
+            .then(|| "headless: no socket or MCP endpoint enabled".to_string());
 
         Self {
             model,
@@ -373,10 +451,18 @@ impl App {
             show_stats_pinned: false,
             bell_enabled,
             output_tail_capture_enabled,
+            published_state,
+            published_revision: 0,
+            _ipc_server: ipc_server,
+            mcp_server,
+            headless_warning,
+            ipc_warning,
+            mcp_warning,
             hydrated: false,
         }
     }
 
+    #[cfg(feature = "tui")]
     fn draw(&mut self, frame: &mut Frame) {
         self.apply_responsive_view_defaults(available_render_width(frame));
         ui::render(frame, &self.model, &self.palette);
@@ -390,6 +476,7 @@ impl App {
         self.model.last_refresh.elapsed() >= self.model.refresh_interval
     }
 
+    #[cfg(feature = "tui")]
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         match self.handle_pane_jump_key(code, modifiers) {
             PaneJumpKeyResult::Consumed { redraw } => redraw,
@@ -461,6 +548,7 @@ impl App {
         }
     }
 
+    #[cfg(feature = "tui")]
     fn handle_pane_jump_key(
         &mut self,
         code: KeyCode,
@@ -511,7 +599,13 @@ impl App {
 
         match (self.collect_pane_snapshots)() {
             Ok(panes) => {
-                let mut runtime_warnings = Vec::new();
+                let mut runtime_warnings = self
+                    .headless_warning
+                    .iter()
+                    .chain(self.ipc_warning.iter())
+                    .chain(self.mcp_warning.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let process_kinds =
                     match self.process_cache.agent_kinds_for_panes(&panes, refreshed_at) {
                         Ok(process_kinds) => process_kinds,
@@ -590,6 +684,23 @@ impl App {
         self.status_line = status_line;
         self.git_summaries = relabel_git_summaries(git_summaries);
         self.rebuild_model(refreshed_at, refreshed_at_wallclock);
+        self.publish_ipc(refreshed_at, refreshed_at_wallclock);
+    }
+
+    fn publish_ipc(&mut self, refreshed_at: Instant, refreshed_at_wallclock: SystemTime) {
+        self.published_revision = self.published_revision.saturating_add(1);
+        let state = PublishedState::from_sessions(StateBuildOptions {
+            sessions: &self.sessions,
+            status_line: Some(self.status_line.as_str()),
+            observed_at: refreshed_at_wallclock,
+            refreshed_at,
+            refresh_interval: self.model.refresh_interval,
+            revision: self.published_revision,
+        });
+        let change = self.published_state.publish(state);
+        if let Some(mcp_server) = &self.mcp_server {
+            mcp_server.publish_change(change);
+        }
     }
 
     fn rebuild_model(&mut self, refreshed_at: Instant, refreshed_at_wallclock: SystemTime) {
@@ -642,11 +753,14 @@ impl App {
     }
 
     fn emit_bells(&mut self, transitions: usize) {
+        #[cfg(feature = "tui")]
         if self.hydrated && self.bell_enabled {
             for _ in 0..transitions {
                 let _ = sound::ring_terminal_bell();
             }
         }
+        #[cfg(not(feature = "tui"))]
+        let _ = transitions;
 
         self.hydrated = true;
     }
@@ -845,6 +959,7 @@ impl App {
     }
 }
 
+#[cfg(feature = "tui")]
 enum PaneJumpKeyResult {
     Continue { redraw: bool },
     Consumed { redraw: bool },
@@ -952,7 +1067,7 @@ fn build_model_with_preferences(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 #[allow(clippy::too_many_arguments)]
 fn build_model(
     sessions: &[SessionRecord],
@@ -1234,6 +1349,34 @@ fn output_tail_capture_warning(failures: &[tmux::OutputTailCaptureFailure]) -> O
     }
 }
 
+fn start_ipc_server(
+    config: &IpcConfig,
+    state: PublishedStateHandle,
+) -> (Option<IpcServer>, Option<String>) {
+    match IpcServer::start(config, state) {
+        Ok(Some(server)) => {
+            ipc::publish_socket_path_to_tmux(server.path());
+            (Some(server), None)
+        }
+        Ok(None) | Err(IpcError::AlreadyRunning(_)) => (None, None),
+        Err(error) => (None, Some(format!("ipc: {error}"))),
+    }
+}
+
+fn start_mcp_server(
+    config: &McpConfig,
+    state: PublishedStateHandle,
+) -> (Option<McpServer>, Option<String>) {
+    match McpServer::start(config, state) {
+        Ok(Some(server)) => {
+            mcp::publish_mcp_url_to_tmux(server.url());
+            (Some(server), None)
+        }
+        Ok(None) => (None, None),
+        Err(error) => (None, Some(format!("mcp: {error}"))),
+    }
+}
+
 fn current_statuses(sessions: &[SessionRecord]) -> HashMap<String, SessionStatus> {
     sessions.iter().map(|session| (session.pane.pane_id.clone(), session.status)).collect()
 }
@@ -1269,6 +1412,13 @@ fn output_tail_capture_enabled_from_var(value: Option<&str>) -> bool {
     )
 }
 
+fn tui_enabled_from_var(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
 fn quit_on_activate_from_vars(tmux: Option<&str>, tmux_pane: Option<&str>) -> bool {
     tmux.is_some() && tmux_pane.is_none()
 }
@@ -1294,12 +1444,15 @@ fn refresh_interval_from_var_or(value: Option<&str>, default: Duration) -> Durat
         .unwrap_or(default)
 }
 
+#[cfg(feature = "tui")]
 fn available_render_width(frame: &Frame) -> usize {
     frame.area().width.saturating_sub(2) as usize
 }
 
+#[cfg(feature = "tui")]
 struct TerminalGuard;
 
+#[cfg(feature = "tui")]
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
@@ -1307,6 +1460,7 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[cfg(feature = "tui")]
 #[allow(dead_code)]
 fn setup_terminal_manually(stdout: &mut Stdout) -> Result<()> {
     enable_raw_mode()?;
@@ -1314,7 +1468,7 @@ fn setup_terminal_manually(stdout: &mut Stdout) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tui"))]
 mod tests {
     use super::{
         build_model, count_alert_transitions, derive_path_labels, normalize_selected_pane_id,
@@ -1326,6 +1480,8 @@ mod tests {
     use crate::agents::SessionTracker;
     use crate::colors::Palette;
     use crate::git::GitSummaryReport;
+    use crate::ipc::IpcConfig;
+    use crate::mcp::McpConfig;
     use crate::model::{
         AgentDetail, AgentDetailTone, AgentKind, GitSummaryRow, ResourceUsage, SessionProcessUsage,
         SessionRecord, SessionStatus, SubtaskProcess,
@@ -1378,7 +1534,7 @@ mod tests {
             session_with_path("%7", SessionStatus::Running, "/tmp/zeta/blog"),
             session_with_path("%3", SessionStatus::WaitingInput, "/tmp/alpha/api"),
         ];
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.sessions = sessions;
         app.selected_pane_id = Some("%3".to_string());
         app.sync_model("status".to_string(), Vec::new(), now, SystemTime::now());
@@ -1390,7 +1546,7 @@ mod tests {
     #[test]
     fn sync_model_selects_most_recent_waiting_session_by_default() {
         let now = Instant::now();
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.sessions = vec![
             session_with_change("%3", SessionStatus::WaitingInput, now - Duration::from_secs(60)),
             session_with_change("%7", SessionStatus::Running, now),
@@ -1409,7 +1565,7 @@ mod tests {
             session_with_path("%12", SessionStatus::Running, "/tmp/alpha/api"),
             session_with_path("%19", SessionStatus::WaitingInput, "/tmp/alpha/api"),
         ];
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.sessions = sessions;
         app.selected_pane_id = Some("%12".to_string());
         app.sync_model("status".to_string(), Vec::new(), now, SystemTime::now());
@@ -1429,7 +1585,7 @@ mod tests {
             session_with_path("%12", SessionStatus::Running, "/tmp/alpha/api"),
             session_with_path("%19", SessionStatus::WaitingInput, "/tmp/alpha/api"),
         ];
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.sessions = sessions;
         app.selected_pane_id = Some("%12".to_string());
         app.sync_model("status".to_string(), Vec::new(), now, SystemTime::now());
@@ -1687,7 +1843,7 @@ mod tests {
     #[test]
     fn equals_toggles_selected_subtasks() {
         let now = Instant::now();
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![SessionRecord {
@@ -1734,7 +1890,7 @@ mod tests {
     #[test]
     fn equals_lazily_hydrates_selected_process_usage() {
         let now = Instant::now();
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![session("%12", SessionStatus::Running)];
@@ -1756,7 +1912,7 @@ mod tests {
     #[test]
     fn equals_refreshes_existing_process_usage_before_expanding_subtasks() {
         let now = Instant::now();
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![session("%12", SessionStatus::Running)];
@@ -1844,7 +2000,7 @@ mod tests {
     #[test]
     fn hiding_git_releases_cached_git_rows() {
         let now = Instant::now();
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.sessions = vec![session_with_path("%12", SessionStatus::Running, "/tmp/api/worktree")];
         app.sync_model(
             "status".to_string(),
@@ -1885,7 +2041,7 @@ mod tests {
     #[test]
     fn stats_toggle_hydrates_process_usage_from_fresh_tree() {
         let now = Instant::now();
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![session("%12", SessionStatus::Running)];
@@ -1911,7 +2067,7 @@ mod tests {
     #[test]
     fn hiding_stats_releases_process_usage_when_no_subtasks_are_expanded() {
         let now = Instant::now();
-        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false);
+        let mut app = App::new(Palette::default(), DEFAULT_REFRESH_INTERVAL, false, true);
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
         app.sessions = vec![session("%12", SessionStatus::Running)];
@@ -2023,7 +2179,10 @@ mod tests {
             false,
             true,
             true,
+            true,
             false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
         );
 
         assert!(!app.output_tail_capture_enabled);
@@ -2042,7 +2201,10 @@ mod tests {
             false,
             true,
             true,
+            true,
             false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
         );
         app.show_git = false;
         app.process_cache =

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -16,9 +17,14 @@ struct CliOptions {
     refresh_interval: Option<Duration>,
     process_refresh_interval: Option<Duration>,
     palette: Option<Palette>,
+    tui_enabled: Option<bool>,
     show_git: Option<bool>,
     bell_enabled: Option<bool>,
     output_tail_capture_enabled: Option<bool>,
+    socket_enabled: Option<bool>,
+    socket_path: Option<PathBuf>,
+    mcp_enabled: Option<bool>,
+    mcp_port: Option<u16>,
 }
 
 impl CliOptions {
@@ -32,6 +38,9 @@ impl CliOptions {
         if let Some(palette) = self.palette {
             config.palette = palette;
         }
+        if let Some(tui_enabled) = self.tui_enabled {
+            config.tui_enabled = tui_enabled;
+        }
         if let Some(show_git) = self.show_git {
             config.show_git = show_git;
         }
@@ -40,6 +49,20 @@ impl CliOptions {
         }
         if let Some(output_tail_capture_enabled) = self.output_tail_capture_enabled {
             config.output_tail_capture_enabled = output_tail_capture_enabled;
+        }
+        if let Some(socket_path) = self.socket_path {
+            config.ipc.socket_path = socket_path;
+            config.ipc.enabled = true;
+        }
+        if let Some(socket_enabled) = self.socket_enabled {
+            config.ipc.enabled = socket_enabled;
+        }
+        if let Some(mcp_port) = self.mcp_port {
+            config.mcp.port = mcp_port;
+            config.mcp.enabled = true;
+        }
+        if let Some(mcp_enabled) = self.mcp_enabled {
+            config.mcp.enabled = mcp_enabled;
         }
         config
     }
@@ -73,9 +96,14 @@ where
         refresh_interval: None,
         process_refresh_interval: None,
         palette: None,
+        tui_enabled: None,
         show_git: None,
         bell_enabled: None,
         output_tail_capture_enabled: None,
+        socket_enabled: None,
+        socket_path: None,
+        mcp_enabled: None,
+        mcp_port: None,
     };
 
     while let Some(arg) = args.next() {
@@ -96,9 +124,22 @@ where
                 let value = next_value(&mut args, "--palette")?;
                 options.palette = Some(parse_palette(&value)?);
             }
+            "--no-tui" => options.tui_enabled = Some(false),
             "--no-git" => options.show_git = Some(false),
             "--no-bell" => options.bell_enabled = Some(false),
             "--no-output-tail" => options.output_tail_capture_enabled = Some(false),
+            "--socket" => options.socket_enabled = Some(true),
+            "--no-socket" => options.socket_enabled = Some(false),
+            "--socket-path" => {
+                let value = next_value(&mut args, "--socket-path")?;
+                options.socket_path = Some(PathBuf::from(value));
+            }
+            "--mcp" => options.mcp_enabled = Some(true),
+            "--no-mcp" => options.mcp_enabled = Some(false),
+            "--mcp-port" => {
+                let value = next_value(&mut args, "--mcp-port")?;
+                options.mcp_port = Some(parse_port(&value, "--mcp-port")?);
+            }
             _ => {
                 if let Some(value) = arg.strip_prefix("--refresh-seconds=") {
                     options.refresh_interval =
@@ -108,6 +149,10 @@ where
                         Some(parse_positive_seconds(value, "--process-refresh-seconds")?);
                 } else if let Some(value) = arg.strip_prefix("--palette=") {
                     options.palette = Some(parse_palette(value)?);
+                } else if let Some(value) = arg.strip_prefix("--socket-path=") {
+                    options.socket_path = Some(PathBuf::from(value));
+                } else if let Some(value) = arg.strip_prefix("--mcp-port=") {
+                    options.mcp_port = Some(parse_port(value, "--mcp-port")?);
                 } else {
                     bail!("unknown argument `{arg}`; try `ilmari --help`");
                 }
@@ -128,14 +173,23 @@ pub fn help_text() -> &'static str {
         "  --refresh-seconds <SECONDS>          Main tmux scan cadence\n",
         "  --process-refresh-seconds <SECONDS>  CPU and memory sampling cadence\n",
         "  --palette <CSV>                      18-slot terminal palette override\n",
+        "  --no-tui                             Run headless without terminal UI\n",
         "  --no-git                             Start with git summaries hidden\n",
         "  --no-output-tail                     Disable tmux capture-pane output tails\n",
         "  --no-bell                            Disable terminal bell alerts\n",
+        "  --socket                             Enable local JSON socket publishing\n",
+        "  --no-socket                          Disable local JSON socket publishing\n",
+        "  --socket-path <PATH>                  Local JSON socket path override\n",
+        "  --mcp                                Enable loopback MCP resource server\n",
+        "  --no-mcp                             Disable loopback MCP resource server\n",
+        "  --mcp-port <PORT>                     Loopback MCP port, 0 chooses a free port\n",
         "  -h, --help                           Print help\n",
         "  -V, --version                        Print version\n\n",
         "Environment defaults:\n",
         "  ILMARI_REFRESH_SECONDS, ILMARI_PROCESS_REFRESH_SECONDS,\n",
-        "  ILMARI_OUTPUT_TAIL, ILMARI_TUI_PALETTE, ILMARI_PALETTE\n\n",
+        "  ILMARI_TUI, ILMARI_OUTPUT_TAIL, ILMARI_SOCKET, ILMARI_SOCKET_PATH,\n",
+        "  ILMARI_MCP, ILMARI_MCP_PORT,\n",
+        "  ILMARI_TUI_PALETTE, ILMARI_PALETTE\n\n",
         "Flags override environment defaults for the same setting.\n",
     )
 }
@@ -170,6 +224,13 @@ fn parse_palette(value: &str) -> Result<Palette> {
     Palette::from_csv(value).map_err(|error| anyhow::anyhow!("invalid --palette value: {error}"))
 }
 
+fn parse_port(value: &str, flag: &str) -> Result<u16> {
+    value
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("{flag} requires a port from 0 to 65535"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -189,9 +250,16 @@ mod tests {
             "--refresh-seconds",
             "--process-refresh-seconds",
             "--palette",
+            "--no-tui",
             "--no-git",
             "--no-output-tail",
             "--no-bell",
+            "--socket",
+            "--no-socket",
+            "--socket-path",
+            "--mcp",
+            "--no-mcp",
+            "--mcp-port",
             "--help",
             "--version",
         ] {
@@ -221,9 +289,12 @@ mod tests {
             "--refresh-seconds",
             "7",
             "--process-refresh-seconds=31",
+            "--no-tui",
             "--no-git",
             "--no-output-tail",
             "--no-bell",
+            "--no-socket",
+            "--mcp-port=0",
         ])
         .expect("flags should parse");
 
@@ -233,15 +304,20 @@ mod tests {
 
         assert_eq!(config.refresh_interval, Duration::from_secs(7));
         assert_eq!(config.process_refresh_interval, Duration::from_secs(31));
+        assert!(!config.tui_enabled);
         assert!(!config.show_git);
         assert!(!config.output_tail_capture_enabled);
         assert!(!config.bell_enabled);
+        assert!(!config.ipc.enabled);
+        assert!(config.mcp.enabled);
+        assert_eq!(config.mcp.port, 0);
     }
 
     #[test]
     fn invalid_flag_values_are_errors() {
         assert!(parse_args(["--refresh-seconds", "0"]).is_err());
         assert!(parse_args(["--process-refresh-seconds=abc"]).is_err());
+        assert!(parse_args(["--mcp-port", "99999"]).is_err());
         assert!(parse_args(["--unknown"]).is_err());
     }
 
@@ -254,7 +330,12 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("ILMARI_REFRESH_SECONDS".to_string(), "123".to_string());
         env.insert("ILMARI_PROCESS_REFRESH_SECONDS".to_string(), "456".to_string());
+        env.insert("ILMARI_TUI".to_string(), "0".to_string());
         env.insert("ILMARI_OUTPUT_TAIL".to_string(), "true".to_string());
+        env.insert("ILMARI_SOCKET".to_string(), "0".to_string());
+        env.insert("ILMARI_SOCKET_PATH".to_string(), "/tmp/env.sock".to_string());
+        env.insert("ILMARI_MCP".to_string(), "0".to_string());
+        env.insert("ILMARI_MCP_PORT".to_string(), "8888".to_string());
         env.insert("ILMARI_TUI_PALETTE".to_string(), env_palette.to_string());
 
         let command = parse_args_with_config(
@@ -268,6 +349,10 @@ mod tests {
                 "--no-git",
                 "--no-output-tail",
                 "--no-bell",
+                "--socket-path=/tmp/flag.sock",
+                "--mcp",
+                "--mcp-port",
+                "9999",
             ],
             AppConfig::from_env_map(&env),
         )
@@ -280,8 +365,13 @@ mod tests {
         assert_eq!(config.refresh_interval, Duration::from_secs(9));
         assert_eq!(config.process_refresh_interval, Duration::from_secs(44));
         assert_eq!(config.palette, Palette::from_csv(flag_palette).expect("flag palette parses"));
+        assert!(!config.tui_enabled);
         assert!(!config.show_git);
         assert!(!config.output_tail_capture_enabled);
         assert!(!config.bell_enabled);
+        assert!(config.ipc.enabled);
+        assert_eq!(config.ipc.socket_path, std::path::PathBuf::from("/tmp/flag.sock"));
+        assert!(config.mcp.enabled);
+        assert_eq!(config.mcp.port, 9999);
     }
 }

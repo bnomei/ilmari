@@ -127,9 +127,16 @@ that run.
 | `--refresh-seconds <SECONDS>` | Main tmux scan cadence | `ILMARI_REFRESH_SECONDS` |
 | `--process-refresh-seconds <SECONDS>` | CPU and memory sampling cadence | `ILMARI_PROCESS_REFRESH_SECONDS` |
 | `--palette <CSV>` | 18-slot palette override | `ILMARI_TUI_PALETTE`, then `ILMARI_PALETTE` |
+| `--no-tui` | Run headless without terminal UI | `ILMARI_TUI=0` |
 | `--no-git` | Start with git summaries hidden | none |
 | `--no-output-tail` | Skip pane output tail capture | `ILMARI_OUTPUT_TAIL=0` |
 | `--no-bell` | Disable terminal bell alerts | none |
+| `--socket` | Enable local JSON socket publishing | `ILMARI_SOCKET=1` |
+| `--no-socket` | Disable local JSON socket publishing | `ILMARI_SOCKET=0` |
+| `--socket-path <PATH>` | Local JSON socket path override | `ILMARI_SOCKET_PATH` |
+| `--mcp` | Enable loopback MCP resource server | `ILMARI_MCP=1` |
+| `--no-mcp` | Disable loopback MCP resource server | `ILMARI_MCP=0` |
+| `--mcp-port <PORT>` | Loopback MCP port, `0` chooses a free port | `ILMARI_MCP_PORT` |
 | `--help` / `-h` | Print help | none |
 | `--version` / `-V` | Print version | none |
 
@@ -137,7 +144,12 @@ that run.
 | --- | --- | --- | --- |
 | `ILMARI_REFRESH_SECONDS` | Main tmux scan cadence | `5` | Positive integer seconds. Empty, invalid, or non-positive values fall back to the default. |
 | `ILMARI_PROCESS_REFRESH_SECONDS` | CPU and memory sampling cadence | `15` | Separate from the main refresh so `ilmari` does not call `ps` on every redraw. Empty, invalid, or non-positive values fall back to the default. |
+| `ILMARI_TUI` | Terminal UI | enabled when compiled with feature `tui` | Set to `0`, `false`, `no`, or `off` to run headless. |
 | `ILMARI_OUTPUT_TAIL` | Pane output tail capture | enabled | Set to `0`, `false`, `no`, or `off` to skip `tmux capture-pane` output tail capture. |
+| `ILMARI_SOCKET` | Local JSON socket publisher | disabled | Set to `1`, `true`, `yes`, or `on` to enable. |
+| `ILMARI_SOCKET_PATH` | Local JSON socket path | temp dir path scoped by user and tmux socket | Setting a path enables the socket unless `ILMARI_SOCKET=0` is also set. |
+| `ILMARI_MCP` | Loopback MCP resource server | disabled | Set to `1`, `true`, `yes`, or `on` to enable. |
+| `ILMARI_MCP_PORT` | Loopback MCP port | `0` | Setting a port enables MCP unless `ILMARI_MCP=0` is also set. |
 | `ILMARI_TUI_PALETTE` | Primary palette override | terminal ANSI theme | Takes an 18-slot CSV palette. Takes precedence over `ILMARI_PALETTE`. |
 | `ILMARI_PALETTE` | Compatibility alias for palette override | terminal ANSI theme | Used only when `ILMARI_TUI_PALETTE` is unset. |
 
@@ -147,7 +159,148 @@ Examples:
 ILMARI_REFRESH_SECONDS=10 ilmari
 ILMARI_PROCESS_REFRESH_SECONDS=30 ilmari
 ILMARI_OUTPUT_TAIL=0 ilmari
+ilmari --no-tui --socket
+ilmari --socket
+ILMARI_SOCKET_PATH=/tmp/ilmari.sock ilmari
+ilmari --no-tui --mcp --mcp-port 0
 ```
+
+### Build-time features
+
+The default Cargo build includes the TUI and both endpoint implementations:
+
+```sh
+cargo build
+```
+
+Features can be removed at build time:
+
+```sh
+cargo build --no-default-features
+cargo build --no-default-features --features tui
+cargo build --no-default-features --features socket
+cargo build --no-default-features --features mcp
+cargo build --no-default-features --features rmcp
+cargo build --no-default-features --features socket,mcp
+cargo build --no-default-features --features tui,socket,mcp
+```
+
+Feature meanings:
+
+| Feature | Effect |
+| --- | --- |
+| `tui` | Builds the terminal UI and pulls in `ratatui` and `crossterm`. |
+| `socket` | Builds the local Unix-domain JSON socket endpoint. |
+| `mcp` | Builds the loopback MCP resource endpoint and pulls in `rmcp`, `axum`, `tokio`, `tokio-util`, and MCP annotation timestamp support. |
+| `rmcp` | Alias for `mcp`, for builds that name the backing crate explicitly. |
+
+Runtime flags remain parseable when an endpoint is compiled out. Enabling a
+compiled-out endpoint reports a status warning such as `socket support was not
+compiled in` or `MCP support was not compiled in`. Builds without feature `tui`
+run in headless mode.
+
+### Local JSON socket
+
+When enabled, Ilmari publishes a local Unix-domain socket while it is running.
+The socket is not a network listener. It accepts one line commands and returns
+one JSON object per request:
+
+```text
+ping
+list
+ls
+detail 12
+detail %12
+detail ilmari://1/7/12
+```
+
+`detail` accepts bare pane numbers like `12`, tmux pane ids like `%12`, and
+prefixed ids like `tmux:%12`, plus Ilmari resource URIs. Responses use the
+canonical tmux pane id form.
+
+When Ilmari successfully owns the socket, it also writes the path into the tmux
+global option `@ilmari_socket_path` so connector processes can discover it from
+tmux. If another Ilmari process already owns the same socket, the later process
+keeps running without taking over that endpoint.
+
+`list` returns a compact action queue for consumers. Items include the pane id,
+resource URI, consumer state, agent slug, current workspace path, and a prebuilt
+tmux `argv` command where an immediate tmux action is useful. Finished sessions
+use the `result` intent:
+
+```json
+{
+  "ok": true,
+  "type": "list",
+  "schema_version": 1,
+  "revision": 42,
+  "resource": "ilmari://list",
+  "observed_at": "2026-06-21T16:40:12.123Z",
+  "ttl_ms": 15000,
+  "items": [
+    {
+      "resource": "ilmari://1/7/12",
+      "id": "%12",
+      "state": "needs-input",
+      "agent": "codex",
+      "cwd": "/Users/bnomei/PROJECTS/ilmari",
+      "next": {
+        "intent": "inspect",
+        "kind": "tmux",
+        "argv": ["tmux", "capture-pane", "-p", "-J", "-t", "%12", "-S", "-80"]
+      }
+    },
+    {
+      "resource": "ilmari://1/7/13",
+      "id": "%13",
+      "state": "done",
+      "agent": "claude-code",
+      "cwd": "/Users/bnomei/PROJECTS/site",
+      "next": {
+        "intent": "result",
+        "kind": "tmux",
+        "argv": ["tmux", "capture-pane", "-p", "-J", "-t", "%13", "-S", "-200"]
+      }
+    }
+  ],
+  "warnings": []
+}
+```
+
+### MCP resources
+
+When enabled with `--mcp` or `ILMARI_MCP=1`, Ilmari starts a local-only MCP
+Streamable HTTP server on `127.0.0.1`. `--mcp-port 0` asks the OS for a free
+port. The server publishes its URL to the tmux global option
+`@ilmari_mcp_url`, for example `http://127.0.0.1:58321/mcp`.
+
+The MCP server exposes resources only. It does not expose tools. Resource
+descriptors and contents carry `_meta.readOnly = true`. Resource descriptors are
+annotated for assistant audiences with priorities and `lastModified`
+timestamps.
+
+Available resources:
+
+| Resource | Shape |
+| --- | --- |
+| `ilmari://list` | Same JSON as socket `list`. |
+| `ilmari://<session>/<window>/<pane>` | Same JSON as socket `detail`, using sigil-free tmux ids such as `ilmari://1/7/12`. |
+
+Resource subscriptions are supported through MCP `resources/subscribe`.
+Subscribers to a pane URI receive `notifications/resources/updated` when that
+pane resource changes. Subscribers to `ilmari://list` receive
+`notifications/resources/updated` when the list JSON changes and
+`notifications/resources/list_changed` when the visible resource set changes.
+
+State mapping:
+
+| Ilmari status | Consumer state | Next intent |
+| --- | --- | --- |
+| `running` | `running` | `wait` |
+| `waiting-input` | `needs-input` | `inspect` |
+| `finished` | `done` | `result` |
+| `terminated` | `gone` | `cleanup` |
+| `unknown` | `unknown` | `inspect` |
 
 ### Pane output privacy
 

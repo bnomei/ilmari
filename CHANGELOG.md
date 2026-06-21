@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-06-21
+
+### Added
+
+- Added opt-in local JSON socket publishing with `ping`, `list`, `ls`, `detail`, and `read` commands for connector processes.
+- Added opt-in loopback MCP resource publishing with read-only `ilmari://list` and pane detail resources, resource subscriptions, read-only metadata, and assistant-focused resource annotations.
+- Added `--no-tui` / `ILMARI_TUI=0` headless mode for running Ilmari as a state publisher without the terminal UI.
+- Added build-time `tui`, `socket`, `mcp`, and `rmcp` feature controls so endpoint and UI support can be compiled independently.
+
+### Changed
+
+- Made socket and MCP resources share the same list/detail JSON shapes, including compact consumer states, resource URIs, and prebuilt tmux command argv values.
+- Changed MCP `resources/list_changed` behavior to report only resource-set changes while list content updates continue through `notifications/resources/updated`.
+
+### Fixed
+
+- Stop MCP subscription tasks when notification delivery fails so disconnected subscribers do not leave live update loops behind.
+
 ## 0.5.0 - 2026-06-21
 
 ### Added
