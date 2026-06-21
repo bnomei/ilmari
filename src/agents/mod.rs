@@ -394,6 +394,106 @@ fn classify_grok_session(
     SessionStatus::Unknown
 }
 
+fn classify_copilot_session(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+) -> SessionStatus {
+    if pane.pane_dead {
+        return SessionStatus::Terminated;
+    }
+
+    if previous.is_some() && !adapter.detect(pane) && is_shell_command(&pane.pane_current_command) {
+        return SessionStatus::Finished;
+    }
+
+    if let Some(retained_status) = retained_status_without_output_tail(output_tail, previous) {
+        return retained_status;
+    }
+
+    let output_tail = output_tail.unwrap_or_default();
+
+    if looks_like_copilot_active(output_tail) {
+        return SessionStatus::Running;
+    }
+
+    if looks_like_copilot_trust_prompt(output_tail) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if classify_copilot_output_tail(output_tail).is_some() {
+        return SessionStatus::WaitingInput;
+    }
+
+    if output_has_recent_motion(output_fingerprint, previous) {
+        return SessionStatus::Running;
+    }
+
+    if let Some(status) = classify_output_tail(output_tail) {
+        return status;
+    }
+
+    if output_is_stable(output_fingerprint, previous) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if adapter.detect(pane) {
+        return SessionStatus::WaitingInput;
+    }
+
+    SessionStatus::Unknown
+}
+
+fn classify_kiro_session(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+) -> SessionStatus {
+    if pane.pane_dead {
+        return SessionStatus::Terminated;
+    }
+
+    if previous.is_some() && !adapter.detect(pane) && is_shell_command(&pane.pane_current_command) {
+        return SessionStatus::Finished;
+    }
+
+    if let Some(retained_status) = retained_status_without_output_tail(output_tail, previous) {
+        return retained_status;
+    }
+
+    let output_tail = output_tail.unwrap_or_default();
+
+    if looks_like_kiro_active(output_tail) {
+        return SessionStatus::Running;
+    }
+
+    if classify_kiro_output_tail(output_tail).is_some() {
+        return SessionStatus::WaitingInput;
+    }
+
+    if output_has_recent_motion(output_fingerprint, previous) {
+        return SessionStatus::Running;
+    }
+
+    if let Some(status) = classify_output_tail(output_tail) {
+        return status;
+    }
+
+    if output_is_stable(output_fingerprint, previous) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if adapter.detect(pane) {
+        return SessionStatus::WaitingInput;
+    }
+
+    SessionStatus::Unknown
+}
+
 fn classify_supported_session_with_tail_classifier<F>(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -521,7 +621,7 @@ fn is_shell_command(command: &str) -> bool {
 }
 
 fn is_runtime_wrapped_agent_candidate(command: &str) -> bool {
-    command_equals_any(command, &["node"])
+    command_equals_any(command, &["node", "bun", "deno"])
 }
 
 fn is_claude_output_confirmation_candidate(pane: &PaneSnapshot) -> bool {
@@ -626,6 +726,25 @@ fn looks_like_antigravity_output(output_tail: &str) -> bool {
         || looks_like_antigravity_active(output_tail)
         || looks_like_antigravity_permission_prompt(output_tail)
         || extract_antigravity_footer_model(output_tail).is_some()
+}
+
+fn looks_like_copilot_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    (lower.contains("copilot v") && lower.contains("uses ai"))
+        || looks_like_copilot_trust_prompt(output_tail)
+        || (extract_copilot_detail(Some(output_tail)).is_some()
+            && lower.contains("/ commands")
+            && lower.contains("? help"))
+}
+
+fn looks_like_kiro_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("welcome to kiro cli")
+        || lower.contains("kiro is working")
+        || (output_tail.lines().any(|line| kiro_footer_model_pattern().is_match(line.trim()))
+            && (lower.contains("ask a question or describe a task")
+                || lower.contains("/copy to clipboard")
+                || lower.contains("thinking...") && lower.contains("esc to cancel")))
 }
 
 fn looks_like_auggie_output(output_tail: &str) -> bool {
@@ -889,6 +1008,41 @@ fn extract_grok_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     label.map(|label| AgentDetail { label, tone: AgentDetailTone::Neutral })
 }
 
+fn extract_copilot_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = output_tail.lines().rev().find_map(|line| {
+        copilot_footer_model_pattern()
+            .captures(line.trim())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })?;
+
+    Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
+fn extract_kiro_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = output_tail.lines().rev().find_map(|line| {
+        kiro_footer_model_pattern()
+            .captures(line.trim())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_kiro_model_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })?;
+
+    Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
+fn normalize_kiro_model_label(value: &str) -> String {
+    let label = normalize_detail_label(value);
+    if label.eq_ignore_ascii_case("auto") {
+        "Auto".to_string()
+    } else {
+        label
+    }
+}
+
 fn extract_grok_footer_model(raw: &str, normalized: &str) -> Option<String> {
     if !raw.trim_start().starts_with('╰') && !normalized.contains('·') {
         return None;
@@ -995,6 +1149,15 @@ fn extract_pi_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     })
 }
 
+fn extract_copilot_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    if looks_like_copilot_active(output_tail) || looks_like_copilot_trust_prompt(output_tail) {
+        return None;
+    }
+
+    extract_output_excerpt_from_tail(output_tail, is_copilot_output_noise)
+}
+
 fn extract_gemini_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
     extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
@@ -1056,6 +1219,65 @@ fn is_antigravity_permission_option_line(compact: &str) -> bool {
         && (label.starts_with("yes") || label.starts_with("no"))
 }
 
+fn is_copilot_output_noise(raw: &str, normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+
+    is_common_output_noise(raw, normalized)
+        || normalized.starts_with('❯')
+        || lower.contains("copilot v")
+        || lower.contains("uses ai")
+        || lower.contains("check for mistakes")
+        || lower.starts_with("tip:")
+        || lower.contains("manage mcp server configuration")
+        || lower.starts_with("abandon this session and start fresh")
+        || lower.contains("prefer a visual workspace")
+        || lower.contains("github.com/features/ai/github-app")
+        || lower.contains("session:")
+        || lower.contains("aic used")
+        || lower.contains("working") && lower.contains("esc") && lower.contains("cancel")
+        || lower.contains("confirm folder trust")
+        || lower.contains("do you trust the files in this folder")
+        || lower.contains("enter to select")
+        || lower.contains("yes, and remember this folder")
+        || lower.contains("no (esc)")
+        || lower.contains("/ commands")
+        || lower.contains("? help")
+        || lower.contains("@ files")
+        || lower.contains("# issues")
+        || copilot_footer_model_pattern().is_match(normalized)
+}
+
+fn is_kiro_output_noise(raw: &str, normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+
+    is_common_output_noise(raw, normalized)
+        || is_kiro_logo_line(raw)
+        || lower.contains("welcome to kiro cli")
+        || lower.contains("early release of kiro cli")
+        || lower.starts_with("what's new:")
+        || lower.starts_with("migration tooling")
+        || lower.contains("kiro.dev/docs/cli")
+        || lower.contains("share feedback")
+        || lower.starts_with("session ended")
+        || lower.starts_with("resume with:")
+        || lower.starts_with("use the command")
+        || lower.starts_with("press ctrl+c")
+        || lower.starts_with("press ctrl+d")
+        || lower.starts_with("ask a question or describe a task")
+        || lower.starts_with("credits:")
+        || lower.starts_with("time:")
+        || lower.contains("kiro is working")
+        || lower.contains("type to queue")
+        || lower.contains("thinking...") && lower.contains("esc to cancel")
+        || normalized.starts_with('▸')
+        || normalized.starts_with("/copy")
+        || kiro_footer_model_pattern().is_match(normalized)
+}
+
+fn is_kiro_logo_line(raw: &str) -> bool {
+    raw.chars().filter(|c| is_braille_pattern(*c)).take(10).count() >= 10
+}
+
 fn extract_auggie_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
     extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
@@ -1086,6 +1308,15 @@ fn extract_auggie_output_excerpt(output_tail: Option<&str>) -> Option<String> {
             || raw.contains("$$")
             || auggie_footer_model_pattern().is_match(raw)
     })
+}
+
+fn extract_kiro_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    if looks_like_kiro_active(output_tail) {
+        return None;
+    }
+
+    extract_output_excerpt_from_tail(output_tail, is_kiro_output_noise)
 }
 
 fn extract_grok_output_excerpt(output_tail: Option<&str>) -> Option<String> {
@@ -1357,7 +1588,9 @@ fn looks_like_waiting_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         || looks_like_opencode_home_screen(recent_lines, output_tail)
         || looks_like_pi_prompt(recent_lines, output_tail)
         || looks_like_gemini_prompt(recent_lines, output_tail)
+        || looks_like_copilot_prompt(recent_lines, output_tail)
         || looks_like_auggie_prompt(recent_lines, output_tail)
+        || looks_like_kiro_prompt(recent_lines, output_tail)
 }
 
 fn looks_like_codex_bottom_prompt(recent_lines: &[&str]) -> bool {
@@ -1465,6 +1698,61 @@ fn looks_like_gemini_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         || (lower.contains("action required") && lower.contains("allow execution of"))
 }
 
+fn looks_like_copilot_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
+    !looks_like_copilot_active(output_tail)
+        && !looks_like_copilot_trust_prompt(output_tail)
+        && recent_lines.iter().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            line.starts_with('❯')
+                || lower.contains("/ commands")
+                || lower.contains("? help")
+                || lower.contains("@ files")
+                || lower.contains("# issues")
+        })
+        && extract_copilot_detail(Some(output_tail)).is_some()
+}
+
+fn classify_copilot_output_tail(output_tail: &str) -> Option<SessionStatus> {
+    let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
+    looks_like_copilot_prompt(&recent_lines, output_tail).then_some(SessionStatus::WaitingInput)
+}
+
+fn looks_like_copilot_active(output_tail: &str) -> bool {
+    recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW).iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("working") && lower.contains("esc") && lower.contains("cancel")
+    })
+}
+
+fn looks_like_copilot_trust_prompt(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    lower.contains("confirm folder trust")
+        && lower.contains("do you trust the files in this folder?")
+        && lower.contains("enter to select")
+}
+
+fn looks_like_kiro_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
+    !looks_like_kiro_active(output_tail)
+        && recent_lines.iter().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("ask a question or describe a task") || lower.starts_with("/copy")
+        })
+        && extract_kiro_detail(Some(output_tail)).is_some()
+}
+
+fn classify_kiro_output_tail(output_tail: &str) -> Option<SessionStatus> {
+    let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
+    looks_like_kiro_prompt(&recent_lines, output_tail).then_some(SessionStatus::WaitingInput)
+}
+
+fn looks_like_kiro_active(output_tail: &str) -> bool {
+    recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW).iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("kiro is working")
+            || lower.contains("thinking...") && lower.contains("esc to cancel")
+    })
+}
+
 fn looks_like_antigravity_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
     if looks_like_antigravity_active(output_tail) {
         return false;
@@ -1479,8 +1767,7 @@ fn looks_like_antigravity_prompt(recent_lines: &[&str], output_tail: &str) -> bo
 
 fn looks_like_antigravity_active(output_tail: &str) -> bool {
     let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
-    let has_cancel_footer =
-        recent_lines.iter().any(|line| line.to_ascii_lowercase().contains("esc to cancel"));
+    let has_cancel_footer = recent_lines.iter().any(|line| is_antigravity_cancel_footer_line(line));
 
     has_cancel_footer && !looks_like_antigravity_permission_prompt(output_tail)
 }
@@ -1488,6 +1775,10 @@ fn looks_like_antigravity_active(output_tail: &str) -> bool {
 fn looks_like_antigravity_permission_prompt(output_tail: &str) -> bool {
     let lower = output_tail.to_ascii_lowercase();
     lower.contains("requesting permission for:") && lower.contains("do you want to proceed?")
+}
+
+fn is_antigravity_cancel_footer_line(line: &str) -> bool {
+    line.trim_start().to_ascii_lowercase().starts_with("esc to cancel")
 }
 
 fn is_antigravity_spinner_line(line: &str) -> bool {
@@ -1900,6 +2191,24 @@ fn grok_footer_model_pattern() -> &'static Regex {
     })
 }
 
+fn copilot_footer_model_pattern() -> &'static Regex {
+    static COPILOT_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    COPILOT_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?P<model>(?:Claude\s+(?:Sonnet|Opus|Haiku)\s+[0-9.]+|GPT-[A-Za-z0-9 ._-]+))\s*$",
+        )
+        .expect("copilot footer model regex should compile")
+    })
+}
+
+fn kiro_footer_model_pattern() -> &'static Regex {
+    static KIRO_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    KIRO_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(r"(?i)^[A-Za-z0-9_-]+\s+·\s+(?P<model>[^·]+?)\s+·\s+.*◔")
+            .expect("kiro footer model regex should compile")
+    })
+}
+
 fn grok_right_aligned_timestamp_pattern() -> &'static Regex {
     static GROK_RIGHT_ALIGNED_TIMESTAMP: OnceLock<Regex> = OnceLock::new();
     GROK_RIGHT_ALIGNED_TIMESTAMP.get_or_init(|| {
@@ -2031,12 +2340,14 @@ fn normalize_detail_label(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        amp_output_fingerprint, classify_antigravity_output_tail, classify_grok_output_tail,
-        classify_output_tail, extract_amp_detail, extract_amp_output_excerpt,
-        extract_antigravity_detail, extract_antigravity_output_excerpt, extract_auggie_detail,
-        extract_auggie_output_excerpt, extract_claude_detail, extract_claude_output_excerpt,
-        extract_codex_detail, extract_codex_output_excerpt, extract_gemini_detail,
-        extract_gemini_output_excerpt, extract_grok_detail, extract_grok_output_excerpt,
+        amp_output_fingerprint, classify_antigravity_output_tail, classify_copilot_output_tail,
+        classify_grok_output_tail, classify_kiro_output_tail, classify_output_tail,
+        extract_amp_detail, extract_amp_output_excerpt, extract_antigravity_detail,
+        extract_antigravity_output_excerpt, extract_auggie_detail, extract_auggie_output_excerpt,
+        extract_claude_detail, extract_claude_output_excerpt, extract_codex_detail,
+        extract_codex_output_excerpt, extract_copilot_detail, extract_copilot_output_excerpt,
+        extract_gemini_detail, extract_gemini_output_excerpt, extract_grok_detail,
+        extract_grok_output_excerpt, extract_kiro_detail, extract_kiro_output_excerpt,
         extract_opencode_detail, extract_opencode_output_excerpt, extract_pi_detail,
         extract_pi_output_excerpt, AdapterRegistry, AgentAdapter, SessionTracker,
     };
@@ -2062,6 +2373,12 @@ mod tests {
         let pi_title = snapshot_with_title("%23", "node", false, "π - worktree");
         let pi_agent = snapshot("%8", "pi-agent", false);
         let antigravity = snapshot("%9", "agy", false);
+        let copilot = snapshot("%10", "copilot", false);
+        let kiro = snapshot("%11", "kiro-cli", false);
+        let copilot_title = snapshot_with_title("%12", "node", false, "GitHub Copilot");
+        let kiro_title = snapshot_with_title("%13", "node", false, "Kiro CLI");
+        let stale_copilot_title = snapshot_with_title("%14", "zsh", false, "GitHub Copilot");
+        let stale_kiro_title = snapshot_with_title("%15", "zsh", false, "Kiro CLI");
 
         assert_eq!(registry.detect_kind(&codex, None), Some(AgentKind::Codex));
         assert_eq!(registry.detect_kind(&codex_variant, None), Some(AgentKind::Codex));
@@ -2084,6 +2401,12 @@ mod tests {
         assert_eq!(registry.detect_kind(&pi_title, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&pi_agent, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&antigravity, None), Some(AgentKind::AntigravityCli));
+        assert_eq!(registry.detect_kind(&copilot, None), Some(AgentKind::GitHubCopilotCli));
+        assert_eq!(registry.detect_kind(&kiro, None), Some(AgentKind::KiroCli));
+        assert_eq!(registry.detect_kind(&copilot_title, None), Some(AgentKind::GitHubCopilotCli));
+        assert_eq!(registry.detect_kind(&kiro_title, None), Some(AgentKind::KiroCli));
+        assert_eq!(registry.detect_kind(&stale_copilot_title, None), None);
+        assert_eq!(registry.detect_kind(&stale_kiro_title, None), None);
     }
 
     #[test]
@@ -2163,11 +2486,21 @@ mod tests {
     }
 
     #[test]
-    fn registry_captures_output_for_node_wrapped_agent_candidates() {
+    fn registry_captures_output_for_runtime_wrapped_agent_candidates() {
         let registry = AdapterRegistry::v1();
         let gemini = snapshot_with_title("%24", "node", false, "◇  Ready (workspace)");
 
         assert!(registry.needs_output_tail(&gemini, None, None));
+        assert!(registry.needs_output_tail(
+            &snapshot_with_title("%26", "bun", false, "worker"),
+            None,
+            None,
+        ));
+        assert!(registry.needs_output_tail(
+            &snapshot_with_title("%27", "deno", false, "worker"),
+            None,
+            None,
+        ));
         assert!(registry.needs_output_tail(
             &snapshot_with_title("%25", "node", false, "Implement feature"),
             None,
@@ -2269,6 +2602,179 @@ Gemini 3.5 Flash (Medium)
                 }
                 .into()
             )
+        );
+    }
+
+    #[test]
+    fn tracker_detects_copilot_from_live_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%28", "node", false, "worker");
+        let output_tails = HashMap::from([(pane.pane_id.clone(), COPILOT_IDLE_OUTPUT.to_string())]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::GitHubCopilotCli);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[0].output_excerpt, None);
+        assert_eq!(
+            records[0].detail,
+            Some(
+                AgentDetail {
+                    label: "Claude Haiku 4.5".to_string(),
+                    tone: AgentDetailTone::Neutral,
+                }
+                .into()
+            )
+        );
+        assert_eq!(
+            extract_copilot_detail(Some(COPILOT_IDLE_OUTPUT)),
+            Some(AgentDetail {
+                label: "Claude Haiku 4.5".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+        assert_eq!(extract_copilot_output_excerpt(Some(COPILOT_IDLE_OUTPUT)), None);
+    }
+
+    #[test]
+    fn tracker_marks_copilot_running_and_then_waiting_from_live_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%28", "copilot", false, "GitHub Copilot");
+
+        let active = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), COPILOT_ACTIVE_OUTPUT.to_string())]),
+            now,
+        );
+
+        assert_eq!(active[0].kind, AgentKind::GitHubCopilotCli);
+        assert_eq!(active[0].status, SessionStatus::Running);
+        assert_eq!(
+            active[0].detail,
+            Some(
+                AgentDetail { label: "GPT-5 mini".to_string(), tone: AgentDetailTone::Neutral }
+                    .into()
+            )
+        );
+        assert_eq!(active[0].output_excerpt, None);
+
+        let finished = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), COPILOT_FINAL_OUTPUT.to_string())]),
+            now + Duration::from_secs(3),
+        );
+
+        assert_eq!(finished[0].status, SessionStatus::WaitingInput);
+        assert_eq!(
+            finished[0].output_excerpt.as_deref(),
+            Some("I'm sorry, but I cannot assist with that request.")
+        );
+        assert_eq!(
+            extract_copilot_detail(Some(COPILOT_FINAL_OUTPUT)),
+            Some(AgentDetail { label: "GPT-5 mini".to_string(), tone: AgentDetailTone::Neutral })
+        );
+        assert_eq!(
+            classify_copilot_output_tail(COPILOT_FINAL_OUTPUT),
+            Some(SessionStatus::WaitingInput)
+        );
+    }
+
+    #[test]
+    fn tracker_marks_copilot_trust_prompt_waiting_input() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%28", "copilot", false, "GitHub Copilot");
+        let output_tails =
+            HashMap::from([(pane.pane_id.clone(), COPILOT_TRUST_PROMPT_OUTPUT.to_string())]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::GitHubCopilotCli);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[0].output_excerpt, None);
+    }
+
+    #[test]
+    fn tracker_detects_kiro_from_live_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%29", "node", false, "worker");
+        let output_tails = HashMap::from([(pane.pane_id.clone(), KIRO_REPLY_OUTPUT.to_string())]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::KiroCli);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("kiro fixture ready."));
+        assert_eq!(
+            records[0].detail,
+            Some(AgentDetail { label: "Auto".to_string(), tone: AgentDetailTone::Neutral }.into())
+        );
+        assert_eq!(
+            extract_kiro_detail(Some(KIRO_REPLY_OUTPUT)),
+            Some(AgentDetail { label: "Auto".to_string(), tone: AgentDetailTone::Neutral })
+        );
+        assert_eq!(
+            extract_kiro_output_excerpt(Some(KIRO_REPLY_OUTPUT)),
+            Some("kiro fixture ready.".to_string())
+        );
+    }
+
+    #[test]
+    fn kiro_final_excerpt_survives_older_active_line_in_tail() {
+        let output_tail = format!("{KIRO_ACTIVE_OUTPUT}\n{KIRO_LONG_REPLY_OUTPUT}");
+
+        assert_eq!(classify_kiro_output_tail(&output_tail), Some(SessionStatus::WaitingInput));
+        assert_eq!(
+            extract_kiro_output_excerpt(Some(KIRO_ACTIVE_OUTPUT)),
+            None,
+            "active Kiro tails should not echo the submitted prompt"
+        );
+        assert_eq!(
+            extract_kiro_output_excerpt(Some(&output_tail)).as_deref(),
+            Some(
+                "...s fail, Build retry logic, set your caps— The server breaks. It just perhaps."
+            )
+        );
+    }
+
+    #[test]
+    fn tracker_marks_kiro_running_and_then_waiting_from_live_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%29", "kiro-cli", false, "worker");
+
+        let active = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), KIRO_ACTIVE_OUTPUT.to_string())]),
+            now,
+        );
+
+        assert_eq!(active[0].kind, AgentKind::KiroCli);
+        assert_eq!(active[0].status, SessionStatus::Running);
+        assert_eq!(active[0].output_excerpt, None);
+
+        let finished = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), KIRO_LONG_REPLY_OUTPUT.to_string())]),
+            now + Duration::from_secs(13),
+        );
+
+        assert_eq!(finished[0].status, SessionStatus::WaitingInput);
+        assert_eq!(
+            finished[0].output_excerpt.as_deref(),
+            Some(
+                "...s fail, Build retry logic, set your caps— The server breaks. It just perhaps."
+            )
+        );
+        assert_eq!(
+            classify_kiro_output_tail(KIRO_LONG_REPLY_OUTPUT),
+            Some(SessionStatus::WaitingInput)
         );
     }
 
@@ -2814,6 +3320,14 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
 ────────────────────────────────────────────────────────────────────────────────
 esc to cancel                                            Gemini 3.5 Flash (Medium)
 ";
+        let cropped_footer = "\
+> Write a 100-line poem. Start immediately and do not use tools.
+⣷  Loading...
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+esc to cancel
+";
 
         assert_eq!(classify_antigravity_output_tail(loading), Some(SessionStatus::Running));
         assert_eq!(classify_antigravity_output_tail(streaming), Some(SessionStatus::Running));
@@ -2821,6 +3335,8 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
             classify_antigravity_output_tail(streaming_after_status_scrolls),
             Some(SessionStatus::Running)
         );
+        assert_eq!(classify_antigravity_output_tail(cropped_footer), Some(SessionStatus::Running));
+        assert_eq!(classify_antigravity_output_tail(KIRO_ACTIVE_OUTPUT), None);
     }
 
     #[test]
@@ -4142,17 +4658,17 @@ shift+tab to accept edits
                 include_str!("fixtures/output_antigravity.txt"),
             ),
             (AgentKind::Grok, "node", "worker", include_str!("fixtures/output_grok.txt")),
+            (AgentKind::GitHubCopilotCli, "node", "worker", COPILOT_FINAL_OUTPUT),
+            (AgentKind::KiroCli, "node", "worker", KIRO_LONG_REPLY_OUTPUT),
         ]
     }
 
     fn planned_command_fixtures() -> Vec<(AgentKind, &'static str)> {
         vec![
-            (AgentKind::GitHubCopilotCli, "copilot"),
             (AgentKind::CursorCli, "cursor"),
             (AgentKind::Aider, "aider"),
             (AgentKind::ClineCli, "cline"),
             (AgentKind::GooseCli, "goose"),
-            (AgentKind::KiroCli, "kiro-cli"),
             (AgentKind::OpenHandsCli, "openhands"),
         ]
     }
@@ -4168,9 +4684,149 @@ shift+tab to accept edits
             "AntigravityCli" => AgentKind::AntigravityCli,
             "Auggie" => AgentKind::Auggie,
             "Grok" => AgentKind::Grok,
+            "GitHubCopilotCli" => AgentKind::GitHubCopilotCli,
+            "KiroCli" => AgentKind::KiroCli,
             other => panic!("unknown fixture agent kind: {other}"),
         }
     }
+
+    const COPILOT_IDLE_OUTPUT: &str = "\
+╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.63 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+● Tip: /app
+  └ Prefer a visual workspace? Try out the GitHub Copilot desktop app
+    https://github.com/features/ai/github-app
+
+ ~                                                                                                                       Session: 0 AIC used
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / commands · ? help                                                                                                        Claude Haiku 4.5
+";
+
+    const COPILOT_ACTIVE_OUTPUT: &str = "\
+╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.63 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+● Tip: /mcp
+  └ Manage MCP server configuration
+
+❯ Write a four-line poem about an HTTP 500 error. Do not run commands or edit files.
+
+ /workspace                                                                                                               Session: 0 AIC used
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ● Working esc cancel                                                                                                             GPT-5 mini
+";
+
+    const COPILOT_FINAL_OUTPUT: &str = "\
+╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.63 uses AI.
+  █ ▘▝ █  Check for mistakes.
+   ▔▔▔▔
+
+● Tip: /mcp
+  └ Manage MCP server configuration
+
+❯ Write a four-line poem about an HTTP 500 error. Do not run commands or edit files.
+
+● I'm sorry, but I cannot assist with that request.
+
+ /workspace                                                                                                            Session: 0.38 AIC used
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / commands · ? help                                                                                                              GPT-5 mini
+";
+
+    const COPILOT_TRUST_PROMPT_OUTPUT: &str = "\
+╭─╮╭─╮
+  ╰─╯╰─╯  Copilot v1.0.63 uses AI.
+  █ ╴╶ █  Check for mistakes.
+   ▔▔▔▔
+
+● Tip: /mcp
+  └ Manage MCP server configuration
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Confirm folder trust                                                                                                                      │
+│ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│ ╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ │
+│ │ /workspace                                                                                                                            │ │
+│ ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ │
+│ Copilot can read files in this folder and, with your permission, edit them or run code and shell commands.                                │
+│ Do you trust the files in this folder?                                                                                                    │
+│ ❯ 1. Yes                                                                                                                                  │
+│   2. Yes, and remember this folder for future sessions                                                                                    │
+│   3. No (Esc)                                                                                                                             │
+│ ↑/↓ to navigate · enter to select · esc to cancel                                                                                         │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+";
+
+    const KIRO_REPLY_OUTPUT: &str = "\
+                                                           Welcome to Kiro CLI V3!
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Please reply with exactly: kiro fixture ready. Do not run commands or edit files.
+
+  kiro fixture ready.
+
+▸ Credits: 0.07 • Time: 2s
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · Auto · ◔ 2%                                                                                            /workspace/project · (main)
+
+ ask a question or describe a task ↵
+                                                                                                                          /copy to clipboard
+";
+
+    const KIRO_ACTIVE_OUTPUT: &str = "\
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Write a 40-line poem about HTTP 500 errors. Do not run commands or edit files.
+
+⠀ Thinking... (esc to cancel)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · Auto · ◔ 2%                                                                                            /workspace/project · (main)
+
+ Kiro is working · Type to queue
+";
+
+    const KIRO_LONG_REPLY_OUTPUT: &str = "\
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Write a 40-line poem about HTTP 500 errors. Do not run commands or edit files.
+
+  The Ballad of the 500
+
+  The request flew through cables bright,
+  Through routers humming in the night,
+  It crossed the load balancer's gate,
+  And met a most uncertain fate.
+
+  The database had locked a row,
+  A deadlock neither side let go,
+  The timeout fired, the handler cried,
+  And HTTP 500 replied.
+
+  So here it rests, the 500 tale,
+  A reminder systems always fail,
+  Build retry logic, set your caps—
+  The server breaks. It just perhaps.
+
+▸ Credits: 0.08 • Time: 13s
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · Auto · ◔ 2%                                                                                            /workspace/project · (main)
+
+ ask a question or describe a task ↵
+                                                                                                                          /copy to clipboard
+";
 
     // Fixtures based on live Grok panes, trimmed to the parser-relevant lines.
     const GROK_WAITING_NARROW: &str = "\

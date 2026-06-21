@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-06-21
+
+### Added
+
+- Added GitHub Copilot CLI (`copilot`) and Kiro CLI (`kiro-cli`) session detection, including tmux output signatures, runtime-wrapper process matching, model details, status classification, and sanitized output excerpts.
+
+### Changed
+
+- Shortened app column labels for GitHub Copilot and Kiro to `Copilot` and `Kiro`.
+- Compacted the README agent support section into inline supported and planned CLI lists, with planned CLI names linking directly to their tracking issues.
+
+### Fixed
+
+- Keep completed Kiro replies visible when older active `Thinking...` lines remain in the captured tail.
+- Preserve Antigravity active detection for cropped `esc to cancel` tails without cross-matching Kiro activity.
+
 ## 0.4.0 - 2026-06-19
 
 ### Added

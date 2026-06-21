@@ -60,13 +60,13 @@ impl AgentKind {
             | Self::GeminiCli
             | Self::AntigravityCli
             | Self::Auggie
-            | Self::Grok => AgentSupport::Enabled,
-            Self::GitHubCopilotCli => AgentSupport::Planned { issue: 10 },
+            | Self::Grok
+            | Self::GitHubCopilotCli
+            | Self::KiroCli => AgentSupport::Enabled,
             Self::CursorCli => AgentSupport::Planned { issue: 11 },
             Self::Aider => AgentSupport::Planned { issue: 12 },
             Self::ClineCli => AgentSupport::Planned { issue: 13 },
             Self::GooseCli => AgentSupport::Planned { issue: 14 },
-            Self::KiroCli => AgentSupport::Planned { issue: 15 },
             Self::OpenHandsCli => AgentSupport::Planned { issue: 16 },
         }
     }
@@ -95,12 +95,12 @@ impl AgentKind {
             Self::AntigravityCli => "Antigravity",
             Self::Auggie => "Auggie",
             Self::Grok => "Grok",
-            Self::GitHubCopilotCli => "GitHub Copilot CLI",
+            Self::GitHubCopilotCli => "Copilot",
             Self::CursorCli => "Cursor CLI",
             Self::Aider => "Aider",
             Self::ClineCli => "Cline CLI",
             Self::GooseCli => "Goose CLI",
-            Self::KiroCli => "Kiro CLI",
+            Self::KiroCli => "Kiro",
             Self::OpenHandsCli => "OpenHands CLI",
         }
     }
@@ -290,12 +290,12 @@ mod tests {
         assert_eq!(AgentKind::AntigravityCli.display_name(), "Antigravity");
         assert_eq!(AgentKind::Auggie.display_name(), "Auggie");
         assert_eq!(AgentKind::Grok.display_name(), "Grok");
-        assert_eq!(AgentKind::GitHubCopilotCli.display_name(), "GitHub Copilot CLI");
+        assert_eq!(AgentKind::GitHubCopilotCli.display_name(), "Copilot");
         assert_eq!(AgentKind::CursorCli.display_name(), "Cursor CLI");
         assert_eq!(AgentKind::Aider.display_name(), "Aider");
         assert_eq!(AgentKind::ClineCli.display_name(), "Cline CLI");
         assert_eq!(AgentKind::GooseCli.display_name(), "Goose CLI");
-        assert_eq!(AgentKind::KiroCli.display_name(), "Kiro CLI");
+        assert_eq!(AgentKind::KiroCli.display_name(), "Kiro");
         assert_eq!(AgentKind::OpenHandsCli.display_name(), "OpenHands CLI");
         assert_eq!(
             AgentKind::enabled_kinds().collect::<Vec<_>>(),
@@ -309,6 +309,8 @@ mod tests {
                 AgentKind::AntigravityCli,
                 AgentKind::Auggie,
                 AgentKind::Grok,
+                AgentKind::GitHubCopilotCli,
+                AgentKind::KiroCli,
             ]
         );
     }
@@ -316,12 +318,10 @@ mod tests {
     #[test]
     fn planned_agent_kinds_are_issue_tracked_but_disabled() {
         let planned = [
-            (AgentKind::GitHubCopilotCli, 10),
             (AgentKind::CursorCli, 11),
             (AgentKind::Aider, 12),
             (AgentKind::ClineCli, 13),
             (AgentKind::GooseCli, 14),
-            (AgentKind::KiroCli, 15),
             (AgentKind::OpenHandsCli, 16),
         ];
 

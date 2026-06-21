@@ -7,33 +7,11 @@
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
-Minimal tmux popup radar for Codex, Amp, Claude Code, OpenCode, Pi, Gemini CLI, Antigravity CLI, Auggie, and Grok.
+Minimal tmux popup radar for Codex, Amp, Claude Code, OpenCode, Pi, Gemini CLI, Antigravity CLI, Auggie, Grok, GitHub Copilot CLI, and Kiro CLI.
 
-Supported agent CLIs:
+Supported agent CLIs: Antigravity CLI (`agy`), Gemini CLI (`gemini`), Codex (`codex`), Amp (`amp`), Claude Code (`claude`), OpenCode (`opencode`), Pi (`pi`, `pi-agent`), Auggie (`auggie`), Grok (`grok`), GitHub Copilot CLI (`copilot`), and Kiro CLI (`kiro-cli`).
 
-- Antigravity CLI (`agy`)
-- Gemini CLI (`gemini`)
-- Codex (`codex`)
-- Amp (`amp`)
-- Claude Code (`claude`)
-- OpenCode (`opencode`)
-- Pi (`pi`, `pi-agent`)
-- Auggie (`auggie`)
-- Grok (`grok`)
-
-Planned agent CLI support, PRs welcome:
-
-- GitHub Copilot CLI (`copilot`): help wanted in [issue #10](https://github.com/bnomei/ilmari/issues/10)
-- Cursor CLI (`cursor`): help wanted in [issue #11](https://github.com/bnomei/ilmari/issues/11)
-- Aider (`aider`): help wanted in [issue #12](https://github.com/bnomei/ilmari/issues/12)
-- Cline CLI (`cline`): help wanted in [issue #13](https://github.com/bnomei/ilmari/issues/13)
-- Goose CLI (`goose`): help wanted in [issue #14](https://github.com/bnomei/ilmari/issues/14)
-- Kiro CLI (`kiro-cli`): help wanted in [issue #15](https://github.com/bnomei/ilmari/issues/15)
-- OpenHands CLI (`openhands`): help wanted in [issue #16](https://github.com/bnomei/ilmari/issues/16)
-
-These clients are scaffolded behind `AgentSupport::Planned` and are not enabled
-until a PR validates the CLI in tmux and adds real pane metadata and output-tail
-fixtures.
+Planned agent CLI support: [Cursor CLI](https://github.com/bnomei/ilmari/issues/11) (`cursor`), [Aider](https://github.com/bnomei/ilmari/issues/12) (`aider`), [Cline CLI](https://github.com/bnomei/ilmari/issues/13) (`cline`), [Goose CLI](https://github.com/bnomei/ilmari/issues/14) (`goose`), and [OpenHands CLI](https://github.com/bnomei/ilmari/issues/16) (`openhands`). PRs welcome: each linked CLI name opens its tracking issue.
 
 ## Platform support
 

@@ -184,12 +184,18 @@ impl ProcessTree {
             }
             AgentKind::Auggie => command_matches_auggie(&process.command),
             AgentKind::Grok => command_executable_matches(&process.command, "grok"),
-            AgentKind::GitHubCopilotCli => command_executable_matches(&process.command, "copilot"),
+            AgentKind::GitHubCopilotCli => {
+                command_executable_matches(&process.command, "copilot")
+                    || node_wrapper_path_matches(&process.command, "copilot")
+            }
             AgentKind::CursorCli => command_executable_matches(&process.command, "cursor"),
             AgentKind::Aider => command_executable_matches(&process.command, "aider"),
             AgentKind::ClineCli => command_executable_matches(&process.command, "cline"),
             AgentKind::GooseCli => command_executable_matches(&process.command, "goose"),
-            AgentKind::KiroCli => command_executable_matches(&process.command, "kiro-cli"),
+            AgentKind::KiroCli => {
+                command_executable_matches(&process.command, "kiro-cli")
+                    || node_wrapper_path_matches(&process.command, "kiro-cli")
+            }
             AgentKind::OpenHandsCli => command_executable_matches(&process.command, "openhands"),
         }
     }
@@ -332,7 +338,7 @@ fn command_executable_is(command: &str, expected: &str) -> bool {
 }
 
 fn node_wrapper_path_matches(command: &str, expected: &str) -> bool {
-    if !command_executable_is(command, "node") {
+    if !command_executable_equals_any(command, &["node", "bun", "deno"]) {
         return false;
     }
 
@@ -550,14 +556,53 @@ mod tests {
     }
 
     #[test]
+    fn newly_enabled_process_matchers_are_auto_identified() {
+        let enabled = [
+            (
+                AgentKind::GitHubCopilotCli,
+                "copilot",
+                "node /workspace/bin/copilot",
+                "bun /workspace/bin/copilot",
+            ),
+            (
+                AgentKind::KiroCli,
+                "kiro-cli",
+                "node /workspace/bin/kiro-cli",
+                "deno /workspace/bin/kiro-cli",
+            ),
+        ];
+
+        for (kind, command, wrapped_command, alternate_wrapped_command) in enabled {
+            let tree = ProcessTree::from_snapshots(vec![
+                snapshot(100, 55, 1, 1024, "zsh"),
+                snapshot(101, 100, 180, 48 * 1024, command),
+            ]);
+
+            assert_eq!(tree.agent_kind_for_pane(Some(100)), Some(kind));
+
+            let wrapped_tree = ProcessTree::from_snapshots(vec![
+                snapshot(100, 55, 1, 1024, "zsh"),
+                snapshot(101, 100, 180, 48 * 1024, wrapped_command),
+            ]);
+
+            assert_eq!(wrapped_tree.agent_kind_for_pane(Some(100)), Some(kind));
+
+            let alternate_wrapped_tree = ProcessTree::from_snapshots(vec![
+                snapshot(100, 55, 1, 1024, "zsh"),
+                snapshot(101, 100, 180, 48 * 1024, alternate_wrapped_command),
+            ]);
+
+            assert_eq!(alternate_wrapped_tree.agent_kind_for_pane(Some(100)), Some(kind));
+        }
+    }
+
+    #[test]
     fn planned_process_matchers_exist_but_are_not_auto_identified() {
         let planned = [
-            (AgentKind::GitHubCopilotCli, "copilot"),
             (AgentKind::CursorCli, "cursor"),
             (AgentKind::Aider, "aider"),
             (AgentKind::ClineCli, "cline"),
             (AgentKind::GooseCli, "goose"),
-            (AgentKind::KiroCli, "kiro-cli"),
             (AgentKind::OpenHandsCli, "openhands"),
         ];
 
