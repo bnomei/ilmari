@@ -182,7 +182,7 @@ pub fn help_text() -> &'static str {
         "  --socket-path <PATH>                  Local JSON socket path override\n",
         "  --mcp                                Enable loopback MCP resource server\n",
         "  --no-mcp                             Disable loopback MCP resource server\n",
-        "  --mcp-port <PORT>                     Loopback MCP port, 0 chooses a free port\n",
+        "  --mcp-port <PORT>                     Loopback MCP port, default 62778; 0 chooses a free port\n",
         "  -h, --help                           Print help\n",
         "  -V, --version                        Print version\n\n",
         "Environment defaults:\n",

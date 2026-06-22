@@ -402,6 +402,7 @@ impl App {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_process_refresh(
         palette: Palette,
         refresh_interval: Duration,

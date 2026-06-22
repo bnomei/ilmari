@@ -136,7 +136,7 @@ that run.
 | `--socket-path <PATH>` | Local JSON socket path override | `ILMARI_SOCKET_PATH` |
 | `--mcp` | Enable loopback MCP resource server | `ILMARI_MCP=1` |
 | `--no-mcp` | Disable loopback MCP resource server | `ILMARI_MCP=0` |
-| `--mcp-port <PORT>` | Loopback MCP port, `0` chooses a free port | `ILMARI_MCP_PORT` |
+| `--mcp-port <PORT>` | Loopback MCP port, default `62778`; `0` chooses a free port | `ILMARI_MCP_PORT` |
 | `--help` / `-h` | Print help | none |
 | `--version` / `-V` | Print version | none |
 
@@ -149,7 +149,7 @@ that run.
 | `ILMARI_SOCKET` | Local JSON socket publisher | disabled | Set to `1`, `true`, `yes`, or `on` to enable. |
 | `ILMARI_SOCKET_PATH` | Local JSON socket path | temp dir path scoped by user and tmux socket | Setting a path enables the socket unless `ILMARI_SOCKET=0` is also set. |
 | `ILMARI_MCP` | Loopback MCP resource server | disabled | Set to `1`, `true`, `yes`, or `on` to enable. |
-| `ILMARI_MCP_PORT` | Loopback MCP port | `0` | Setting a port enables MCP unless `ILMARI_MCP=0` is also set. |
+| `ILMARI_MCP_PORT` | Loopback MCP port | `62778` | Setting a port enables MCP unless `ILMARI_MCP=0` is also set. Use `0` to ask the OS for a free port. |
 | `ILMARI_TUI_PALETTE` | Primary palette override | terminal ANSI theme | Takes an 18-slot CSV palette. Takes precedence over `ILMARI_PALETTE`. |
 | `ILMARI_PALETTE` | Compatibility alias for palette override | terminal ANSI theme | Used only when `ILMARI_TUI_PALETTE` is unset. |
 
@@ -162,6 +162,7 @@ ILMARI_OUTPUT_TAIL=0 ilmari
 ilmari --no-tui --socket
 ilmari --socket
 ILMARI_SOCKET_PATH=/tmp/ilmari.sock ilmari
+ilmari --no-tui --mcp
 ilmari --no-tui --mcp --mcp-port 0
 ```
 
@@ -191,7 +192,7 @@ Feature meanings:
 | --- | --- |
 | `tui` | Builds the terminal UI and pulls in `ratatui` and `crossterm`. |
 | `socket` | Builds the local Unix-domain JSON socket endpoint. |
-| `mcp` | Builds the loopback MCP resource endpoint and pulls in `rmcp`, `axum`, `tokio`, `tokio-util`, and MCP annotation timestamp support. |
+| `mcp` | Builds the loopback MCP resource endpoint and pulls in `rmcp`, `axum`, `tokio`, and `tokio-util`. |
 | `rmcp` | Alias for `mcp`, for builds that name the backing crate explicitly. |
 
 Runtime flags remain parseable when an endpoint is compiled out. Enabling a
@@ -270,14 +271,14 @@ use the `result` intent:
 ### MCP resources
 
 When enabled with `--mcp` or `ILMARI_MCP=1`, Ilmari starts a local-only MCP
-Streamable HTTP server on `127.0.0.1`. `--mcp-port 0` asks the OS for a free
-port. The server publishes its URL to the tmux global option
-`@ilmari_mcp_url`, for example `http://127.0.0.1:58321/mcp`.
+Streamable HTTP server on `127.0.0.1:62778` by default. `--mcp-port <PORT>` or
+`ILMARI_MCP_PORT` selects another port, and `--mcp-port 0` asks the OS for a
+free port. The server publishes its URL to the tmux global option
+`@ilmari_mcp_url`, for example `http://127.0.0.1:62778/mcp`.
 
 The MCP server exposes resources only. It does not expose tools. Resource
-descriptors and contents carry `_meta.readOnly = true`. Resource descriptors are
-annotated for assistant audiences with priorities and `lastModified`
-timestamps.
+descriptors are kept plain for client compatibility, while resource contents
+carry `_meta.readOnly = true`.
 
 Available resources:
 

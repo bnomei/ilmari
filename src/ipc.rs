@@ -312,12 +312,11 @@ impl PublishedState {
 
     #[cfg(any(feature = "socket", feature = "mcp", test))]
     fn detail_response(&self, id: &str) -> Result<DetailResponse, ResponseError> {
-        let normalized = normalize_requested_id(id).ok_or_else(|| ResponseError {
-            code: "invalid-id",
-            message: "Expected detail <pane-id>",
-        })?;
-        let item = self.items.iter().find(|item| item.id == normalized).ok_or_else(|| {
-            ResponseError { code: "not-found", message: "No item found for that pane id" }
+        let normalized = normalize_requested_id(id)
+            .ok_or(ResponseError { code: "invalid-id", message: "Expected detail <pane-id>" })?;
+        let item = self.items.iter().find(|item| item.id == normalized).ok_or(ResponseError {
+            code: "not-found",
+            message: "No item found for that pane id",
         })?;
 
         self.detail_response_for_item(item)

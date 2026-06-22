@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.6.1 - 2026-06-22
+
+### Changed
+
+- Changed the default MCP loopback port to `62778` while keeping `--mcp-port 0` as the explicit ephemeral-port option.
+- Kept MCP resource descriptors plain for client compatibility while preserving read-only metadata on resource contents.
+- Removed the now-unused direct `chrono` dependency from the MCP feature.
+
+### Fixed
+
+- Fixed Codex MCP resource propagation by avoiding optional `resources/list` descriptor fields that can trigger `Unexpected response type`.
+
 ## 0.6.0 - 2026-06-21
 
 ### Added

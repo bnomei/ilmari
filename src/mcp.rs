@@ -1,10 +1,8 @@
 #[cfg(feature = "mcp")]
-use chrono::{DateTime, Utc};
-#[cfg(feature = "mcp")]
 use rmcp::model::{
-    Annotated, Annotations, ListResourcesResult, Meta, PaginatedRequestParams, RawResource,
+    Annotated, ListResourcesResult, Meta, PaginatedRequestParams, RawResource,
     ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents,
-    ResourceUpdatedNotificationParam, Role, ServerCapabilities, ServerInfo, SubscribeRequestParams,
+    ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo, SubscribeRequestParams,
     UnsubscribeRequestParams,
 };
 #[cfg(feature = "mcp")]
@@ -43,6 +41,7 @@ use crate::tmux;
 
 const DEFAULT_MCP_ENV: &str = "ILMARI_MCP";
 const DEFAULT_MCP_PORT_ENV: &str = "ILMARI_MCP_PORT";
+const DEFAULT_MCP_PORT: u16 = 62778;
 #[cfg(feature = "mcp")]
 const MCP_PATH: &str = "/mcp";
 #[cfg(feature = "mcp")]
@@ -56,7 +55,7 @@ pub struct McpConfig {
 
 impl McpConfig {
     pub fn disabled() -> Self {
-        Self { enabled: false, port: 0 }
+        Self { enabled: false, port: DEFAULT_MCP_PORT }
     }
 
     pub fn from_env_map(env: &std::collections::BTreeMap<String, String>) -> Self {
@@ -68,8 +67,7 @@ impl McpConfig {
             Some(value) => mcp_enabled_from_var(Some(value)),
             None => port_value.is_some(),
         };
-
-        Self { enabled, port: port_value.unwrap_or(0) }
+        Self { enabled, port: port_value.unwrap_or(DEFAULT_MCP_PORT) }
     }
 
     #[cfg(any(feature = "mcp", test))]
@@ -330,19 +328,19 @@ impl ServerHandler for IlmariResourceServer {
                     event = events.recv() => {
                         match event {
                             Ok(change) => {
-                                if resource_matches(&uri, &change) {
-                                    if peer
+                                if resource_matches(&uri, &change)
+                                    && peer
                                         .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri.clone()))
                                         .await
                                         .is_err()
-                                    {
-                                        break;
-                                    }
+                                {
+                                    break;
                                 }
-                                if uri == LIST_RESOURCE_URI && change.list_changed {
-                                    if peer.notify_resource_list_changed().await.is_err() {
-                                        break;
-                                    }
+                                if uri == LIST_RESOURCE_URI
+                                    && change.list_changed
+                                    && peer.notify_resource_list_changed().await.is_err()
+                                {
+                                    break;
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -383,25 +381,9 @@ fn resource_descriptor(resource: PublishedResource) -> Resource {
         RawResource::new(resource.uri, resource.name)
             .with_title(resource.title)
             .with_description(resource.description)
-            .with_mime_type(resource.mime_type)
-            .with_size(resource.size)
-            .with_meta(read_only_meta()),
-        Some(resource_annotations(resource.priority, resource.last_modified.as_deref())),
+            .with_mime_type(resource.mime_type),
+        None,
     )
-}
-
-#[cfg(feature = "mcp")]
-fn resource_annotations(priority: f32, last_modified: Option<&str>) -> Annotations {
-    let mut annotations = Annotations::default();
-    annotations.audience = Some(vec![Role::Assistant]);
-    annotations.priority = Some(priority.clamp(0.0, 1.0));
-    annotations.last_modified = last_modified.and_then(parse_resource_timestamp);
-    annotations
-}
-
-#[cfg(feature = "mcp")]
-fn parse_resource_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value).ok().map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
 #[cfg(feature = "mcp")]
@@ -463,8 +445,6 @@ mod tests {
     #[cfg(feature = "mcp")]
     use crate::ipc::{PublishedState, PublishedStateHandle};
     #[cfg(feature = "mcp")]
-    use rmcp::model::Role;
-    #[cfg(feature = "mcp")]
     use std::time::Duration;
 
     #[test]
@@ -472,14 +452,26 @@ mod tests {
         let config = McpConfig::from_env_map(&BTreeMap::new());
 
         assert!(!config.enabled);
-        assert_eq!(config.loopback_addr().to_string(), "127.0.0.1:0");
+        assert_eq!(config.loopback_addr().to_string(), "127.0.0.1:62778");
         assert!(!mcp_enabled_from_var(None));
         assert!(mcp_enabled_from_var(Some("on")));
         assert!(!mcp_enabled_from_var(Some("off")));
     }
 
     #[test]
-    fn mcp_port_env_enables_ephemeral_or_explicit_loopback_port() {
+    fn mcp_defaults_to_fixed_loopback_port_when_enabled() {
+        let mut env = BTreeMap::new();
+        env.insert("ILMARI_MCP".to_string(), "1".to_string());
+
+        let config = McpConfig::from_env_map(&env);
+
+        assert!(config.enabled);
+        assert_eq!(config.port, 62778);
+        assert_eq!(config.loopback_addr().to_string(), "127.0.0.1:62778");
+    }
+
+    #[test]
+    fn mcp_port_env_enables_explicit_or_ephemeral_loopback_port() {
         let mut env = BTreeMap::new();
         env.insert("ILMARI_MCP_PORT".to_string(), "7788".to_string());
 
@@ -488,6 +480,13 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.port, 7788);
         assert_eq!(config.loopback_addr().to_string(), "127.0.0.1:7788");
+
+        env.insert("ILMARI_MCP_PORT".to_string(), "0".to_string());
+        let config = McpConfig::from_env_map(&env);
+
+        assert!(config.enabled);
+        assert_eq!(config.port, 0);
+        assert_eq!(config.loopback_addr().to_string(), "127.0.0.1:0");
     }
 
     #[test]
@@ -504,7 +503,7 @@ mod tests {
 
     #[cfg(feature = "mcp")]
     #[test]
-    fn resource_descriptors_include_readonly_meta_and_annotations() {
+    fn resource_descriptors_are_plain_for_client_compatibility() {
         let resource = PublishedResource {
             uri: "ilmari://list".to_string(),
             name: "list".to_string(),
@@ -520,20 +519,9 @@ mod tests {
 
         assert_eq!(descriptor.raw.uri, "ilmari://list");
         assert_eq!(descriptor.raw.mime_type.as_deref(), Some(RESOURCE_MIME_TYPE));
-        assert_eq!(descriptor.raw.size, Some(123));
-        assert_eq!(
-            descriptor
-                .raw
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.0.get("readOnly"))
-                .and_then(|value| value.as_bool()),
-            Some(true)
-        );
-        let annotations = descriptor.annotations.expect("resource should be annotated");
-        assert_eq!(annotations.audience, Some(vec![Role::Assistant]));
-        assert_eq!(annotations.priority, Some(1.0));
-        assert!(annotations.last_modified.is_some());
+        assert_eq!(descriptor.raw.size, None);
+        assert!(descriptor.raw.meta.is_none());
+        assert!(descriptor.annotations.is_none());
     }
 
     #[cfg(feature = "mcp")]
