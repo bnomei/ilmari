@@ -33,3 +33,6 @@ thiserror = "2.0.18"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync"], optional = true }
 tokio-util = { version = "0.7", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.183"

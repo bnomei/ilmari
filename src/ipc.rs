@@ -757,6 +757,8 @@ pub enum IpcError {
     Bind { path: PathBuf, source: io::Error },
     #[error("failed to configure socket {path}: {source}")]
     Configure { path: PathBuf, source: io::Error },
+    #[error("refusing to use socket directory {path}: {reason}")]
+    InsecureSocketDir { path: PathBuf, reason: &'static str },
 }
 
 #[cfg(all(unix, feature = "socket"))]
@@ -852,18 +854,90 @@ fn prepare_socket_directory(path: &Path) -> Result<(), IpcError> {
         return Ok(());
     };
 
-    let parent_existed = parent.exists();
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(parent)
-        .map_err(|source| IpcError::CreateDirectory { path: parent.to_path_buf(), source })?;
-    if !parent_existed {
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-            .map_err(|source| IpcError::CreateDirectory { path: parent.to_path_buf(), source })?;
+    // The OS base dir (e.g. `/tmp` when `XDG_RUNTIME_DIR` is unset) is
+    // world-writable and sticky by design, so every directory we manage *below*
+    // it must be a private, user-owned `0o700` directory. Validating the whole
+    // chain — outermost first — stops a co-located user from pre-creating the
+    // predictable intermediate `ilmari-<USER>` directory and squatting or
+    // interposing on the socket endpoint.
+    let base = socket_base_dir();
+    let mut managed: Vec<&Path> = Vec::new();
+    let mut current = Some(parent);
+    while let Some(dir) = current {
+        if dir == base || !dir.starts_with(&base) {
+            break;
+        }
+        managed.push(dir);
+        current = dir.parent();
+    }
+
+    // An explicit `ILMARI_SOCKET_PATH` may point outside the runtime base; the
+    // user owns that choice, so keep the prior best-effort recursive create
+    // rather than applying the private-directory policy to an arbitrary path.
+    if managed.is_empty() {
+        if !parent.exists() {
+            fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).map_err(|source| {
+                IpcError::CreateDirectory { path: parent.to_path_buf(), source }
+            })?;
+        }
+        return Ok(());
+    }
+
+    for dir in managed.into_iter().rev() {
+        ensure_private_dir(dir)?;
     }
 
     Ok(())
+}
+
+/// Ensure `dir` is a private directory we own, creating it `0o700` if absent.
+///
+/// Rejects a pre-existing entry that is a symlink, is not a directory, is owned
+/// by another user, or grants any group/other access — all signals that a
+/// different local user may control the path.
+#[cfg(all(unix, feature = "socket"))]
+fn ensure_private_dir(dir: &Path) -> Result<(), IpcError> {
+    use std::os::unix::fs::MetadataExt;
+
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() {
+                return Err(IpcError::InsecureSocketDir {
+                    path: dir.to_path_buf(),
+                    reason: "exists but is not a directory",
+                });
+            }
+            if metadata.uid() != current_uid() {
+                return Err(IpcError::InsecureSocketDir {
+                    path: dir.to_path_buf(),
+                    reason: "owned by another user",
+                });
+            }
+            if metadata.mode() & 0o077 != 0 {
+                return Err(IpcError::InsecureSocketDir {
+                    path: dir.to_path_buf(),
+                    reason: "grants group/other access",
+                });
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(dir)
+                .map_err(|source| IpcError::CreateDirectory { path: dir.to_path_buf(), source })?;
+            // DirBuilder's mode is masked by the umask, so re-assert 0o700.
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                .map_err(|source| IpcError::CreateDirectory { path: dir.to_path_buf(), source })
+        }
+        Err(source) => Err(IpcError::CreateDirectory { path: dir.to_path_buf(), source }),
+    }
+}
+
+#[cfg(all(unix, feature = "socket"))]
+fn current_uid() -> u32 {
+    // SAFETY: getuid is always successful and has no preconditions.
+    unsafe { libc::getuid() }
 }
 
 #[cfg(all(unix, feature = "socket"))]
@@ -1182,7 +1256,7 @@ mod tests {
         StateBuildOptions, LIST_RESOURCE_URI,
     };
     #[cfg(all(unix, feature = "socket"))]
-    use super::{socket_base_dir, IpcServer};
+    use super::{ensure_private_dir, socket_base_dir, IpcError, IpcServer};
     use crate::model::{
         AgentDetail, AgentDetailTone, AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord,
         SessionStatus,
@@ -1395,6 +1469,72 @@ mod tests {
 
         drop(server);
         assert!(!socket_path.exists());
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        socket_base_dir().join(format!(
+            "ilmari-test-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn ensure_private_dir_creates_owner_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("create");
+        ensure_private_dir(&dir).expect("fresh directory should be created");
+
+        let mode = std::fs::metadata(&dir).expect("directory should exist").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+
+        // Re-validating an already-private directory we own must succeed.
+        ensure_private_dir(&dir).expect("private directory should re-validate");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn ensure_private_dir_rejects_group_or_other_accessible_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("loose");
+        std::fs::create_dir(&dir).expect("directory should create");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+            .expect("permissions should set");
+
+        let error = ensure_private_dir(&dir).expect_err("world-accessible dir should be rejected");
+        assert!(matches!(
+            error,
+            IpcError::InsecureSocketDir { reason: "grants group/other access", .. }
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn ensure_private_dir_rejects_symlink() {
+        let target = unique_temp_dir("symlink-target");
+        std::fs::create_dir(&target).expect("target should create");
+        let link = unique_temp_dir("symlink-link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink should create");
+
+        let error = ensure_private_dir(&link).expect_err("symlinked dir should be rejected");
+        assert!(matches!(
+            error,
+            IpcError::InsecureSocketDir { reason: "exists but is not a directory", .. }
+        ));
+
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&target).ok();
     }
 
     fn session(pane_id: &str, status: SessionStatus, now: Instant) -> SessionRecord {

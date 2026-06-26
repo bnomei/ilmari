@@ -781,6 +781,7 @@ dependencies = [
  "anyhow",
  "axum",
  "crossterm",
+ "libc",
  "ratatui",
  "regex",
  "rmcp",
