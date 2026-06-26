@@ -1141,7 +1141,7 @@ fn resource_uri_from_pane(pane: &PaneSnapshot) -> String {
 }
 
 #[cfg(any(feature = "socket", feature = "mcp", test))]
-fn resource_uri_to_pane_id(uri: &str) -> Option<String> {
+pub(crate) fn resource_uri_to_pane_id(uri: &str) -> Option<String> {
     let path = uri.trim().strip_prefix("ilmari://")?;
     if path == "list" {
         return None;
