@@ -203,7 +203,7 @@ impl SessionTracker {
         output_tails: &HashMap<String, String>,
         now: Instant,
     ) -> Vec<SessionRecord> {
-        self.refresh_with_process_kinds(panes, output_tails, &HashMap::new(), now)
+        self.refresh_with_process_kinds(panes, output_tails, &HashMap::new(), &HashSet::new(), now)
     }
 
     pub fn refresh_with_process_kinds(
@@ -211,6 +211,7 @@ impl SessionTracker {
         panes: &[PaneSnapshot],
         output_tails: &HashMap<String, String>,
         process_kinds: &HashMap<String, AgentKind>,
+        capture_failures: &HashSet<String>,
         now: Instant,
     ) -> Vec<SessionRecord> {
         let previous = std::mem::take(&mut self.records);
@@ -225,6 +226,7 @@ impl SessionTracker {
                 output_tails.get(&pane.pane_id).map(String::as_str),
                 previous.get(&pane.pane_id),
                 process_kinds.get(&pane.pane_id).copied(),
+                capture_failures.contains(&pane.pane_id),
                 now,
             ) {
                 next.insert(record.pane.pane_id.clone(), record);
@@ -254,13 +256,30 @@ impl SessionTracker {
         output_tail: Option<&str>,
         previous: Option<&SessionRecord>,
         identity_hint: Option<AgentKind>,
+        capture_failed: bool,
         now: Instant,
     ) -> Option<SessionRecord> {
         let adapter = self.registry.select_adapter(pane, output_tail, previous, identity_hint)?;
         let kind = adapter.kind();
-        let output_fingerprint =
+        let live_fingerprint =
             output_tail.and_then(|output_tail| output_fingerprint_for_kind(kind, output_tail));
-        let status = adapter.classify(pane, output_tail, output_fingerprint, previous);
+        let status = if capture_failed && !pane.pane_dead {
+            // capture-pane failed for this pane while list-panes succeeded, so
+            // there is no fresh output to classify from. Hold the last known
+            // status instead of letting the no-tail fallbacks fabricate a
+            // transition (e.g. flip a running agent to WaitingInput and ring a
+            // false bell). Pane death is still honored: it comes from list-panes.
+            previous.map(|previous| previous.status).unwrap_or(SessionStatus::Unknown)
+        } else {
+            adapter.classify(pane, output_tail, live_fingerprint, previous)
+        };
+        // On capture failure keep the previous fingerprint so the next
+        // successful capture can still detect motion against a real baseline.
+        let output_fingerprint = if capture_failed {
+            previous.and_then(|previous| previous.output_fingerprint)
+        } else {
+            live_fingerprint
+        };
         let detail = adapter.extract_detail(output_tail, previous);
         let output_excerpt = adapter.extract_output_excerpt(output_tail, previous);
         let retained_until = retention_deadline(previous, status, self.retention, now)?;
@@ -2399,7 +2418,7 @@ mod tests {
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -2842,8 +2861,13 @@ Gemini 3.5 Flash (Medium)
             .to_string(),
         )]);
 
-        let records =
-            tracker.refresh_with_process_kinds(&[auggie], &output_tails, &process_kinds, now);
+        let records = tracker.refresh_with_process_kinds(
+            &[auggie],
+            &output_tails,
+            &process_kinds,
+            &HashSet::new(),
+            now,
+        );
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AgentKind::Auggie);
@@ -3016,6 +3040,41 @@ Gemini 3.5 Flash (Medium)
         assert_eq!(records[0].kind, AgentKind::Codex);
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
         assert_eq!(records[0].retained_until, None);
+    }
+
+    #[test]
+    fn tracker_holds_status_when_capture_fails_after_list_panes_succeeds() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot("%7", "codex", false);
+        let now = Instant::now();
+
+        let first = HashMap::from([(
+            pane.pane_id.clone(),
+            "gpt-5.4 xhigh fast \u{00b7} 40% left \u{00b7} ~/workspace\n".to_string(),
+        )]);
+        let second = HashMap::from([(
+            pane.pane_id.clone(),
+            "gpt-5.4 xhigh fast \u{00b7} 30% left \u{00b7} ~/workspace\n".to_string(),
+        )]);
+
+        tracker.refresh(std::slice::from_ref(&pane), &first, now);
+        let running =
+            tracker.refresh(std::slice::from_ref(&pane), &second, now + Duration::from_secs(5));
+        assert_eq!(running[0].status, SessionStatus::Running);
+
+        // capture-pane fails for %7 (no tail this cycle, pane is in failures)
+        // while list-panes still reports it. The status must be held, not
+        // flipped to WaitingInput by the no-tail fallback (a false bell).
+        let failures = HashSet::from([pane.pane_id.clone()]);
+        let held = tracker.refresh_with_process_kinds(
+            std::slice::from_ref(&pane),
+            &HashMap::new(),
+            &HashMap::new(),
+            &failures,
+            now + Duration::from_secs(10),
+        );
+
+        assert_eq!(held[0].status, SessionStatus::Running);
     }
 
     #[test]

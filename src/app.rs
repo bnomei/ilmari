@@ -631,10 +631,16 @@ impl App {
                 if let Some(warning) = output_tail_capture_warning(&output_tail_capture.failures) {
                     runtime_warnings.push(warning);
                 }
+                let capture_failures = output_tail_capture
+                    .failures
+                    .iter()
+                    .map(|failure| failure.pane_id.clone())
+                    .collect::<HashSet<_>>();
                 self.sessions = self.session_tracker.refresh_with_process_kinds(
                     &panes,
                     &output_tail_capture.output_tails,
                     &process_kinds,
+                    &capture_failures,
                     refreshed_at,
                 );
                 let needs_process_usage = self.needs_process_usage();
