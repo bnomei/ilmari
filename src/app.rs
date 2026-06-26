@@ -1405,6 +1405,11 @@ fn should_alert_transition(previous: SessionStatus, current: SessionStatus) -> b
             | (SessionStatus::Running, SessionStatus::Finished)
             | (SessionStatus::Unknown, SessionStatus::WaitingInput)
             | (SessionStatus::Unknown, SessionStatus::Finished)
+            // A pane absent from a single tmux snapshot is retained as
+            // Terminated (see retain_missing_record); when it reappears already
+            // needing input, that laundered Terminated must still ring the bell.
+            | (SessionStatus::Terminated, SessionStatus::WaitingInput)
+            | (SessionStatus::Terminated, SessionStatus::Finished)
     )
 }
 
@@ -2400,6 +2405,16 @@ mod tests {
         ];
 
         assert_eq!(count_alert_transitions(&previous, &current), 2);
+    }
+
+    #[test]
+    fn transition_counter_alerts_when_pane_reappears_waiting_after_transient_loss() {
+        // A pane missing from one snapshot is retained as Terminated; on
+        // reappearance as WaitingInput the bell must still ring.
+        let previous = HashMap::from([("%5".to_string(), SessionStatus::Terminated)]);
+        let current = vec![session("%5", SessionStatus::WaitingInput)];
+
+        assert_eq!(count_alert_transitions(&previous, &current), 1);
     }
 
     #[test]
