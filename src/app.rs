@@ -41,7 +41,7 @@ use crate::ui;
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
-type PaneSnapshotCollector = fn() -> Result<Vec<PaneSnapshot>, tmux::TmuxError>;
+type PaneSnapshotCollector = fn() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError>;
 type OutputTailCollector =
     fn(&[PaneSnapshot], &SessionTracker, &HashMap<String, AgentKind>) -> tmux::OutputTailCapture;
 
@@ -599,7 +599,8 @@ impl App {
         let previous_statuses = current_statuses(&self.sessions);
 
         match (self.collect_pane_snapshots)() {
-            Ok(panes) => {
+            Ok(collection) => {
+                let panes = collection.snapshots;
                 let mut runtime_warnings = self
                     .headless_warning
                     .iter()
@@ -607,6 +608,7 @@ impl App {
                     .chain(self.mcp_warning.iter())
                     .cloned()
                     .collect::<Vec<_>>();
+                runtime_warnings.extend(collection.warnings);
                 let process_kinds =
                     match self.process_cache.agent_kinds_for_panes(&panes, refreshed_at) {
                         Ok(process_kinds) => process_kinds,
@@ -2534,11 +2536,15 @@ mod tests {
         Ok(sample_process_tree())
     }
 
-    fn sample_panes_for_output_tail_capture() -> Result<Vec<PaneSnapshot>, tmux::TmuxError> {
-        Ok(vec![PaneSnapshot::parse(
-            "%12\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
-        )
-        .expect("pane snapshot should parse")])
+    fn sample_panes_for_output_tail_capture() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError>
+    {
+        Ok(tmux::PaneSnapshotCollection {
+            snapshots: vec![PaneSnapshot::parse(
+                "%12\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
+            )
+            .expect("pane snapshot should parse")],
+            warnings: Vec::new(),
+        })
     }
 
     fn panic_if_output_tail_capture_called(
