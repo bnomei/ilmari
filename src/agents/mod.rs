@@ -1908,6 +1908,14 @@ fn looks_like_grok_active_waiting_footer(output_tail: &str) -> bool {
 }
 
 fn is_grok_active_waiting_footer_line(normalized: &str) -> bool {
+    // Grok's live status footer is a spinner line, e.g. "⠹ Waiting… 7m1s … ⇣239k".
+    // Anchor on the leading braille spinner glyph: a model reply that merely
+    // mentions "waiting..." in prose must not be mistaken for the footer (and
+    // thereby pin an idle, awaiting-input pane to Running).
+    if !normalized.trim_start().chars().next().is_some_and(is_claude_spinner_glyph) {
+        return false;
+    }
+
     let lower = normalized.to_ascii_lowercase();
     lower.contains("waiting…") || lower.contains("waiting...")
 }
@@ -2376,6 +2384,7 @@ mod tests {
     use super::{
         amp_output_fingerprint, classify_antigravity_output_tail, classify_copilot_output_tail,
         classify_grok_output_tail, classify_kiro_output_tail, classify_output_tail,
+        is_grok_active_waiting_footer_line,
         extract_amp_detail, extract_amp_output_excerpt, extract_antigravity_detail,
         extract_antigravity_output_excerpt, extract_auggie_detail, extract_auggie_output_excerpt,
         extract_claude_detail, extract_claude_output_excerpt, extract_codex_detail,
@@ -5012,6 +5021,21 @@ Default · Auto · ◔ 2%                                                       
 
     const GROK_COMPLETION_ONLY: &str = "Turn completed in 5m57s.";
 
+    // Idle Grok pane whose final reply prose merely mentions "waiting...".
+    // The reply is the last meaningful line, followed only by prompt chrome.
+    const GROK_REPLY_MENTIONS_WAITING: &str = "\
+     Turn completed in 4s.
+
+     The deadlock happens because thread B keeps waiting... for a
+     lock thread A never releases.
+
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
     const GROK_COMPACT_COMMAND_PALETTE: &str = "\
 ────────────────────────────────────────────────────────────────────────1─
    ❯ /compact-mode Toggle compact UI (less padding, more content)
@@ -5309,6 +5333,31 @@ Try out Grok Build
         assert_eq!(second[0].status, SessionStatus::Running);
         assert_ne!(second[0].output_fingerprint, first[0].output_fingerprint);
         assert_eq!(second[0].last_changed_at, first[0].last_changed_at);
+    }
+
+    #[test]
+    fn tracker_marks_grok_waiting_when_reply_prose_mentions_waiting() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot("%36", "grok-macos-aarc", false);
+        let output_tails =
+            HashMap::from([(pane.pane_id.clone(), GROK_REPLY_MENTIONS_WAITING.to_string())]);
+
+        let records = tracker.refresh(std::slice::from_ref(&pane), &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Grok);
+        // The reply prose contains "waiting..." but is not the spinner footer,
+        // so the pane must read as awaiting input, not Running.
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn grok_active_waiting_footer_line_requires_leading_spinner_glyph() {
+        assert!(is_grok_active_waiting_footer_line("⠹ Waiting… 7m1s 45m8s ⇣239k [✗]"));
+        assert!(!is_grok_active_waiting_footer_line(
+            "The deadlock happens because thread B keeps waiting... for a lock"
+        ));
     }
 
     #[test]
