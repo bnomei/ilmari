@@ -1,3 +1,11 @@
+//! Published agent state, Unix-socket IPC, and MCP resource contracts.
+//!
+//! Each refresh cycle materializes a versioned snapshot of visible tmux panes as JSON
+//! list and detail resources. Consumers read through a line-oriented Unix socket or,
+//! when enabled, subscribe to the loopback MCP server. Socket paths under the runtime
+//! base are created as private `0o700` directories so co-located users cannot squat the
+//! predictable `ilmari-<USER>` hierarchy.
+
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::hash::{Hash, Hasher};
@@ -44,6 +52,7 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(all(unix, feature = "socket"))]
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Opt-in Unix-socket IPC settings resolved from `ILMARI_SOCKET` and `ILMARI_SOCKET_PATH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpcConfig {
     pub enabled: bool,
@@ -69,6 +78,7 @@ impl IpcConfig {
     }
 }
 
+/// Inputs for materializing a `PublishedState` from the current session list.
 #[derive(Debug, Clone)]
 pub struct StateBuildOptions<'a> {
     pub sessions: &'a [SessionRecord],
@@ -79,6 +89,7 @@ pub struct StateBuildOptions<'a> {
     pub revision: u64,
 }
 
+/// Versioned, read-only snapshot of visible agent panes exposed to IPC and MCP consumers.
 #[derive(Debug, Clone)]
 pub struct PublishedState {
     #[cfg(any(feature = "socket", test))]
@@ -104,12 +115,14 @@ pub struct PublishedResource {
     pub last_modified: Option<String>,
 }
 
+/// Delta emitted when published resource content or the resource set changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedStateChange {
     pub changed_uris: Vec<String>,
     pub list_changed: bool,
 }
 
+/// Thread-safe handle to the latest published snapshot and its change notifications.
 #[derive(Debug, Clone)]
 pub struct PublishedStateHandle {
     state: Arc<RwLock<PublishedState>>,
@@ -761,6 +774,7 @@ pub enum IpcError {
     InsecureSocketDir { path: PathBuf, reason: &'static str },
 }
 
+/// Background Unix-socket listener serving line-oriented published-state requests.
 #[cfg(all(unix, feature = "socket"))]
 pub struct IpcServer {
     path: PathBuf,
@@ -854,12 +868,9 @@ fn prepare_socket_directory(path: &Path) -> Result<(), IpcError> {
         return Ok(());
     };
 
-    // The OS base dir (e.g. `/tmp` when `XDG_RUNTIME_DIR` is unset) is
-    // world-writable and sticky by design, so every directory we manage *below*
-    // it must be a private, user-owned `0o700` directory. Validating the whole
-    // chain — outermost first — stops a co-located user from pre-creating the
-    // predictable intermediate `ilmari-<USER>` directory and squatting or
-    // interposing on the socket endpoint.
+    // Every managed directory below the runtime base must be private and user-owned;
+    // validating the chain outermost-first blocks co-located users from squatting the
+    // predictable `ilmari-<USER>` intermediate path.
     let base = socket_base_dir();
     let mut managed: Vec<&Path> = Vec::new();
     let mut current = Some(parent);
@@ -871,9 +882,8 @@ fn prepare_socket_directory(path: &Path) -> Result<(), IpcError> {
         current = dir.parent();
     }
 
-    // An explicit `ILMARI_SOCKET_PATH` may point outside the runtime base; the
-    // user owns that choice, so keep the prior best-effort recursive create
-    // rather than applying the private-directory policy to an arbitrary path.
+    // An explicit `ILMARI_SOCKET_PATH` outside the runtime base is the caller's choice;
+    // keep the prior best-effort recursive create instead of enforcing the policy there.
     if managed.is_empty() {
         if !parent.exists() {
             fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).map_err(|source| {
@@ -892,9 +902,8 @@ fn prepare_socket_directory(path: &Path) -> Result<(), IpcError> {
 
 /// Ensure `dir` is a private directory we own, creating it `0o700` if absent.
 ///
-/// Rejects a pre-existing entry that is a symlink, is not a directory, is owned
-/// by another user, or grants any group/other access — all signals that a
-/// different local user may control the path.
+/// Rejects a pre-existing entry that is a symlink, not a directory, owned by another
+/// user, or grants group/other access.
 #[cfg(all(unix, feature = "socket"))]
 fn ensure_private_dir(dir: &Path) -> Result<(), IpcError> {
     use std::os::unix::fs::MetadataExt;
@@ -936,7 +945,7 @@ fn ensure_private_dir(dir: &Path) -> Result<(), IpcError> {
 
 #[cfg(all(unix, feature = "socket"))]
 fn current_uid() -> u32 {
-    // SAFETY: getuid is always successful and has no preconditions.
+    // SAFETY: `getuid` is always successful and has no preconditions.
     unsafe { libc::getuid() }
 }
 
@@ -1244,6 +1253,7 @@ fn last_segments(components: &[String], depth: usize) -> String {
     components[start..].join("/")
 }
 
+/// Publish the active socket path to `@ilmari_socket_path` for external discovery.
 pub fn publish_socket_path_to_tmux(path: &Path) {
     let socket_path = path.to_string_lossy();
     let _ = tmux::set_global_option("@ilmari_socket_path", socket_path.as_ref());
@@ -1494,7 +1504,6 @@ mod tests {
         let mode = std::fs::metadata(&dir).expect("directory should exist").permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
 
-        // Re-validating an already-private directory we own must succeed.
         ensure_private_dir(&dir).expect("private directory should re-validate");
 
         std::fs::remove_dir_all(&dir).ok();

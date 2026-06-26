@@ -1,3 +1,7 @@
+//! OpenAI Codex CLI adapter.
+//! Repository: https://github.com/openai/codex
+//! Docs: https://developers.openai.com/codex/cli
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};

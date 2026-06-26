@@ -1,3 +1,6 @@
+//! Antigravity CLI adapter with custom session classifier and output heuristics.
+//! Repository: https://github.com/google-gemini/antigravity-cli
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};

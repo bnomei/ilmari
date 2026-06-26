@@ -1,3 +1,7 @@
+//! OpenCode adapter for `opencode` panes and model detail extraction.
+//! Repository: https://github.com/sst/opencode
+//! Docs: https://opencode.ai/docs
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};

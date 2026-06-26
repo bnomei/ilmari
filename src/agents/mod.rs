@@ -1,3 +1,10 @@
+//! Agent detection, output classification, and per-pane session tracking.
+//!
+//! Each supported coding agent exposes an `AgentAdapter` that recognizes its tmux pane,
+//! classifies Running versus WaitingInput from captured output, and extracts model labels
+//! and excerpts. `SessionTracker` retains sessions across refresh cycles, holds status
+//! when `capture-pane` fails, and applies a short retention window for vanished panes.
+
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -23,6 +30,7 @@ const AMP_STATUS_SIGNAL_MAX_CHARS: usize = 40;
 const PROMPT_LINE_WINDOW: usize = 6;
 const OUTPUT_EXCERPT_MAX_CHARS: usize = 80;
 
+/// Per-agent contract for pane detection, status classification, and output extraction.
 pub trait AgentAdapter {
     fn kind(&self) -> AgentKind;
     fn detect(&self, pane: &PaneSnapshot) -> bool;
@@ -48,6 +56,7 @@ pub trait AgentAdapter {
     ) -> Option<Arc<str>>;
 }
 
+/// Registry of enabled agent adapters used to select the classifier for a tmux pane.
 #[derive(Default)]
 pub struct AdapterRegistry {
     adapters: Vec<Box<dyn AgentAdapter>>,
@@ -167,6 +176,7 @@ impl AdapterRegistry {
     }
 }
 
+/// Retains classified agent sessions across tmux refresh cycles keyed by pane id.
 pub struct SessionTracker {
     registry: AdapterRegistry,
     retention: Duration,
@@ -264,17 +274,14 @@ impl SessionTracker {
         let live_fingerprint =
             output_tail.and_then(|output_tail| output_fingerprint_for_kind(kind, output_tail));
         let status = if capture_failed && !pane.pane_dead {
-            // capture-pane failed for this pane while list-panes succeeded, so
-            // there is no fresh output to classify from. Hold the last known
-            // status instead of letting the no-tail fallbacks fabricate a
-            // transition (e.g. flip a running agent to WaitingInput and ring a
-            // false bell). Pane death is still honored: it comes from list-panes.
+            // `list-panes` succeeded but `capture-pane` did not: hold the last known
+            // status instead of letting no-tail fallbacks fabricate a transition.
             previous.map(|previous| previous.status).unwrap_or(SessionStatus::Unknown)
         } else {
             adapter.classify(pane, output_tail, live_fingerprint, previous)
         };
-        // On capture failure keep the previous fingerprint so the next
-        // successful capture can still detect motion against a real baseline.
+        // On capture failure keep the previous fingerprint so the next successful
+        // capture can still detect motion against a real baseline.
         let output_fingerprint = if capture_failed {
             previous.and_then(|previous| previous.output_fingerprint)
         } else {
@@ -1927,10 +1934,8 @@ fn looks_like_grok_active_waiting_footer(output_tail: &str) -> bool {
 }
 
 fn is_grok_active_waiting_footer_line(normalized: &str) -> bool {
-    // Grok's live status footer is a spinner line, e.g. "⠹ Waiting… 7m1s … ⇣239k".
-    // Anchor on the leading braille spinner glyph: a model reply that merely
-    // mentions "waiting..." in prose must not be mistaken for the footer (and
-    // thereby pin an idle, awaiting-input pane to Running).
+    // Grok's live footer is a braille-spinner line; prose that merely mentions
+    // "waiting..." must not pin an idle pane to Running.
     if !normalized.trim_start().chars().next().is_some_and(is_claude_spinner_glyph) {
         return false;
     }
@@ -2072,9 +2077,8 @@ fn match_is_recent(output_tail: &str, matched: &regex::Match<'_>) -> bool {
 fn waiting_pattern() -> &'static Regex {
     static WAITING: OnceLock<Regex> = OnceLock::new();
     WAITING.get_or_init(|| {
-        // `confirm` and `continue?` are word-bounded the same way `approve` is,
-        // so benign prose like "configuration confirmed" or "discontinue?" no
-        // longer satisfies the WaitingInput oracle and flips a running agent.
+        // Word-bound `confirm` and `continue?` so benign prose like "configuration
+        // confirmed" does not satisfy the WaitingInput oracle.
         Regex::new(
             r"(?i)(waiting for input|press enter|(?:^|[^[:alnum:]-])continue\?|(?:^|[^[:alnum:]-])confirm(?:$|[^[:alnum:]-])|(?:^|[^[:alnum:]-])approve(?:$|[^[:alnum:]-])|y/n|select an option)",
         )
@@ -2406,7 +2410,6 @@ mod tests {
     use super::{
         amp_output_fingerprint, classify_antigravity_output_tail, classify_copilot_output_tail,
         classify_grok_output_tail, classify_kiro_output_tail, classify_output_tail,
-        is_grok_active_waiting_footer_line,
         extract_amp_detail, extract_amp_output_excerpt, extract_antigravity_detail,
         extract_antigravity_output_excerpt, extract_auggie_detail, extract_auggie_output_excerpt,
         extract_claude_detail, extract_claude_output_excerpt, extract_codex_detail,
@@ -2414,7 +2417,8 @@ mod tests {
         extract_gemini_detail, extract_gemini_output_excerpt, extract_grok_detail,
         extract_grok_output_excerpt, extract_kiro_detail, extract_kiro_output_excerpt,
         extract_opencode_detail, extract_opencode_output_excerpt, extract_pi_detail,
-        extract_pi_output_excerpt, AdapterRegistry, AgentAdapter, SessionTracker,
+        extract_pi_output_excerpt, is_grok_active_waiting_footer_line, AdapterRegistry,
+        AgentAdapter, SessionTracker,
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
@@ -2478,8 +2482,6 @@ mod tests {
         assert_eq!(registry.detect_kind(&kiro_title, None), Some(AgentKind::KiroCli));
         assert_eq!(registry.detect_kind(&stale_copilot_title, None), None);
         assert_eq!(registry.detect_kind(&stale_kiro_title, None), None);
-        // Title-based detection still works on a live (non-shell) pane, but a
-        // stale agent title left on a returned shell must not keep the session.
         assert_eq!(registry.detect_kind(&gemini_title, None), Some(AgentKind::GeminiCli));
         assert_eq!(registry.detect_kind(&stale_gemini_title, None), None);
         assert_eq!(registry.detect_kind(&auggie_title, None), Some(AgentKind::Auggie));
@@ -3076,9 +3078,8 @@ Gemini 3.5 Flash (Medium)
             tracker.refresh(std::slice::from_ref(&pane), &second, now + Duration::from_secs(5));
         assert_eq!(running[0].status, SessionStatus::Running);
 
-        // capture-pane fails for %7 (no tail this cycle, pane is in failures)
-        // while list-panes still reports it. The status must be held, not
-        // flipped to WaitingInput by the no-tail fallback (a false bell).
+        // `capture-pane` fails while `list-panes` still reports the pane: status must
+        // be held, not flipped to WaitingInput by the no-tail fallback.
         let failures = HashSet::from([pane.pane_id.clone()]);
         let held = tracker.refresh_with_process_kinds(
             std::slice::from_ref(&pane),
@@ -3211,8 +3212,6 @@ gpt-5.4 xhigh fast · 20% left · ~/workspace
 
     #[test]
     fn confirmed_in_prose_does_not_look_like_waiting_input() {
-        // Running agent whose recent output merely mentions "confirmed" /
-        // "continue building" must not be classified as awaiting input.
         let output_tail =
             "● Applying migration 0007 ... configuration confirmed, continue building cache\n";
 
@@ -5115,8 +5114,6 @@ Default · Auto · ◔ 2%                                                       
 
     const GROK_COMPLETION_ONLY: &str = "Turn completed in 5m57s.";
 
-    // Idle Grok pane whose final reply prose merely mentions "waiting...".
-    // The reply is the last meaningful line, followed only by prompt chrome.
     const GROK_REPLY_MENTIONS_WAITING: &str = "\
      Turn completed in 4s.
 
@@ -5441,8 +5438,6 @@ Try out Grok Build
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AgentKind::Grok);
-        // The reply prose contains "waiting..." but is not the spinner footer,
-        // so the pane must read as awaiting input, not Running.
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
     }
 

@@ -1,3 +1,8 @@
+//! Terminal palette parsing and semantic color roles for the TUI.
+//!
+//! Eighteen-slot CSV overrides come from `ILMARI_TUI_PALETTE` or `ILMARI_PALETTE`;
+//! `SemanticRole` maps session status, agent labels, and git diff colors onto those slots.
+
 use std::collections::BTreeMap;
 
 #[cfg(feature = "tui")]
@@ -15,6 +20,7 @@ enum Color {
     Rgb(u8, u8, u8),
 }
 
+/// Named styling intent resolved through the active 18-slot palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub enum SemanticRole {
@@ -34,6 +40,7 @@ pub enum SemanticRole {
     MutedText,
 }
 
+/// Foreground, background, and ANSI role colors used by the radar TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Palette {
     fg: Color,

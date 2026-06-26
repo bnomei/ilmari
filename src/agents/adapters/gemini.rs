@@ -1,3 +1,7 @@
+//! Google Gemini CLI adapter with command and output-tail recognition.
+//! Repository: https://github.com/google-gemini/gemini-cli
+//! Docs: https://github.com/google-gemini/gemini-cli/blob/main/README.md
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};

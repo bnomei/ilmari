@@ -1,3 +1,10 @@
+//! Loopback MCP resource server that exposes Ilmari's published pane snapshots.
+//!
+//! When `ILMARI_MCP` or `ILMARI_MCP_PORT` enables the feature, a dedicated thread
+//! serves read-only `ilmari://` resources over HTTP on localhost. Subscriptions track
+//! pane identity across tmux window moves and notify clients when list or detail
+//! content changes.
+
 #[cfg(feature = "mcp")]
 use rmcp::model::{
     Annotated, ListResourcesResult, Meta, PaginatedRequestParams, RawResource,
@@ -34,7 +41,9 @@ use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "mcp")]
-use crate::ipc::{resource_uri_to_pane_id, PublishedResource, LIST_RESOURCE_URI, RESOURCE_MIME_TYPE};
+use crate::ipc::{
+    resource_uri_to_pane_id, PublishedResource, LIST_RESOURCE_URI, RESOURCE_MIME_TYPE,
+};
 use crate::ipc::{PublishedStateChange, PublishedStateHandle};
 #[cfg(feature = "mcp")]
 use crate::tmux;
@@ -47,6 +56,7 @@ const MCP_PATH: &str = "/mcp";
 #[cfg(feature = "mcp")]
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Opt-in loopback MCP server settings from `ILMARI_MCP` and `ILMARI_MCP_PORT`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpConfig {
     pub enabled: bool,
@@ -96,6 +106,7 @@ pub enum McpError {
     NotCompiled,
 }
 
+/// Background loopback HTTP server publishing Ilmari MCP resources.
 #[cfg(feature = "mcp")]
 pub struct McpServer {
     url: String,
@@ -398,11 +409,8 @@ fn validate_resource_uri(state: &PublishedStateHandle, uri: &str) -> Result<(), 
 
 #[cfg(feature = "mcp")]
 fn resource_matches(uri: &str, change: &PublishedStateChange) -> bool {
-    // A subscription tracks a stable pane, but canonical URIs embed the volatile
-    // tmux session/window ids, so a pane moved to another window/session gets a
-    // new canonical URI. Match on the stable pane id (the same identity reads
-    // resolve by) so subscribers keep receiving resource_updated after a move.
-    // Non-pane URIs (e.g. the list resource) fall back to exact-string matching.
+    // Pane subscriptions track stable pane ids, not volatile session/window segments
+    // embedded in canonical URIs, so resource_updated still fires after a pane move.
     match resource_uri_to_pane_id(uri) {
         Some(pane_id) => change.changed_uris.iter().any(|changed_uri| {
             resource_uri_to_pane_id(changed_uri).as_deref() == Some(pane_id.as_str())
@@ -463,8 +471,6 @@ mod tests {
         use super::resource_matches;
         use crate::ipc::PublishedStateChange;
 
-        // Subscribed to pane %12 in window @7; the pane moved to window @9, so
-        // publish emits only the pane's new canonical URI.
         let change = PublishedStateChange {
             changed_uris: vec!["ilmari://1/9/12".to_string()],
             list_changed: false,

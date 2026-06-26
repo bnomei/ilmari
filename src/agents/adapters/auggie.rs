@@ -1,3 +1,6 @@
+//! Augment Auggie adapter for node-wrapped `auggie` process trees.
+//! Repository: https://github.com/augmentcode/auggie
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};

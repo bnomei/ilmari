@@ -1,3 +1,8 @@
+//! Git workspace summaries with bounded refresh caching.
+//!
+//! Resolves each agent pane cwd to a repository root, then samples branch name and
+//! unstaged shortstat for workspace headers in the radar and published state.
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -7,14 +12,17 @@ use thiserror::Error;
 
 use crate::model::GitSummaryRow;
 
+/// Default cadence for reusing cached branch and shortstat rows per repository root.
 pub const DEFAULT_GIT_REFRESH: Duration = Duration::from_secs(15);
 
+/// Branch and diff-stat rows plus non-fatal per-workspace git command failures.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitSummaryReport {
     pub rows: Vec<GitSummaryRow>,
     pub warnings: Vec<String>,
 }
 
+/// Parsed `git diff --shortstat` insertion and deletion totals.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ShortStat {
     pub insertions: u32,
@@ -33,6 +41,7 @@ struct CachedSummary {
     refreshed_at: Instant,
 }
 
+/// Time-bounded cache of repository roots and summary rows keyed by workspace path.
 #[derive(Debug)]
 pub struct GitSummaryCache {
     refresh_interval: Duration,
@@ -158,6 +167,7 @@ impl GitSummaryCache {
     }
 }
 
+/// Failure from git subprocess execution or shortstat parsing.
 #[derive(Debug, Error)]
 pub enum GitError {
     #[error("failed to execute git: {0}")]

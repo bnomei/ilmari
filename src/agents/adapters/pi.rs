@@ -1,3 +1,6 @@
+//! Pi agent adapter for `pi` and `pi-agent` executables.
+//! Repository: https://github.com/badlogic/pi-mono
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};
