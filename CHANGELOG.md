@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-06-25
+
+### Fixed
+
+- Keep Claude Code bottom chrome out of output excerpts, including auto-mode, agents-footer, activity-token, tip, and quota-status rows, so Ilmari shows the latest meaningful agent output instead of transient status text.
+- Recognize Claude Code auto-mode prompt footers as waiting-input prompts.
+- Replace personal absolute paths in README socket examples with neutral workspace paths.
+
 ## 0.6.1 - 2026-06-22
 
 ### Changed

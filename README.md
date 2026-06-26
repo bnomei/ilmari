@@ -244,7 +244,7 @@ use the `result` intent:
       "id": "%12",
       "state": "needs-input",
       "agent": "codex",
-      "cwd": "/Users/bnomei/PROJECTS/ilmari",
+      "cwd": "/workspace/ilmari",
       "next": {
         "intent": "inspect",
         "kind": "tmux",
@@ -256,7 +256,7 @@ use the `result` intent:
       "id": "%13",
       "state": "done",
       "agent": "claude-code",
-      "cwd": "/Users/bnomei/PROJECTS/site",
+      "cwd": "/workspace/site",
       "next": {
         "intent": "result",
         "kind": "tmux",

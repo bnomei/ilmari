@@ -1091,13 +1091,45 @@ fn extract_claude_output_excerpt(output_tail: Option<&str>) -> Option<String> {
         is_common_output_noise(raw, normalized)
             || lower.contains("claude code")
             || lower.contains("? for shortcuts")
+            || lower.starts_with("tip:")
+            || lower == "claude's current work"
             || lower.contains("/effort")
             || lower.starts_with("select model")
             || lower.contains("enter to confirm")
+            || is_claude_auto_mode_footer(&lower)
+            || is_claude_agents_footer(&lower)
+            || is_claude_activity_status_line(compact)
+            || is_claude_quota_status_line(&lower)
             || lower.contains("choose the text style that looks best")
             || claude_elapsed_footer_pattern().is_match(compact)
             || normalized.starts_with('❯')
     })
+}
+
+fn is_claude_auto_mode_footer(lower: &str) -> bool {
+    lower.contains("auto mode") && lower.contains("shift+tab") && lower.contains("esc to interrupt")
+}
+
+fn is_claude_agents_footer(lower: &str) -> bool {
+    lower.contains("for agents")
+        && (lower.contains("esc to interrupt")
+            || lower.contains("shift+tab")
+            || lower.contains("auto mode")
+            || lower.trim_start().starts_with('←'))
+}
+
+fn is_claude_activity_status_line(compact_lower: &str) -> bool {
+    compact_lower.contains("tokens")
+        && compact_lower.contains('·')
+        && (compact_lower.contains('↑')
+            || compact_lower.contains('↓')
+            || compact_lower.contains("still thinking"))
+}
+
+fn is_claude_quota_status_line(lower: &str) -> bool {
+    (lower.contains("fast mode") && lower.contains("disabled")
+        || lower.contains("usage credit") && lower.contains("limit reached"))
+        && lower.contains('·')
 }
 
 fn extract_opencode_output_excerpt(output_tail: Option<&str>) -> Option<String> {
@@ -1407,7 +1439,7 @@ fn trim_leading_output_marker(line: &str) -> Option<&str> {
     let mut chars = line.chars();
     let marker = chars.next()?;
     let remainder = chars.as_str();
-    if !matches!(marker, '✦' | '●' | '◊' | '•' | 'ℹ' | '~' | '⎿')
+    if !matches!(marker, '✦' | '●' | '◊' | '•' | 'ℹ' | '~' | '⎿' | '⏺' | '✢')
         || !remainder.starts_with(char::is_whitespace)
     {
         return None;
@@ -1641,7 +1673,9 @@ fn looks_like_claude_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         || recent_lines.iter().any(|line| line.starts_with('❯'))
             && recent_lines.iter().any(|line| {
                 let lower = line.to_ascii_lowercase();
-                lower.contains("/effort") || lower.contains("for shortcuts")
+                lower.contains("/effort")
+                    || lower.contains("for shortcuts")
+                    || is_claude_auto_mode_footer(&lower)
             })
 }
 
@@ -3177,6 +3211,20 @@ with your terminal
     }
 
     #[test]
+    fn claude_auto_mode_prompt_marks_waiting_input() {
+        let output_tail = "\
+I updated the layout handling and added a regression test.
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+";
+
+        assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
     fn claude_model_menu_marks_waiting_input() {
         let output_tail = "\
   Select model
@@ -4300,6 +4348,66 @@ I updated the layout handling and added a regression test.
         assert_eq!(
             extract_claude_output_excerpt(Some(output_tail)),
             Some("I updated the layout handling and added a regression test.".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_output_excerpt_skips_auto_mode_chrome() {
+        let output_tail = "\
+⏺ Inspecting the current state and choosing the next step.
+  I need the status rows to stay out of the excerpt.
+
+  Searched for 1 pattern
+
+⏺ Preparing the final result from the latest command output.
+  This is the useful content that should remain visible.
+
+⏺ Running 1 shell command…
+  ⎿  src/example.rs
+
+✢ Infusing… (4m 12s · ↑ 14.5k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting
+     Claude's current work
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Running 1 shell command… src/example.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_output_excerpt_skips_credit_limit_status_chrome() {
+        let output_tail = "\
+⏺ Reviewing the result and preparing a concise summary.
+
+Useful final output from the agent.
+
+Usage credit balance · limit reached
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Useful final output from the agent.".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_output_excerpt_skips_agents_footer_fragment() {
+        let output_tail = "\
+Useful final output from the agent.
+
+← for agents
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Useful final output from the agent.".to_string())
         );
     }
 
