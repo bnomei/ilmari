@@ -2053,8 +2053,11 @@ fn match_is_recent(output_tail: &str, matched: &regex::Match<'_>) -> bool {
 fn waiting_pattern() -> &'static Regex {
     static WAITING: OnceLock<Regex> = OnceLock::new();
     WAITING.get_or_init(|| {
+        // `confirm` and `continue?` are word-bounded the same way `approve` is,
+        // so benign prose like "configuration confirmed" or "discontinue?" no
+        // longer satisfies the WaitingInput oracle and flips a running agent.
         Regex::new(
-            r"(?i)(waiting for input|press enter|continue\?|confirm|(?:^|[^[:alnum:]-])approve(?:$|[^[:alnum:]-])|y/n|select an option)",
+            r"(?i)(waiting for input|press enter|(?:^|[^[:alnum:]-])continue\?|(?:^|[^[:alnum:]-])confirm(?:$|[^[:alnum:]-])|(?:^|[^[:alnum:]-])approve(?:$|[^[:alnum:]-])|y/n|select an option)",
         )
         .expect("waiting regex should compile")
     })
@@ -3131,6 +3134,24 @@ gpt-5.4 xhigh fast · 20% left · ~/workspace
 ";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn confirmed_in_prose_does_not_look_like_waiting_input() {
+        // Running agent whose recent output merely mentions "confirmed" /
+        // "continue building" must not be classified as awaiting input.
+        let output_tail =
+            "● Applying migration 0007 ... configuration confirmed, continue building cache\n";
+
+        assert_eq!(classify_output_tail(output_tail), None);
+    }
+
+    #[test]
+    fn real_confirm_prompt_still_marks_waiting_input() {
+        assert_eq!(
+            classify_output_tail("Overwrite existing file? Confirm? [y/N]\n"),
+            Some(SessionStatus::WaitingInput)
+        );
     }
 
     #[test]
