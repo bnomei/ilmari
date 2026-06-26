@@ -191,6 +191,11 @@ struct App {
     ipc_warning: Option<String>,
     mcp_warning: Option<String>,
     hydrated: bool,
+    // Bell baseline that survives tmux-snapshot errors. self.sessions is cleared
+    // on a snapshot failure, so it cannot be used to detect transitions that
+    // happened during the outage; this map is only updated on a successful
+    // refresh and left intact on error.
+    alert_baseline: HashMap<String, SessionStatus>,
 }
 
 struct CachedProcessTree {
@@ -460,6 +465,7 @@ impl App {
             ipc_warning,
             mcp_warning,
             hydrated: false,
+            alert_baseline: HashMap::new(),
         }
     }
 
@@ -596,7 +602,7 @@ impl App {
     fn refresh(&mut self, force_git_refresh: bool) {
         let refreshed_at = Instant::now();
         let refreshed_at_wallclock = SystemTime::now();
-        let previous_statuses = current_statuses(&self.sessions);
+        let previous_statuses = self.alert_baseline.clone();
 
         match (self.collect_pane_snapshots)() {
             Ok(collection) => {
@@ -646,6 +652,7 @@ impl App {
                 };
                 normalize_expanded_pane_ids(&mut self.expanded_pane_ids, &self.sessions);
                 self.emit_bells(count_alert_transitions(&previous_statuses, &self.sessions));
+                self.alert_baseline = current_statuses(&self.sessions);
 
                 let (status_line, git_summaries) = if self.show_git {
                     let git_report = self.git_cache.summary_rows_for_workspaces(
@@ -2228,6 +2235,39 @@ mod tests {
     }
 
     #[test]
+    fn alert_baseline_survives_tmux_snapshot_error() {
+        let mut app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            true,
+            true,
+            true,
+            false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
+        );
+        app.show_git = false;
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.capture_output_tails = panic_if_output_tail_capture_called;
+
+        // Successful refresh records %5 in the bell baseline.
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+        app.refresh(false);
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.alert_baseline.contains_key("%5"));
+
+        // A tmux snapshot error clears the visible sessions but must NOT discard
+        // the bell baseline, or transitions during the outage go unnoticed.
+        app.collect_pane_snapshots = failing_pane_snapshot;
+        app.refresh(false);
+        assert!(app.sessions.is_empty());
+        assert!(app.alert_baseline.contains_key("%5"));
+    }
+
+    #[test]
     fn output_visibility_toggles_with_o_and_defaults_to_enabled() {
         let mut app = App::default();
 
@@ -2549,6 +2589,24 @@ mod tests {
 
     fn sample_collector() -> Result<ProcessTree, crate::process::ProcessError> {
         Ok(sample_process_tree())
+    }
+
+    fn sample_running_pane_snapshot() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError> {
+        Ok(tmux::PaneSnapshotCollection {
+            snapshots: vec![PaneSnapshot::parse(
+                "%5\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
+            )
+            .expect("pane snapshot should parse")],
+            warnings: Vec::new(),
+        })
+    }
+
+    fn failing_pane_snapshot() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError> {
+        Err(tmux::TmuxError::CommandFailed {
+            command: "tmux list-panes".to_string(),
+            exit_code: Some(1),
+            stderr: "no server running".to_string(),
+        })
     }
 
     fn sample_panes_for_output_tail_capture() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError>
