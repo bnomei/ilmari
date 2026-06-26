@@ -5,8 +5,8 @@ use crate::tmux::PaneSnapshot;
 
 use super::super::{
     classify_antigravity_session, command_matches, extract_antigravity_detail,
-    extract_antigravity_output_excerpt, looks_like_antigravity_output, pane_title_contains,
-    reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
+    extract_antigravity_output_excerpt, is_shell_command, looks_like_antigravity_output,
+    pane_title_contains, reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
 pub(in crate::agents) struct AntigravityAdapter;
@@ -18,7 +18,8 @@ impl AgentAdapter for AntigravityAdapter {
 
     fn detect(&self, pane: &PaneSnapshot) -> bool {
         command_matches(&pane.pane_current_command, "agy")
-            || pane_title_contains(&pane.pane_title, "antigravity")
+            || (!is_shell_command(&pane.pane_current_command)
+                && pane_title_contains(&pane.pane_title, "antigravity"))
     }
 
     fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {

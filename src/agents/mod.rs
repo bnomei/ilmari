@@ -2444,6 +2444,12 @@ mod tests {
         let kiro_title = snapshot_with_title("%13", "node", false, "Kiro CLI");
         let stale_copilot_title = snapshot_with_title("%14", "zsh", false, "GitHub Copilot");
         let stale_kiro_title = snapshot_with_title("%15", "zsh", false, "Kiro CLI");
+        let gemini_title = snapshot_with_title("%27", "node", false, "Gemini");
+        let stale_gemini_title = snapshot_with_title("%28", "zsh", false, "Gemini");
+        let auggie_title = snapshot_with_title("%29", "node", false, "Auggie");
+        let stale_auggie_title = snapshot_with_title("%30", "zsh", false, "Auggie");
+        let antigravity_title = snapshot_with_title("%31", "node", false, "Antigravity");
+        let stale_antigravity_title = snapshot_with_title("%32", "zsh", false, "Antigravity");
 
         assert_eq!(registry.detect_kind(&codex, None), Some(AgentKind::Codex));
         assert_eq!(registry.detect_kind(&codex_variant, None), Some(AgentKind::Codex));
@@ -2472,6 +2478,14 @@ mod tests {
         assert_eq!(registry.detect_kind(&kiro_title, None), Some(AgentKind::KiroCli));
         assert_eq!(registry.detect_kind(&stale_copilot_title, None), None);
         assert_eq!(registry.detect_kind(&stale_kiro_title, None), None);
+        // Title-based detection still works on a live (non-shell) pane, but a
+        // stale agent title left on a returned shell must not keep the session.
+        assert_eq!(registry.detect_kind(&gemini_title, None), Some(AgentKind::GeminiCli));
+        assert_eq!(registry.detect_kind(&stale_gemini_title, None), None);
+        assert_eq!(registry.detect_kind(&auggie_title, None), Some(AgentKind::Auggie));
+        assert_eq!(registry.detect_kind(&stale_auggie_title, None), None);
+        assert_eq!(registry.detect_kind(&antigravity_title, None), Some(AgentKind::AntigravityCli));
+        assert_eq!(registry.detect_kind(&stale_antigravity_title, None), None);
     }
 
     #[test]

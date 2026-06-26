@@ -5,8 +5,8 @@ use crate::tmux::PaneSnapshot;
 
 use super::super::{
     classify_supported_session, command_matches, extract_auggie_detail,
-    extract_auggie_output_excerpt, pane_title_contains, reuse_detail_arc, reuse_output_excerpt_arc,
-    AgentAdapter,
+    extract_auggie_output_excerpt, is_shell_command, pane_title_contains, reuse_detail_arc,
+    reuse_output_excerpt_arc, AgentAdapter,
 };
 
 pub(in crate::agents) struct AuggieAdapter;
@@ -18,7 +18,8 @@ impl AgentAdapter for AuggieAdapter {
 
     fn detect(&self, pane: &PaneSnapshot) -> bool {
         command_matches(&pane.pane_current_command, "auggie")
-            || pane_title_contains(&pane.pane_title, "auggie")
+            || (!is_shell_command(&pane.pane_current_command)
+                && pane_title_contains(&pane.pane_title, "auggie"))
     }
 
     fn classify(
