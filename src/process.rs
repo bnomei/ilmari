@@ -183,7 +183,10 @@ impl ProcessTree {
                     || node_wrapper_path_matches(&process.command, "agy")
             }
             AgentKind::Auggie => command_matches_auggie(&process.command),
-            AgentKind::Grok => command_executable_matches(&process.command, "grok"),
+            AgentKind::Grok => {
+                command_executable_matches(&process.command, "grok")
+                    || node_wrapper_path_matches(&process.command, "grok")
+            }
             AgentKind::GitHubCopilotCli => {
                 command_executable_matches(&process.command, "copilot")
                     || node_wrapper_path_matches(&process.command, "copilot")
@@ -569,6 +572,12 @@ mod tests {
                 "kiro-cli",
                 "node /workspace/bin/kiro-cli",
                 "deno /workspace/bin/kiro-cli",
+            ),
+            (
+                AgentKind::Grok,
+                "grok-macos-aarc",
+                "node /opt/homebrew/bin/grok-macos-aarc",
+                "bun /opt/homebrew/bin/grok-macos-aarc",
             ),
         ];
 
