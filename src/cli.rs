@@ -1,3 +1,8 @@
+//! CLI argument parsing and config overlay for Ilmari.
+//!
+//! `--help` and `--version` short-circuit before environment-backed defaults load;
+//! run flags override the same settings resolved by `AppConfig::from_env`.
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -6,6 +11,7 @@ use anyhow::{bail, Result};
 use crate::app::AppConfig;
 use crate::colors::Palette;
 
+/// Parsed top-level command after argv handling.
 pub enum CliCommand {
     Run(AppConfig),
     Help,
@@ -68,6 +74,7 @@ impl CliOptions {
     }
 }
 
+/// Parse argv into a command, loading `AppConfig` from the environment for `Run`.
 pub fn parse_args<I, S>(args: I) -> Result<CliCommand>
 where
     I: IntoIterator<Item = S>,
@@ -163,6 +170,7 @@ where
     Ok(CliCommand::Run(options.apply_to(base_config())))
 }
 
+/// Static help text including version, flags, and environment variable names.
 pub fn help_text() -> &'static str {
     concat!(
         "ilmari ",
@@ -194,6 +202,7 @@ pub fn help_text() -> &'static str {
     )
 }
 
+/// One-line version string for `--version`.
 pub fn version_text() -> &'static str {
     concat!("ilmari ", env!("CARGO_PKG_VERSION"))
 }

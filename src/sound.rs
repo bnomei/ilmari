@@ -1,3 +1,5 @@
+//! Terminal bell alerts when agent sessions transition to actionable states.
+
 use std::io::{self, Write};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -8,6 +10,7 @@ const MACOS_ALERT_PROGRAM: &str = "osascript";
 #[cfg(target_os = "macos")]
 const MACOS_ALERT_ARGS: [&str; 2] = ["-e", "beep 1"];
 
+/// Ring the terminal bell, preferring the macOS system beep when available.
 pub fn ring_terminal_bell() -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {

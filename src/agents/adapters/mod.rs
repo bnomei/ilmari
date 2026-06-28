@@ -1,3 +1,5 @@
+//! Per-agent `AgentAdapter` implementations registered by `AdapterRegistry`.
+
 mod aider;
 mod amp;
 mod antigravity;

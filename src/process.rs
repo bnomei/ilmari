@@ -1,3 +1,8 @@
+//! Process-tree sampling for agent identity hints and CPU/memory usage.
+//!
+//! Parses `ps` output into a parent/child map, matches enabled agent executables under
+//! each tmux pane pid, and rolls descendant usage into spawned totals for the stats column.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::process::Command;
@@ -7,6 +12,8 @@ use thiserror::Error;
 use crate::model::{AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord, SubtaskProcess};
 
 const PS_FORMAT: &str = "pid=,ppid=,%cpu=,rss=,command=";
+
+/// One `ps` row with normalized CPU tenths and resident memory in KiB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessSnapshot {
     pub pid: u32,
@@ -64,6 +71,7 @@ pub enum ProcessError {
     },
 }
 
+/// Snapshot of the local process hierarchy used for agent matching and usage rollup.
 #[derive(Debug, Clone)]
 pub struct ProcessTree {
     processes: HashMap<u32, ProcessSnapshot>,
@@ -183,7 +191,10 @@ impl ProcessTree {
                     || node_wrapper_path_matches(&process.command, "agy")
             }
             AgentKind::Auggie => command_matches_auggie(&process.command),
-            AgentKind::Grok => command_executable_matches(&process.command, "grok"),
+            AgentKind::Grok => {
+                command_executable_matches(&process.command, "grok")
+                    || node_wrapper_path_matches(&process.command, "grok")
+            }
             AgentKind::GitHubCopilotCli => {
                 command_executable_matches(&process.command, "copilot")
                     || node_wrapper_path_matches(&process.command, "copilot")
@@ -244,10 +255,12 @@ impl ProcessTree {
     }
 }
 
+/// Collect and parse the current process tree from a live `ps` invocation.
 pub fn collect_process_tree() -> Result<ProcessTree, ProcessError> {
     Ok(ProcessTree::from_snapshots(collect_process_snapshots()?))
 }
 
+/// Run `ps` and return parsed snapshot rows without building a tree.
 pub fn collect_process_snapshots() -> Result<Vec<ProcessSnapshot>, ProcessError> {
     let output = Command::new("/bin/ps").args(["-axo", PS_FORMAT]).output()?;
     if !output.status.success() {
@@ -569,6 +582,12 @@ mod tests {
                 "kiro-cli",
                 "node /workspace/bin/kiro-cli",
                 "deno /workspace/bin/kiro-cli",
+            ),
+            (
+                AgentKind::Grok,
+                "grok-macos-aarc",
+                "node /opt/homebrew/bin/grok-macos-aarc",
+                "bun /opt/homebrew/bin/grok-macos-aarc",
             ),
         ];
 

@@ -1,3 +1,8 @@
+//! Ratatui rendering for the tmux agent radar popup.
+//!
+//! Maps `AppModel` workspace groups into styled lines; column visibility follows the
+//! toggle flags owned by `App`, including responsive defaults for narrow terminals.
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -22,6 +27,7 @@ const SELF_COL_WIDTH: usize = 14;
 const SUB_COL_WIDTH: usize = 14;
 const STATUS_COL_WIDTH: usize = 1;
 
+/// Draw the main workspace view and keyboard shortcut footer for one frame.
 pub fn render(frame: &mut Frame, model: &AppModel, palette: &Palette) {
     let sections =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1), Constraint::Length(1)])

@@ -1,3 +1,11 @@
+//! Published agent state, Unix-socket IPC, and MCP resource contracts.
+//!
+//! Each refresh cycle materializes a versioned snapshot of visible tmux panes as JSON
+//! list and detail resources. Consumers read through a line-oriented Unix socket or,
+//! when enabled, subscribe to the loopback MCP server. Socket paths under the runtime
+//! base are created as private `0o700` directories so co-located users cannot squat the
+//! predictable `ilmari-<USER>` hierarchy.
+
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::hash::{Hash, Hasher};
@@ -44,6 +52,7 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(all(unix, feature = "socket"))]
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Opt-in Unix-socket IPC settings resolved from `ILMARI_SOCKET` and `ILMARI_SOCKET_PATH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpcConfig {
     pub enabled: bool,
@@ -69,6 +78,7 @@ impl IpcConfig {
     }
 }
 
+/// Inputs for materializing a `PublishedState` from the current session list.
 #[derive(Debug, Clone)]
 pub struct StateBuildOptions<'a> {
     pub sessions: &'a [SessionRecord],
@@ -79,6 +89,7 @@ pub struct StateBuildOptions<'a> {
     pub revision: u64,
 }
 
+/// Versioned, read-only snapshot of visible agent panes exposed to IPC and MCP consumers.
 #[derive(Debug, Clone)]
 pub struct PublishedState {
     #[cfg(any(feature = "socket", test))]
@@ -104,12 +115,14 @@ pub struct PublishedResource {
     pub last_modified: Option<String>,
 }
 
+/// Delta emitted when published resource content or the resource set changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedStateChange {
     pub changed_uris: Vec<String>,
     pub list_changed: bool,
 }
 
+/// Thread-safe handle to the latest published snapshot and its change notifications.
 #[derive(Debug, Clone)]
 pub struct PublishedStateHandle {
     state: Arc<RwLock<PublishedState>>,
@@ -757,8 +770,11 @@ pub enum IpcError {
     Bind { path: PathBuf, source: io::Error },
     #[error("failed to configure socket {path}: {source}")]
     Configure { path: PathBuf, source: io::Error },
+    #[error("refusing to use socket directory {path}: {reason}")]
+    InsecureSocketDir { path: PathBuf, reason: &'static str },
 }
 
+/// Background Unix-socket listener serving line-oriented published-state requests.
 #[cfg(all(unix, feature = "socket"))]
 pub struct IpcServer {
     path: PathBuf,
@@ -852,18 +868,94 @@ fn prepare_socket_directory(path: &Path) -> Result<(), IpcError> {
         return Ok(());
     };
 
-    let parent_existed = parent.exists();
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(parent)
-        .map_err(|source| IpcError::CreateDirectory { path: parent.to_path_buf(), source })?;
-    if !parent_existed {
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-            .map_err(|source| IpcError::CreateDirectory { path: parent.to_path_buf(), source })?;
+    // Every managed directory below the runtime base must be private and user-owned;
+    // validating the chain outermost-first blocks co-located users from squatting the
+    // predictable `ilmari-<USER>` intermediate path.
+    let base = socket_base_dir();
+    let mut managed: Vec<&Path> = Vec::new();
+    let mut current = Some(parent);
+    while let Some(dir) = current {
+        if dir == base || !dir.starts_with(&base) {
+            break;
+        }
+        managed.push(dir);
+        current = dir.parent();
+    }
+
+    // An explicit `ILMARI_SOCKET_PATH` outside the runtime base is the caller's choice,
+    // but a pre-existing parent still needs to be private so another local user cannot
+    // squat or observe the socket.
+    if managed.is_empty() {
+        if parent == base {
+            return Ok(());
+        }
+        if parent.exists() {
+            ensure_private_dir(parent)?;
+        } else {
+            fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).map_err(|source| {
+                IpcError::CreateDirectory { path: parent.to_path_buf(), source }
+            })?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|source| {
+                IpcError::CreateDirectory { path: parent.to_path_buf(), source }
+            })?;
+        }
+        return Ok(());
+    }
+
+    for dir in managed.into_iter().rev() {
+        ensure_private_dir(dir)?;
     }
 
     Ok(())
+}
+
+/// Ensure `dir` is a private directory we own, creating it `0o700` if absent.
+///
+/// Rejects a pre-existing entry that is a symlink, not a directory, owned by another
+/// user, or grants group/other access.
+#[cfg(all(unix, feature = "socket"))]
+fn ensure_private_dir(dir: &Path) -> Result<(), IpcError> {
+    use std::os::unix::fs::MetadataExt;
+
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() {
+                return Err(IpcError::InsecureSocketDir {
+                    path: dir.to_path_buf(),
+                    reason: "exists but is not a directory",
+                });
+            }
+            if metadata.uid() != current_uid() {
+                return Err(IpcError::InsecureSocketDir {
+                    path: dir.to_path_buf(),
+                    reason: "owned by another user",
+                });
+            }
+            if metadata.mode() & 0o077 != 0 {
+                return Err(IpcError::InsecureSocketDir {
+                    path: dir.to_path_buf(),
+                    reason: "grants group/other access",
+                });
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(dir)
+                .map_err(|source| IpcError::CreateDirectory { path: dir.to_path_buf(), source })?;
+            // DirBuilder's mode is masked by the umask, so re-assert 0o700.
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                .map_err(|source| IpcError::CreateDirectory { path: dir.to_path_buf(), source })
+        }
+        Err(source) => Err(IpcError::CreateDirectory { path: dir.to_path_buf(), source }),
+    }
+}
+
+#[cfg(all(unix, feature = "socket"))]
+fn current_uid() -> u32 {
+    // SAFETY: `getuid` is always successful and has no preconditions.
+    unsafe { libc::getuid() }
 }
 
 #[cfg(all(unix, feature = "socket"))]
@@ -1067,7 +1159,7 @@ fn resource_uri_from_pane(pane: &PaneSnapshot) -> String {
 }
 
 #[cfg(any(feature = "socket", feature = "mcp", test))]
-fn resource_uri_to_pane_id(uri: &str) -> Option<String> {
+pub(crate) fn resource_uri_to_pane_id(uri: &str) -> Option<String> {
     let path = uri.trim().strip_prefix("ilmari://")?;
     if path == "list" {
         return None;
@@ -1170,6 +1262,7 @@ fn last_segments(components: &[String], depth: usize) -> String {
     components[start..].join("/")
 }
 
+/// Publish the active socket path to `@ilmari_socket_path` for external discovery.
 pub fn publish_socket_path_to_tmux(path: &Path) {
     let socket_path = path.to_string_lossy();
     let _ = tmux::set_global_option("@ilmari_socket_path", socket_path.as_ref());
@@ -1182,7 +1275,9 @@ mod tests {
         StateBuildOptions, LIST_RESOURCE_URI,
     };
     #[cfg(all(unix, feature = "socket"))]
-    use super::{socket_base_dir, IpcServer};
+    use super::{
+        ensure_private_dir, prepare_socket_directory, socket_base_dir, IpcError, IpcServer,
+    };
     use crate::model::{
         AgentDetail, AgentDetailTone, AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord,
         SessionStatus,
@@ -1395,6 +1490,108 @@ mod tests {
 
         drop(server);
         assert!(!socket_path.exists());
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        socket_base_dir().join(format!(
+            "ilmari-test-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    fn unique_outside_socket_base_dir(label: &str) -> std::path::PathBuf {
+        std::env::current_dir().expect("current directory should be available").join("target").join(
+            format!(
+                "ilmari-test-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("system time should be after epoch")
+                    .as_nanos()
+            ),
+        )
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn ensure_private_dir_creates_owner_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("create");
+        ensure_private_dir(&dir).expect("fresh directory should be created");
+
+        let mode = std::fs::metadata(&dir).expect("directory should exist").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+
+        ensure_private_dir(&dir).expect("private directory should re-validate");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn ensure_private_dir_rejects_group_or_other_accessible_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("loose");
+        std::fs::create_dir(&dir).expect("directory should create");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+            .expect("permissions should set");
+
+        let error = ensure_private_dir(&dir).expect_err("world-accessible dir should be rejected");
+        assert!(matches!(
+            error,
+            IpcError::InsecureSocketDir { reason: "grants group/other access", .. }
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn explicit_socket_parent_rejects_group_or_other_accessible_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_outside_socket_base_dir("explicit-loose");
+        std::fs::create_dir_all(dir.parent().expect("test dir should have a parent"))
+            .expect("parent should create");
+        std::fs::create_dir(&dir).expect("directory should create");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+            .expect("permissions should set");
+
+        let error = prepare_socket_directory(&dir.join("custom.sock"))
+            .expect_err("world-accessible explicit socket parent should be rejected");
+        assert!(matches!(
+            error,
+            IpcError::InsecureSocketDir { reason: "grants group/other access", .. }
+        ));
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn ensure_private_dir_rejects_symlink() {
+        let target = unique_temp_dir("symlink-target");
+        std::fs::create_dir(&target).expect("target should create");
+        let link = unique_temp_dir("symlink-link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink should create");
+
+        let error = ensure_private_dir(&link).expect_err("symlinked dir should be rejected");
+        assert!(matches!(
+            error,
+            IpcError::InsecureSocketDir { reason: "exists but is not a directory", .. }
+        ));
+
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&target).ok();
     }
 
     fn session(pane_id: &str, status: SessionStatus, now: Instant) -> SessionRecord {

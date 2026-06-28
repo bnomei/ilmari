@@ -1,8 +1,14 @@
+//! Shared domain types for agent sessions, TUI view models, and published-state serialization.
+//!
+//! `SessionRecord` is the per-pane runtime source of truth; `AppModel` is the denormalized
+//! render snapshot rebuilt on every refresh cycle.
+
 use crate::tmux::PaneSnapshot;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+/// Supported coding-agent identity used for detection, display, and process matching.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentKind {
@@ -24,6 +30,7 @@ pub enum AgentKind {
     OpenHandsCli,
 }
 
+/// Whether an `AgentKind` is active in v1 or tracked as planned work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentSupport {
     Enabled,
@@ -106,6 +113,7 @@ impl AgentKind {
     }
 }
 
+/// Classified lifecycle state for one agent pane after adapter output analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionStatus {
     Running,
@@ -131,6 +139,7 @@ impl SessionStatus {
     }
 }
 
+/// One tracked agent session keyed by tmux pane id across refresh cycles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub pane: PaneSnapshot,
@@ -145,6 +154,7 @@ pub struct SessionRecord {
     pub retained_until: Option<Instant>,
 }
 
+/// CPU and resident memory sample for one process, in tenths-of-percent and KiB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceUsage {
     pub cpu_tenths_percent: u32,
@@ -172,6 +182,7 @@ pub struct SubtaskProcess {
     pub usage: ResourceUsage,
 }
 
+/// Rolled-up process usage for the agent binary and its descendant subtasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionProcessUsage {
     pub agent: ResourceUsage,
@@ -193,6 +204,7 @@ pub struct AgentDetail {
     pub tone: AgentDetailTone,
 }
 
+/// Workspace bucket grouping pane rows that share a derived path label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGroup {
     pub label: String,
@@ -200,6 +212,7 @@ pub struct WorkspaceGroup {
     pub rows: Vec<PaneRow>,
 }
 
+/// One render-ready pane row with selection, jump-match, and visibility flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneRow {
     pub pane_id: String,
@@ -215,6 +228,7 @@ pub struct PaneRow {
     pub is_selected: bool,
 }
 
+/// Cached git branch and unstaged diff stats for one repository root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSummaryRow {
     pub workspace_path: PathBuf,
@@ -224,6 +238,7 @@ pub struct GitSummaryRow {
     pub deletions: u32,
 }
 
+/// Denormalized TUI and IPC-facing snapshot built from current `SessionRecord` rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppModel {
     pub title: String,

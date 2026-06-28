@@ -1,3 +1,10 @@
+//! Loopback MCP resource server that exposes Ilmari's published pane snapshots.
+//!
+//! When `ILMARI_MCP` or `ILMARI_MCP_PORT` enables the feature, a dedicated thread
+//! serves read-only `ilmari://` resources over HTTP on localhost. Subscriptions track
+//! pane identity across tmux window moves and notify clients when list or detail
+//! content changes.
+
 #[cfg(feature = "mcp")]
 use rmcp::model::{
     Annotated, ListResourcesResult, Meta, PaginatedRequestParams, RawResource,
@@ -34,7 +41,9 @@ use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "mcp")]
-use crate::ipc::{PublishedResource, LIST_RESOURCE_URI, RESOURCE_MIME_TYPE};
+use crate::ipc::{
+    resource_uri_to_pane_id, PublishedResource, LIST_RESOURCE_URI, RESOURCE_MIME_TYPE,
+};
 use crate::ipc::{PublishedStateChange, PublishedStateHandle};
 #[cfg(feature = "mcp")]
 use crate::tmux;
@@ -47,6 +56,7 @@ const MCP_PATH: &str = "/mcp";
 #[cfg(feature = "mcp")]
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Opt-in loopback MCP server settings from `ILMARI_MCP` and `ILMARI_MCP_PORT`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpConfig {
     pub enabled: bool,
@@ -96,6 +106,7 @@ pub enum McpError {
     NotCompiled,
 }
 
+/// Background loopback HTTP server publishing Ilmari MCP resources.
 #[cfg(feature = "mcp")]
 pub struct McpServer {
     url: String,
@@ -398,7 +409,14 @@ fn validate_resource_uri(state: &PublishedStateHandle, uri: &str) -> Result<(), 
 
 #[cfg(feature = "mcp")]
 fn resource_matches(uri: &str, change: &PublishedStateChange) -> bool {
-    change.changed_uris.iter().any(|changed_uri| changed_uri == uri)
+    // Pane subscriptions track stable pane ids, not volatile session/window segments
+    // embedded in canonical URIs, so resource_updated still fires after a pane move.
+    match resource_uri_to_pane_id(uri) {
+        Some(pane_id) => change.changed_uris.iter().any(|changed_uri| {
+            resource_uri_to_pane_id(changed_uri).as_deref() == Some(pane_id.as_str())
+        }),
+        None => change.changed_uris.iter().any(|changed_uri| changed_uri == uri),
+    }
 }
 
 #[cfg(feature = "mcp")]
@@ -446,6 +464,53 @@ mod tests {
     use crate::ipc::{PublishedState, PublishedStateHandle};
     #[cfg(feature = "mcp")]
     use std::time::Duration;
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn resource_matches_tracks_pane_across_window_move() {
+        use super::resource_matches;
+        use crate::ipc::PublishedStateChange;
+
+        let change = PublishedStateChange {
+            changed_uris: vec!["ilmari://1/9/12".to_string()],
+            list_changed: false,
+        };
+
+        assert!(resource_matches("ilmari://1/7/12", &change));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn resource_matches_ignores_unrelated_panes() {
+        use super::resource_matches;
+        use crate::ipc::PublishedStateChange;
+
+        let change = PublishedStateChange {
+            changed_uris: vec!["ilmari://1/9/13".to_string()],
+            list_changed: false,
+        };
+
+        assert!(!resource_matches("ilmari://1/7/12", &change));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn resource_matches_list_uri_uses_exact_equality() {
+        use super::{resource_matches, LIST_RESOURCE_URI};
+        use crate::ipc::PublishedStateChange;
+
+        let list_change = PublishedStateChange {
+            changed_uris: vec![LIST_RESOURCE_URI.to_string()],
+            list_changed: true,
+        };
+        assert!(resource_matches(LIST_RESOURCE_URI, &list_change));
+
+        let pane_change = PublishedStateChange {
+            changed_uris: vec!["ilmari://1/7/12".to_string()],
+            list_changed: false,
+        };
+        assert!(!resource_matches(LIST_RESOURCE_URI, &pane_change));
+    }
 
     #[test]
     fn mcp_config_is_opt_in_and_loopback() {

@@ -1,3 +1,10 @@
+//! Tmux subprocess boundary for pane snapshots, output capture, and focus commands.
+//!
+//! Ilmari treats tmux as the source of truth for which agent panes exist and what
+//! they last printed. Commands here wrap `list-panes` and `capture-pane`, parse the
+//! tab-separated format into stable pane ids, and surface per-line parse failures as
+//! warnings so one malformed row cannot blank the whole radar.
+
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -8,10 +15,13 @@ use thiserror::Error;
 use crate::agents::SessionTracker;
 use crate::model::AgentKind;
 
+/// Tab-separated `list-panes -aF` format consumed by `PaneSnapshot::parse`.
 pub const LIST_PANES_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_dead}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}";
+/// Default `capture-pane -S` window for output-tail classification.
 pub const DEFAULT_CAPTURE_START: &str = "-80";
 const PANE_SNAPSHOT_FIELD_COUNT: usize = 10;
 
+/// Parsed tmux pane row from `list-panes -aF` with stable session, window, and pane ids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSnapshot {
     pub pane_id: String,
@@ -96,6 +106,7 @@ fn parse_bool_flag(value: &str, field: &'static str) -> Result<bool, PaneSnapsho
     }
 }
 
+/// Renderable `tmux` argv list executed as one subprocess.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxCommand {
     args: Vec<String>,
@@ -122,6 +133,7 @@ impl TmuxCommand {
     }
 }
 
+/// Failure from executing or decoding a tmux subprocess.
 #[derive(Debug, Error)]
 pub enum TmuxError {
     #[error("failed to execute tmux: {0}")]
@@ -130,12 +142,6 @@ pub enum TmuxError {
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("tmux command failed: {command} (exit code: {exit_code:?}) {stderr}")]
     CommandFailed { command: String, exit_code: Option<i32>, stderr: String },
-    #[error("failed to parse tmux pane snapshot on line {line_number}: {source}")]
-    ParseSnapshotLine {
-        line_number: usize,
-        #[source]
-        source: PaneSnapshotParseError,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,31 +150,45 @@ pub struct OutputTailCaptureFailure {
     pub error: String,
 }
 
+/// Per-pane `capture-pane` results collected only for panes that need fresh output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutputTailCapture {
     pub output_tails: HashMap<String, String>,
     pub failures: Vec<OutputTailCaptureFailure>,
 }
 
+/// Build the global `list-panes -aF` command used for radar snapshots.
 pub fn pane_snapshot_command() -> TmuxCommand {
     TmuxCommand::new(["list-panes", "-aF", LIST_PANES_FORMAT])
 }
 
-pub fn collect_pane_snapshots() -> Result<Vec<PaneSnapshot>, TmuxError> {
-    let stdout = run_tmux_command(&pane_snapshot_command())?;
-    parse_pane_snapshots(&stdout)
+/// Batch of parsed pane snapshots plus non-fatal warnings for malformed `list-panes` lines.
+///
+/// A tab embedded in a free-form field or an invalid flag drops only that pane; healthy
+/// rows still populate `snapshots` while the bad line is recorded in `warnings`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneSnapshotCollection {
+    pub snapshots: Vec<PaneSnapshot>,
+    pub warnings: Vec<String>,
 }
 
-pub fn parse_pane_snapshots(stdout: &str) -> Result<Vec<PaneSnapshot>, TmuxError> {
-    stdout
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .enumerate()
-        .map(|(index, line)| {
-            PaneSnapshot::parse(line)
-                .map_err(|source| TmuxError::ParseSnapshotLine { line_number: index + 1, source })
-        })
-        .collect()
+/// Run `list-panes` and parse all visible pane rows, retaining per-line warnings.
+pub fn collect_pane_snapshots() -> Result<PaneSnapshotCollection, TmuxError> {
+    let stdout = run_tmux_command(&pane_snapshot_command())?;
+    Ok(parse_pane_snapshots(&stdout))
+}
+
+pub fn parse_pane_snapshots(stdout: &str) -> PaneSnapshotCollection {
+    let mut collection = PaneSnapshotCollection::default();
+    for (index, line) in stdout.lines().filter(|line| !line.trim().is_empty()).enumerate() {
+        match PaneSnapshot::parse(line) {
+            Ok(snapshot) => collection.snapshots.push(snapshot),
+            Err(source) => collection
+                .warnings
+                .push(format!("tmux: skipped malformed pane line {}: {source}", index + 1)),
+        }
+    }
+    collection
 }
 
 pub fn capture_output_tail_command(target: &str, start: &str) -> TmuxCommand {
@@ -179,6 +199,7 @@ pub fn capture_output_tail(target: &str, start: &str) -> Result<String, TmuxErro
     run_tmux_command(&capture_output_tail_command(target, start))
 }
 
+/// Capture output tails only for panes whose adapters require fresh terminal text.
 pub fn capture_output_tails_with_process_kinds(
     panes: &[PaneSnapshot],
     tracker: &SessionTracker,
@@ -248,6 +269,7 @@ pub fn jump_to_pane(target: &PaneSnapshot) -> Result<(), TmuxError> {
     Ok(())
 }
 
+/// Set a quiet global tmux option, used to publish socket and MCP discovery paths.
 pub fn set_global_option(name: &str, value: &str) -> Result<(), TmuxError> {
     run_tmux_command(&TmuxCommand::new(["set-option", "-gq", name, value]))?;
     Ok(())
@@ -289,10 +311,11 @@ mod tests {
 
     #[test]
     fn parse_pane_snapshots_reads_multiple_rows() {
-        let snapshots = parse_pane_snapshots(
+        let collection = parse_pane_snapshots(
             "%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent\n%9\t202\t$2\tops\t@3\tlogs\t1\t/tmp/blog\tamp\treview\n",
-        )
-        .expect("tmux pane output should parse");
+        );
+        let snapshots = collection.snapshots;
+        assert!(collection.warnings.is_empty());
 
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].pane_id, "%1");
@@ -305,23 +328,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_pane_snapshots_reports_the_failing_line() {
-        let error = parse_pane_snapshots(
+    fn parse_pane_snapshots_skips_malformed_lines_and_keeps_healthy_ones() {
+        let collection = parse_pane_snapshots(
             "%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent\n%9\t202\t$2\tops\t@3\tlogs\tmaybe\t/tmp/blog\tamp\treview\n",
-        )
-        .expect_err("invalid pane_dead flag should fail");
+        );
 
-        match error {
-            super::TmuxError::ParseSnapshotLine {
-                line_number,
-                source: PaneSnapshotParseError::InvalidBooleanFlag { field, value },
-            } => {
-                assert_eq!(line_number, 2);
-                assert_eq!(field, "pane_dead");
-                assert_eq!(value, "maybe");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert_eq!(collection.snapshots.len(), 1);
+        assert_eq!(collection.snapshots[0].pane_id, "%1");
+        assert_eq!(collection.warnings.len(), 1);
+        assert!(collection.warnings[0].contains("line 2"));
+        assert!(collection.warnings[0].contains("pane_dead"));
+    }
+
+    #[test]
+    fn parse_pane_snapshots_tolerates_embedded_tab_in_a_field() {
+        let collection = parse_pane_snapshots(
+            "%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/foo\tbar\tcodex\tmytitle\n%9\t202\t$2\tops\t@3\tlogs\t1\t/tmp/blog\tamp\treview\n",
+        );
+
+        assert_eq!(collection.snapshots.len(), 1);
+        assert_eq!(collection.snapshots[0].pane_id, "%9");
+        assert_eq!(collection.warnings.len(), 1);
+        assert!(collection.warnings[0].contains("line 1"));
     }
 
     #[test]
@@ -371,7 +399,7 @@ mod tests {
         let panes = parse_pane_snapshots(
             "%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent\n%2\t202\t$2\tops\t@3\tagents\t0\t/tmp/blog\tamp\treview\n",
         )
-        .expect("tmux pane output should parse");
+        .snapshots;
 
         let capture = capture_output_tails_with_process_kinds_using(
             &panes,

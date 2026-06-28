@@ -1,3 +1,7 @@
+//! Claude Code adapter with title and output-tail fallbacks for wrapped launches.
+//! Repository: https://github.com/anthropics/claude-code
+//! Docs: https://docs.anthropic.com/en/docs/claude-code
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};

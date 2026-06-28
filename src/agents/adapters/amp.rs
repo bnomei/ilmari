@@ -1,3 +1,7 @@
+//! Amp adapter: detects `amp` panes and classifies mode-specific waiting prompts.
+//! Repository: https://github.com/sourcegraph/amp
+//! Docs: https://ampcode.com/manual
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};

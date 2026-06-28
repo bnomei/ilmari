@@ -1,3 +1,5 @@
+//! Ilmari binary entry: dispatches CLI commands into the runtime or help output.
+
 mod agents;
 mod app;
 mod cli;

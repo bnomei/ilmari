@@ -1,3 +1,10 @@
+//! Agent detection, output classification, and per-pane session tracking.
+//!
+//! Each supported coding agent exposes an `AgentAdapter` that recognizes its tmux pane,
+//! classifies Running versus WaitingInput from captured output, and extracts model labels
+//! and excerpts. `SessionTracker` retains sessions across refresh cycles, holds status
+//! when `capture-pane` fails, and applies a short retention window for vanished panes.
+
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -23,6 +30,7 @@ const AMP_STATUS_SIGNAL_MAX_CHARS: usize = 40;
 const PROMPT_LINE_WINDOW: usize = 6;
 const OUTPUT_EXCERPT_MAX_CHARS: usize = 80;
 
+/// Per-agent contract for pane detection, status classification, and output extraction.
 pub trait AgentAdapter {
     fn kind(&self) -> AgentKind;
     fn detect(&self, pane: &PaneSnapshot) -> bool;
@@ -48,6 +56,7 @@ pub trait AgentAdapter {
     ) -> Option<Arc<str>>;
 }
 
+/// Registry of enabled agent adapters used to select the classifier for a tmux pane.
 #[derive(Default)]
 pub struct AdapterRegistry {
     adapters: Vec<Box<dyn AgentAdapter>>,
@@ -167,6 +176,7 @@ impl AdapterRegistry {
     }
 }
 
+/// Retains classified agent sessions across tmux refresh cycles keyed by pane id.
 pub struct SessionTracker {
     registry: AdapterRegistry,
     retention: Duration,
@@ -203,7 +213,7 @@ impl SessionTracker {
         output_tails: &HashMap<String, String>,
         now: Instant,
     ) -> Vec<SessionRecord> {
-        self.refresh_with_process_kinds(panes, output_tails, &HashMap::new(), now)
+        self.refresh_with_process_kinds(panes, output_tails, &HashMap::new(), &HashSet::new(), now)
     }
 
     pub fn refresh_with_process_kinds(
@@ -211,6 +221,7 @@ impl SessionTracker {
         panes: &[PaneSnapshot],
         output_tails: &HashMap<String, String>,
         process_kinds: &HashMap<String, AgentKind>,
+        capture_failures: &HashSet<String>,
         now: Instant,
     ) -> Vec<SessionRecord> {
         let previous = std::mem::take(&mut self.records);
@@ -225,6 +236,7 @@ impl SessionTracker {
                 output_tails.get(&pane.pane_id).map(String::as_str),
                 previous.get(&pane.pane_id),
                 process_kinds.get(&pane.pane_id).copied(),
+                capture_failures.contains(&pane.pane_id),
                 now,
             ) {
                 next.insert(record.pane.pane_id.clone(), record);
@@ -254,13 +266,27 @@ impl SessionTracker {
         output_tail: Option<&str>,
         previous: Option<&SessionRecord>,
         identity_hint: Option<AgentKind>,
+        capture_failed: bool,
         now: Instant,
     ) -> Option<SessionRecord> {
         let adapter = self.registry.select_adapter(pane, output_tail, previous, identity_hint)?;
         let kind = adapter.kind();
-        let output_fingerprint =
+        let live_fingerprint =
             output_tail.and_then(|output_tail| output_fingerprint_for_kind(kind, output_tail));
-        let status = adapter.classify(pane, output_tail, output_fingerprint, previous);
+        let status = if capture_failed && !pane.pane_dead {
+            // `list-panes` succeeded but `capture-pane` did not: hold the last known
+            // status instead of letting no-tail fallbacks fabricate a transition.
+            previous.map(|previous| previous.status).unwrap_or(SessionStatus::Unknown)
+        } else {
+            adapter.classify(pane, output_tail, live_fingerprint, previous)
+        };
+        // On capture failure keep the previous fingerprint so the next successful
+        // capture can still detect motion against a real baseline.
+        let output_fingerprint = if capture_failed {
+            previous.and_then(|previous| previous.output_fingerprint)
+        } else {
+            live_fingerprint
+        };
         let detail = adapter.extract_detail(output_tail, previous);
         let output_excerpt = adapter.extract_output_excerpt(output_tail, previous);
         let retained_until = retention_deadline(previous, status, self.retention, now)?;
@@ -617,7 +643,24 @@ fn retained_status_without_output_tail(
 
 fn is_shell_command(command: &str) -> bool {
     let normalized = normalized_command_name(command);
-    matches!(normalized.as_str(), "fish" | "nu") || normalized == "sh" || normalized.ends_with("sh")
+    matches!(
+        normalized.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "dash"
+            | "ash"
+            | "ksh"
+            | "mksh"
+            | "yash"
+            | "csh"
+            | "tcsh"
+            | "fish"
+            | "nu"
+            | "pwsh"
+            | "elvish"
+            | "xonsh"
+            | "osh"
+    )
 }
 
 fn is_runtime_wrapped_agent_candidate(command: &str) -> bool {
@@ -1091,13 +1134,49 @@ fn extract_claude_output_excerpt(output_tail: Option<&str>) -> Option<String> {
         is_common_output_noise(raw, normalized)
             || lower.contains("claude code")
             || lower.contains("? for shortcuts")
+            || is_claude_footer_tip(&lower)
+            || lower == "claude's current work"
             || lower.contains("/effort")
             || lower.starts_with("select model")
             || lower.contains("enter to confirm")
+            || is_claude_auto_mode_footer(&lower)
+            || is_claude_agents_footer(&lower)
+            || is_claude_activity_status_line(compact)
+            || is_claude_quota_status_line(&lower)
             || lower.contains("choose the text style that looks best")
             || claude_elapsed_footer_pattern().is_match(compact)
             || normalized.starts_with('❯')
     })
+}
+
+fn is_claude_footer_tip(lower: &str) -> bool {
+    lower == "tip: use /btw to ask a quick side question without interrupting"
+}
+
+fn is_claude_auto_mode_footer(lower: &str) -> bool {
+    lower.contains("auto mode") && lower.contains("shift+tab") && lower.contains("esc to interrupt")
+}
+
+fn is_claude_agents_footer(lower: &str) -> bool {
+    lower.contains("for agents")
+        && (lower.contains("esc to interrupt")
+            || lower.contains("shift+tab")
+            || lower.contains("auto mode")
+            || lower.trim_start().starts_with('←'))
+}
+
+fn is_claude_activity_status_line(compact_lower: &str) -> bool {
+    compact_lower.contains("tokens")
+        && compact_lower.contains('·')
+        && (compact_lower.contains('↑')
+            || compact_lower.contains('↓')
+            || compact_lower.contains("still thinking"))
+}
+
+fn is_claude_quota_status_line(lower: &str) -> bool {
+    (lower.contains("fast mode") && lower.contains("disabled")
+        || lower.contains("usage credit") && lower.contains("limit reached"))
+        && lower.contains('·')
 }
 
 fn extract_opencode_output_excerpt(output_tail: Option<&str>) -> Option<String> {
@@ -1407,7 +1486,7 @@ fn trim_leading_output_marker(line: &str) -> Option<&str> {
     let mut chars = line.chars();
     let marker = chars.next()?;
     let remainder = chars.as_str();
-    if !matches!(marker, '✦' | '●' | '◊' | '•' | 'ℹ' | '~' | '⎿')
+    if !matches!(marker, '✦' | '●' | '◊' | '•' | 'ℹ' | '~' | '⎿' | '⏺' | '✢')
         || !remainder.starts_with(char::is_whitespace)
     {
         return None;
@@ -1641,7 +1720,9 @@ fn looks_like_claude_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         || recent_lines.iter().any(|line| line.starts_with('❯'))
             && recent_lines.iter().any(|line| {
                 let lower = line.to_ascii_lowercase();
-                lower.contains("/effort") || lower.contains("for shortcuts")
+                lower.contains("/effort")
+                    || lower.contains("for shortcuts")
+                    || is_claude_auto_mode_footer(&lower)
             })
 }
 
@@ -1874,6 +1955,12 @@ fn looks_like_grok_active_waiting_footer(output_tail: &str) -> bool {
 }
 
 fn is_grok_active_waiting_footer_line(normalized: &str) -> bool {
+    // Grok's live footer is a braille-spinner line; prose that merely mentions
+    // "waiting..." must not pin an idle pane to Running.
+    if !normalized.trim_start().chars().next().is_some_and(is_claude_spinner_glyph) {
+        return false;
+    }
+
     let lower = normalized.to_ascii_lowercase();
     lower.contains("waiting…") || lower.contains("waiting...")
 }
@@ -2011,8 +2098,10 @@ fn match_is_recent(output_tail: &str, matched: &regex::Match<'_>) -> bool {
 fn waiting_pattern() -> &'static Regex {
     static WAITING: OnceLock<Regex> = OnceLock::new();
     WAITING.get_or_init(|| {
+        // Word-bound `confirm` and `continue?` so benign prose like "configuration
+        // confirmed" does not satisfy the WaitingInput oracle.
         Regex::new(
-            r"(?i)(waiting for input|press enter|continue\?|confirm|(?:^|[^[:alnum:]-])approve(?:$|[^[:alnum:]-])|y/n|select an option)",
+            r"(?i)(waiting for input|press enter|(?:^|[^[:alnum:]-])continue\?|(?:^|[^[:alnum:]-])confirm(?:$|[^[:alnum:]-])|(?:^|[^[:alnum:]-])approve(?:$|[^[:alnum:]-])|y/n|select an option)",
         )
         .expect("waiting regex should compile")
     })
@@ -2349,11 +2438,12 @@ mod tests {
         extract_gemini_detail, extract_gemini_output_excerpt, extract_grok_detail,
         extract_grok_output_excerpt, extract_kiro_detail, extract_kiro_output_excerpt,
         extract_opencode_detail, extract_opencode_output_excerpt, extract_pi_detail,
-        extract_pi_output_excerpt, AdapterRegistry, AgentAdapter, SessionTracker,
+        extract_pi_output_excerpt, is_grok_active_waiting_footer_line, is_shell_command,
+        AdapterRegistry, AgentAdapter, SessionTracker,
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -2379,6 +2469,15 @@ mod tests {
         let kiro_title = snapshot_with_title("%13", "node", false, "Kiro CLI");
         let stale_copilot_title = snapshot_with_title("%14", "zsh", false, "GitHub Copilot");
         let stale_kiro_title = snapshot_with_title("%15", "zsh", false, "Kiro CLI");
+        let gemini_title = snapshot_with_title("%27", "node", false, "Gemini");
+        let stale_gemini_title = snapshot_with_title("%28", "zsh", false, "Gemini");
+        let remote_gemini_title = snapshot_with_title("%33", "ssh", false, "Gemini");
+        let auggie_title = snapshot_with_title("%29", "node", false, "Auggie");
+        let stale_auggie_title = snapshot_with_title("%30", "zsh", false, "Auggie");
+        let remote_auggie_title = snapshot_with_title("%34", "ssh", false, "Auggie");
+        let antigravity_title = snapshot_with_title("%31", "node", false, "Antigravity");
+        let stale_antigravity_title = snapshot_with_title("%32", "zsh", false, "Antigravity");
+        let remote_antigravity_title = snapshot_with_title("%35", "ssh", false, "Antigravity");
 
         assert_eq!(registry.detect_kind(&codex, None), Some(AgentKind::Codex));
         assert_eq!(registry.detect_kind(&codex_variant, None), Some(AgentKind::Codex));
@@ -2407,6 +2506,20 @@ mod tests {
         assert_eq!(registry.detect_kind(&kiro_title, None), Some(AgentKind::KiroCli));
         assert_eq!(registry.detect_kind(&stale_copilot_title, None), None);
         assert_eq!(registry.detect_kind(&stale_kiro_title, None), None);
+        assert_eq!(registry.detect_kind(&gemini_title, None), Some(AgentKind::GeminiCli));
+        assert_eq!(registry.detect_kind(&stale_gemini_title, None), None);
+        assert_eq!(registry.detect_kind(&remote_gemini_title, None), Some(AgentKind::GeminiCli));
+        assert_eq!(registry.detect_kind(&auggie_title, None), Some(AgentKind::Auggie));
+        assert_eq!(registry.detect_kind(&stale_auggie_title, None), None);
+        assert_eq!(registry.detect_kind(&remote_auggie_title, None), Some(AgentKind::Auggie));
+        assert_eq!(registry.detect_kind(&antigravity_title, None), Some(AgentKind::AntigravityCli));
+        assert_eq!(registry.detect_kind(&stale_antigravity_title, None), None);
+        assert_eq!(
+            registry.detect_kind(&remote_antigravity_title, None),
+            Some(AgentKind::AntigravityCli)
+        );
+        assert!(is_shell_command("zsh"));
+        assert!(!is_shell_command("ssh"));
     }
 
     #[test]
@@ -2796,8 +2909,13 @@ Gemini 3.5 Flash (Medium)
             .to_string(),
         )]);
 
-        let records =
-            tracker.refresh_with_process_kinds(&[auggie], &output_tails, &process_kinds, now);
+        let records = tracker.refresh_with_process_kinds(
+            &[auggie],
+            &output_tails,
+            &process_kinds,
+            &HashSet::new(),
+            now,
+        );
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AgentKind::Auggie);
@@ -2973,6 +3091,40 @@ Gemini 3.5 Flash (Medium)
     }
 
     #[test]
+    fn tracker_holds_status_when_capture_fails_after_list_panes_succeeds() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot("%7", "codex", false);
+        let now = Instant::now();
+
+        let first = HashMap::from([(
+            pane.pane_id.clone(),
+            "gpt-5.4 xhigh fast \u{00b7} 40% left \u{00b7} ~/workspace\n".to_string(),
+        )]);
+        let second = HashMap::from([(
+            pane.pane_id.clone(),
+            "gpt-5.4 xhigh fast \u{00b7} 30% left \u{00b7} ~/workspace\n".to_string(),
+        )]);
+
+        tracker.refresh(std::slice::from_ref(&pane), &first, now);
+        let running =
+            tracker.refresh(std::slice::from_ref(&pane), &second, now + Duration::from_secs(5));
+        assert_eq!(running[0].status, SessionStatus::Running);
+
+        // `capture-pane` fails while `list-panes` still reports the pane: status must
+        // be held, not flipped to WaitingInput by the no-tail fallback.
+        let failures = HashSet::from([pane.pane_id.clone()]);
+        let held = tracker.refresh_with_process_kinds(
+            std::slice::from_ref(&pane),
+            &HashMap::new(),
+            &HashMap::new(),
+            &failures,
+            now + Duration::from_secs(10),
+        );
+
+        assert_eq!(held[0].status, SessionStatus::Running);
+    }
+
+    #[test]
     fn tracker_marks_finished_when_agent_returns_to_shell() {
         let mut tracker = SessionTracker::with_retention(Duration::from_secs(30));
         let now = Instant::now();
@@ -3091,6 +3243,22 @@ gpt-5.4 xhigh fast · 20% left · ~/workspace
     }
 
     #[test]
+    fn confirmed_in_prose_does_not_look_like_waiting_input() {
+        let output_tail =
+            "● Applying migration 0007 ... configuration confirmed, continue building cache\n";
+
+        assert_eq!(classify_output_tail(output_tail), None);
+    }
+
+    #[test]
+    fn real_confirm_prompt_still_marks_waiting_input() {
+        assert_eq!(
+            classify_output_tail("Overwrite existing file? Confirm? [y/N]\n"),
+            Some(SessionStatus::WaitingInput)
+        );
+    }
+
+    #[test]
     fn amp_home_screen_marks_waiting_input() {
         let output_tail = "\
 Welcome to\n\
@@ -3171,6 +3339,20 @@ with your terminal
 ❯
   ? for shortcuts
   ◐ medium · /effort
+";
+
+        assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
+    }
+
+    #[test]
+    fn claude_auto_mode_prompt_marks_waiting_input() {
+        let output_tail = "\
+I updated the layout handling and added a regression test.
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
 ";
 
         assert_eq!(classify_output_tail(output_tail), Some(SessionStatus::WaitingInput));
@@ -4304,6 +4486,85 @@ I updated the layout handling and added a regression test.
     }
 
     #[test]
+    fn claude_output_excerpt_skips_auto_mode_chrome() {
+        let output_tail = "\
+⏺ Inspecting the current state and choosing the next step.
+  I need the status rows to stay out of the excerpt.
+
+  Searched for 1 pattern
+
+⏺ Preparing the final result from the latest command output.
+  This is the useful content that should remain visible.
+
+⏺ Running 1 shell command…
+  ⎿  src/example.rs
+
+✢ Infusing… (4m 12s · ↑ 14.5k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting
+     Claude's current work
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Running 1 shell command… src/example.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_output_excerpt_keeps_real_tip_answer() {
+        let output_tail = "\
+I checked the branch and found one simple follow-up.
+
+Tip: run cargo fmt before committing
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Tip: run cargo fmt before committing".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_output_excerpt_skips_credit_limit_status_chrome() {
+        let output_tail = "\
+⏺ Reviewing the result and preparing a concise summary.
+
+Useful final output from the agent.
+
+Usage credit balance · limit reached
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Useful final output from the agent.".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_output_excerpt_skips_agents_footer_fragment() {
+        let output_tail = "\
+Useful final output from the agent.
+
+← for agents
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Useful final output from the agent.".to_string())
+        );
+    }
+
+    #[test]
     fn claude_output_excerpt_ignores_generic_elapsed_footer_labels() {
         let output_tail = "\
 I tightened the pane classifier and moved the time column to the left.
@@ -4904,6 +5165,19 @@ Default · Auto · ◔ 2%                                                       
 
     const GROK_COMPLETION_ONLY: &str = "Turn completed in 5m57s.";
 
+    const GROK_REPLY_MENTIONS_WAITING: &str = "\
+     Turn completed in 4s.
+
+     The deadlock happens because thread B keeps waiting... for a
+     lock thread A never releases.
+
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────────────────────── Grok Build · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+.:shortcuts
+";
+
     const GROK_COMPACT_COMMAND_PALETTE: &str = "\
 ────────────────────────────────────────────────────────────────────────1─
    ❯ /compact-mode Toggle compact UI (less padding, more content)
@@ -5201,6 +5475,29 @@ Try out Grok Build
         assert_eq!(second[0].status, SessionStatus::Running);
         assert_ne!(second[0].output_fingerprint, first[0].output_fingerprint);
         assert_eq!(second[0].last_changed_at, first[0].last_changed_at);
+    }
+
+    #[test]
+    fn tracker_marks_grok_waiting_when_reply_prose_mentions_waiting() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot("%36", "grok-macos-aarc", false);
+        let output_tails =
+            HashMap::from([(pane.pane_id.clone(), GROK_REPLY_MENTIONS_WAITING.to_string())]);
+
+        let records = tracker.refresh(std::slice::from_ref(&pane), &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::Grok);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn grok_active_waiting_footer_line_requires_leading_spinner_glyph() {
+        assert!(is_grok_active_waiting_footer_line("⠹ Waiting… 7m1s 45m8s ⇣239k [✗]"));
+        assert!(!is_grok_active_waiting_footer_line(
+            "The deadlock happens because thread B keeps waiting... for a lock"
+        ));
     }
 
     #[test]

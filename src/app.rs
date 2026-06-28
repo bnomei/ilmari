@@ -1,3 +1,9 @@
+//! Ilmari runtime: refresh loop, TUI rendering, and published-state fan-out.
+//!
+//! `App` polls tmux for pane snapshots, classifies agent sessions, hydrates optional
+//! git and process summaries, and publishes the result to IPC and MCP consumers. The
+//! same refresh path powers the interactive radar and the headless background mode.
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
@@ -41,10 +47,11 @@ use crate::ui;
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
-type PaneSnapshotCollector = fn() -> Result<Vec<PaneSnapshot>, tmux::TmuxError>;
+type PaneSnapshotCollector = fn() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError>;
 type OutputTailCollector =
     fn(&[PaneSnapshot], &SessionTracker, &HashMap<String, AgentKind>) -> tmux::OutputTailCapture;
 
+/// Environment-derived runtime settings for refresh cadence, visibility toggles, and integrations.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub palette: Palette,
@@ -90,6 +97,7 @@ impl AppConfig {
     }
 }
 
+/// Start Ilmari in TUI mode when enabled, otherwise run the headless refresh loop.
 pub fn run(config: AppConfig) -> Result<()> {
     #[cfg(feature = "tui")]
     if config.tui_enabled {
@@ -191,6 +199,9 @@ struct App {
     ipc_warning: Option<String>,
     mcp_warning: Option<String>,
     hydrated: bool,
+    // Survives tmux snapshot errors: `sessions` is cleared on failure, but this map
+    // keeps the last known status per pane so post-outage transitions still ring bells.
+    alert_baseline: HashMap<String, SessionStatus>,
 }
 
 struct CachedProcessTree {
@@ -460,6 +471,7 @@ impl App {
             ipc_warning,
             mcp_warning,
             hydrated: false,
+            alert_baseline: HashMap::new(),
         }
     }
 
@@ -596,10 +608,12 @@ impl App {
     fn refresh(&mut self, force_git_refresh: bool) {
         let refreshed_at = Instant::now();
         let refreshed_at_wallclock = SystemTime::now();
-        let previous_statuses = current_statuses(&self.sessions);
+        let previous_statuses = self.alert_baseline.clone();
 
         match (self.collect_pane_snapshots)() {
-            Ok(panes) => {
+            Ok(collection) => {
+                let panes = collection.snapshots;
+                let preserve_alert_baseline = panes.is_empty() && !collection.warnings.is_empty();
                 let mut runtime_warnings = self
                     .headless_warning
                     .iter()
@@ -607,6 +621,7 @@ impl App {
                     .chain(self.mcp_warning.iter())
                     .cloned()
                     .collect::<Vec<_>>();
+                runtime_warnings.extend(collection.warnings);
                 let process_kinds =
                     match self.process_cache.agent_kinds_for_panes(&panes, refreshed_at) {
                         Ok(process_kinds) => process_kinds,
@@ -623,10 +638,16 @@ impl App {
                 if let Some(warning) = output_tail_capture_warning(&output_tail_capture.failures) {
                     runtime_warnings.push(warning);
                 }
+                let capture_failures = output_tail_capture
+                    .failures
+                    .iter()
+                    .map(|failure| failure.pane_id.clone())
+                    .collect::<HashSet<_>>();
                 self.sessions = self.session_tracker.refresh_with_process_kinds(
                     &panes,
                     &output_tail_capture.output_tails,
                     &process_kinds,
+                    &capture_failures,
                     refreshed_at,
                 );
                 let needs_process_usage = self.needs_process_usage();
@@ -644,6 +665,9 @@ impl App {
                 };
                 normalize_expanded_pane_ids(&mut self.expanded_pane_ids, &self.sessions);
                 self.emit_bells(count_alert_transitions(&previous_statuses, &self.sessions));
+                if !preserve_alert_baseline {
+                    self.alert_baseline = current_statuses(&self.sessions);
+                }
 
                 let (status_line, git_summaries) = if self.show_git {
                     let git_report = self.git_cache.summary_rows_for_workspaces(
@@ -1403,6 +1427,10 @@ fn should_alert_transition(previous: SessionStatus, current: SessionStatus) -> b
             | (SessionStatus::Running, SessionStatus::Finished)
             | (SessionStatus::Unknown, SessionStatus::WaitingInput)
             | (SessionStatus::Unknown, SessionStatus::Finished)
+            // A pane missing from one snapshot is retained as Terminated; reappearance
+            // as WaitingInput must still alert even though the baseline was laundered.
+            | (SessionStatus::Terminated, SessionStatus::WaitingInput)
+            | (SessionStatus::Terminated, SessionStatus::Finished)
     )
 }
 
@@ -2221,6 +2249,67 @@ mod tests {
     }
 
     #[test]
+    fn alert_baseline_survives_tmux_snapshot_error() {
+        let mut app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            true,
+            true,
+            true,
+            false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
+        );
+        app.show_git = false;
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.capture_output_tails = panic_if_output_tail_capture_called;
+
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+        app.refresh(false);
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.alert_baseline.contains_key("%5"));
+
+        // Snapshot errors clear visible sessions but must not discard the bell baseline.
+        app.collect_pane_snapshots = failing_pane_snapshot;
+        app.refresh(false);
+        assert!(app.sessions.is_empty());
+        assert!(app.alert_baseline.contains_key("%5"));
+    }
+
+    #[test]
+    fn alert_baseline_survives_warning_only_empty_snapshot() {
+        let mut app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            true,
+            true,
+            true,
+            false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
+        );
+        app.show_git = false;
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.capture_output_tails = panic_if_output_tail_capture_called;
+
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+        app.refresh(false);
+        let previous_status = *app.alert_baseline.get("%5").expect("baseline should include pane");
+
+        app.collect_pane_snapshots = warning_only_empty_pane_snapshot;
+        app.refresh(false);
+
+        assert_eq!(app.alert_baseline.get("%5"), Some(&previous_status));
+        assert!(app.model.status_line.contains("skipped malformed pane line"));
+    }
+
+    #[test]
     fn output_visibility_toggles_with_o_and_defaults_to_enabled() {
         let mut app = App::default();
 
@@ -2401,6 +2490,14 @@ mod tests {
     }
 
     #[test]
+    fn transition_counter_alerts_when_pane_reappears_waiting_after_transient_loss() {
+        let previous = HashMap::from([("%5".to_string(), SessionStatus::Terminated)]);
+        let current = vec![session("%5", SessionStatus::WaitingInput)];
+
+        assert_eq!(count_alert_transitions(&previous, &current), 1);
+    }
+
+    #[test]
     fn status_line_reports_git_warning_count() {
         let report = GitSummaryReport {
             rows: Vec::new(),
@@ -2534,11 +2631,40 @@ mod tests {
         Ok(sample_process_tree())
     }
 
-    fn sample_panes_for_output_tail_capture() -> Result<Vec<PaneSnapshot>, tmux::TmuxError> {
-        Ok(vec![PaneSnapshot::parse(
-            "%12\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
-        )
-        .expect("pane snapshot should parse")])
+    fn sample_running_pane_snapshot() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError> {
+        Ok(tmux::PaneSnapshotCollection {
+            snapshots: vec![PaneSnapshot::parse(
+                "%5\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
+            )
+            .expect("pane snapshot should parse")],
+            warnings: Vec::new(),
+        })
+    }
+
+    fn failing_pane_snapshot() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError> {
+        Err(tmux::TmuxError::CommandFailed {
+            command: "tmux list-panes".to_string(),
+            exit_code: Some(1),
+            stderr: "no server running".to_string(),
+        })
+    }
+
+    fn warning_only_empty_pane_snapshot() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError> {
+        Ok(tmux::PaneSnapshotCollection {
+            snapshots: Vec::new(),
+            warnings: vec!["tmux: skipped malformed pane line 1: invalid row".to_string()],
+        })
+    }
+
+    fn sample_panes_for_output_tail_capture(
+    ) -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError> {
+        Ok(tmux::PaneSnapshotCollection {
+            snapshots: vec![PaneSnapshot::parse(
+                "%12\t101\t$1\tdev\t@7\tagents\t0\t/workspace/ilmari\tcodex\ttitle",
+            )
+            .expect("pane snapshot should parse")],
+            warnings: Vec::new(),
+        })
     }
 
     fn panic_if_output_tail_capture_called(

@@ -1,3 +1,7 @@
+//! Google Gemini CLI adapter with command and output-tail recognition.
+//! Repository: https://github.com/google-gemini/gemini-cli
+//! Docs: https://github.com/google-gemini/gemini-cli/blob/main/README.md
+
 use std::sync::Arc;
 
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};
@@ -5,8 +9,8 @@ use crate::tmux::PaneSnapshot;
 
 use super::super::{
     classify_supported_session, command_matches, extract_gemini_detail,
-    extract_gemini_output_excerpt, looks_like_gemini_output, pane_title_contains, reuse_detail_arc,
-    reuse_output_excerpt_arc, AgentAdapter,
+    extract_gemini_output_excerpt, is_shell_command, looks_like_gemini_output, pane_title_contains,
+    reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
 pub(in crate::agents) struct GeminiAdapter;
@@ -18,7 +22,8 @@ impl AgentAdapter for GeminiAdapter {
 
     fn detect(&self, pane: &PaneSnapshot) -> bool {
         command_matches(&pane.pane_current_command, "gemini")
-            || pane_title_contains(&pane.pane_title, "gemini")
+            || (!is_shell_command(&pane.pane_current_command)
+                && pane_title_contains(&pane.pane_title, "gemini"))
     }
 
     fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
