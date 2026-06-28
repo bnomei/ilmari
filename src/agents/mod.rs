@@ -643,7 +643,24 @@ fn retained_status_without_output_tail(
 
 fn is_shell_command(command: &str) -> bool {
     let normalized = normalized_command_name(command);
-    matches!(normalized.as_str(), "fish" | "nu") || normalized == "sh" || normalized.ends_with("sh")
+    matches!(
+        normalized.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "dash"
+            | "ash"
+            | "ksh"
+            | "mksh"
+            | "yash"
+            | "csh"
+            | "tcsh"
+            | "fish"
+            | "nu"
+            | "pwsh"
+            | "elvish"
+            | "xonsh"
+            | "osh"
+    )
 }
 
 fn is_runtime_wrapped_agent_candidate(command: &str) -> bool {
@@ -1117,7 +1134,7 @@ fn extract_claude_output_excerpt(output_tail: Option<&str>) -> Option<String> {
         is_common_output_noise(raw, normalized)
             || lower.contains("claude code")
             || lower.contains("? for shortcuts")
-            || lower.starts_with("tip:")
+            || is_claude_footer_tip(&lower)
             || lower == "claude's current work"
             || lower.contains("/effort")
             || lower.starts_with("select model")
@@ -1130,6 +1147,10 @@ fn extract_claude_output_excerpt(output_tail: Option<&str>) -> Option<String> {
             || claude_elapsed_footer_pattern().is_match(compact)
             || normalized.starts_with('❯')
     })
+}
+
+fn is_claude_footer_tip(lower: &str) -> bool {
+    lower == "tip: use /btw to ask a quick side question without interrupting"
 }
 
 fn is_claude_auto_mode_footer(lower: &str) -> bool {
@@ -2417,8 +2438,8 @@ mod tests {
         extract_gemini_detail, extract_gemini_output_excerpt, extract_grok_detail,
         extract_grok_output_excerpt, extract_kiro_detail, extract_kiro_output_excerpt,
         extract_opencode_detail, extract_opencode_output_excerpt, extract_pi_detail,
-        extract_pi_output_excerpt, is_grok_active_waiting_footer_line, AdapterRegistry,
-        AgentAdapter, SessionTracker,
+        extract_pi_output_excerpt, is_grok_active_waiting_footer_line, is_shell_command,
+        AdapterRegistry, AgentAdapter, SessionTracker,
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
@@ -2450,10 +2471,13 @@ mod tests {
         let stale_kiro_title = snapshot_with_title("%15", "zsh", false, "Kiro CLI");
         let gemini_title = snapshot_with_title("%27", "node", false, "Gemini");
         let stale_gemini_title = snapshot_with_title("%28", "zsh", false, "Gemini");
+        let remote_gemini_title = snapshot_with_title("%33", "ssh", false, "Gemini");
         let auggie_title = snapshot_with_title("%29", "node", false, "Auggie");
         let stale_auggie_title = snapshot_with_title("%30", "zsh", false, "Auggie");
+        let remote_auggie_title = snapshot_with_title("%34", "ssh", false, "Auggie");
         let antigravity_title = snapshot_with_title("%31", "node", false, "Antigravity");
         let stale_antigravity_title = snapshot_with_title("%32", "zsh", false, "Antigravity");
+        let remote_antigravity_title = snapshot_with_title("%35", "ssh", false, "Antigravity");
 
         assert_eq!(registry.detect_kind(&codex, None), Some(AgentKind::Codex));
         assert_eq!(registry.detect_kind(&codex_variant, None), Some(AgentKind::Codex));
@@ -2484,10 +2508,18 @@ mod tests {
         assert_eq!(registry.detect_kind(&stale_kiro_title, None), None);
         assert_eq!(registry.detect_kind(&gemini_title, None), Some(AgentKind::GeminiCli));
         assert_eq!(registry.detect_kind(&stale_gemini_title, None), None);
+        assert_eq!(registry.detect_kind(&remote_gemini_title, None), Some(AgentKind::GeminiCli));
         assert_eq!(registry.detect_kind(&auggie_title, None), Some(AgentKind::Auggie));
         assert_eq!(registry.detect_kind(&stale_auggie_title, None), None);
+        assert_eq!(registry.detect_kind(&remote_auggie_title, None), Some(AgentKind::Auggie));
         assert_eq!(registry.detect_kind(&antigravity_title, None), Some(AgentKind::AntigravityCli));
         assert_eq!(registry.detect_kind(&stale_antigravity_title, None), None);
+        assert_eq!(
+            registry.detect_kind(&remote_antigravity_title, None),
+            Some(AgentKind::AntigravityCli)
+        );
+        assert!(is_shell_command("zsh"));
+        assert!(!is_shell_command("ssh"));
     }
 
     #[test]
@@ -4480,6 +4512,25 @@ I updated the layout handling and added a regression test.
         assert_eq!(
             extract_claude_output_excerpt(Some(output_tail)),
             Some("Running 1 shell command… src/example.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_output_excerpt_keeps_real_tip_answer() {
+        let output_tail = "\
+I checked the branch and found one simple follow-up.
+
+Tip: run cargo fmt before committing
+
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← for agents
+";
+
+        assert_eq!(
+            extract_claude_output_excerpt(Some(output_tail)),
+            Some("Tip: run cargo fmt before committing".to_string())
         );
     }
 

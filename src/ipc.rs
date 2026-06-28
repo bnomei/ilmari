@@ -882,11 +882,20 @@ fn prepare_socket_directory(path: &Path) -> Result<(), IpcError> {
         current = dir.parent();
     }
 
-    // An explicit `ILMARI_SOCKET_PATH` outside the runtime base is the caller's choice;
-    // keep the prior best-effort recursive create instead of enforcing the policy there.
+    // An explicit `ILMARI_SOCKET_PATH` outside the runtime base is the caller's choice,
+    // but a pre-existing parent still needs to be private so another local user cannot
+    // squat or observe the socket.
     if managed.is_empty() {
-        if !parent.exists() {
+        if parent == base {
+            return Ok(());
+        }
+        if parent.exists() {
+            ensure_private_dir(parent)?;
+        } else {
             fs::DirBuilder::new().recursive(true).mode(0o700).create(parent).map_err(|source| {
+                IpcError::CreateDirectory { path: parent.to_path_buf(), source }
+            })?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|source| {
                 IpcError::CreateDirectory { path: parent.to_path_buf(), source }
             })?;
         }
@@ -1266,7 +1275,9 @@ mod tests {
         StateBuildOptions, LIST_RESOURCE_URI,
     };
     #[cfg(all(unix, feature = "socket"))]
-    use super::{ensure_private_dir, socket_base_dir, IpcError, IpcServer};
+    use super::{
+        ensure_private_dir, prepare_socket_directory, socket_base_dir, IpcError, IpcServer,
+    };
     use crate::model::{
         AgentDetail, AgentDetailTone, AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord,
         SessionStatus,
@@ -1494,6 +1505,20 @@ mod tests {
     }
 
     #[cfg(all(unix, feature = "socket"))]
+    fn unique_outside_socket_base_dir(label: &str) -> std::path::PathBuf {
+        std::env::current_dir().expect("current directory should be available").join("target").join(
+            format!(
+                "ilmari-test-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("system time should be after epoch")
+                    .as_nanos()
+            ),
+        )
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
     #[test]
     fn ensure_private_dir_creates_owner_only_directory() {
         use std::os::unix::fs::PermissionsExt;
@@ -1525,6 +1550,29 @@ mod tests {
             IpcError::InsecureSocketDir { reason: "grants group/other access", .. }
         ));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(all(unix, feature = "socket"))]
+    #[test]
+    fn explicit_socket_parent_rejects_group_or_other_accessible_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_outside_socket_base_dir("explicit-loose");
+        std::fs::create_dir_all(dir.parent().expect("test dir should have a parent"))
+            .expect("parent should create");
+        std::fs::create_dir(&dir).expect("directory should create");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+            .expect("permissions should set");
+
+        let error = prepare_socket_directory(&dir.join("custom.sock"))
+            .expect_err("world-accessible explicit socket parent should be rejected");
+        assert!(matches!(
+            error,
+            IpcError::InsecureSocketDir { reason: "grants group/other access", .. }
+        ));
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -613,6 +613,7 @@ impl App {
         match (self.collect_pane_snapshots)() {
             Ok(collection) => {
                 let panes = collection.snapshots;
+                let preserve_alert_baseline = panes.is_empty() && !collection.warnings.is_empty();
                 let mut runtime_warnings = self
                     .headless_warning
                     .iter()
@@ -664,7 +665,9 @@ impl App {
                 };
                 normalize_expanded_pane_ids(&mut self.expanded_pane_ids, &self.sessions);
                 self.emit_bells(count_alert_transitions(&previous_statuses, &self.sessions));
-                self.alert_baseline = current_statuses(&self.sessions);
+                if !preserve_alert_baseline {
+                    self.alert_baseline = current_statuses(&self.sessions);
+                }
 
                 let (status_line, git_summaries) = if self.show_git {
                     let git_report = self.git_cache.summary_rows_for_workspaces(
@@ -2277,6 +2280,36 @@ mod tests {
     }
 
     #[test]
+    fn alert_baseline_survives_warning_only_empty_snapshot() {
+        let mut app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            true,
+            true,
+            true,
+            false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
+        );
+        app.show_git = false;
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.capture_output_tails = panic_if_output_tail_capture_called;
+
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+        app.refresh(false);
+        let previous_status = *app.alert_baseline.get("%5").expect("baseline should include pane");
+
+        app.collect_pane_snapshots = warning_only_empty_pane_snapshot;
+        app.refresh(false);
+
+        assert_eq!(app.alert_baseline.get("%5"), Some(&previous_status));
+        assert!(app.model.status_line.contains("skipped malformed pane line"));
+    }
+
+    #[test]
     fn output_visibility_toggles_with_o_and_defaults_to_enabled() {
         let mut app = App::default();
 
@@ -2613,6 +2646,13 @@ mod tests {
             command: "tmux list-panes".to_string(),
             exit_code: Some(1),
             stderr: "no server running".to_string(),
+        })
+    }
+
+    fn warning_only_empty_pane_snapshot() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError> {
+        Ok(tmux::PaneSnapshotCollection {
+            snapshots: Vec::new(),
+            warnings: vec!["tmux: skipped malformed pane line 1: invalid row".to_string()],
         })
     }
 
