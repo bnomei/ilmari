@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-06-29
+
+### Changed
+
+- Improve agent-pane detection for wrapped or remote sessions, including SSH-hosted Gemini, Auggie, and Antigravity panes where the tmux title is the reliable signal.
+- Preserve bell alert baselines through warning-only tmux snapshot parses so malformed `list-panes` rows do not suppress later status-transition alerts.
+- Keep real Claude Code answers that start with `Tip:` in output excerpts while still filtering known Claude footer chrome.
+
+### Fixed
+
+- Validate pre-existing explicit `ILMARI_SOCKET_PATH` parent directories outside the runtime base before binding sockets, rejecting insecure shared-directory setups.
+
 ## 0.6.2 - 2026-06-25
 
 ### Fixed
