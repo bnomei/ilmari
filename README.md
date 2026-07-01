@@ -7,60 +7,131 @@
 [![Discord](https://flat.badgen.net/badge/discord/bnomei?color=7289da&icon=discord&label)](https://discordapp.com/users/bnomei)
 [![Buymecoffee](https://flat.badgen.net/badge/icon/donate?icon=buymeacoffee&color=FF813F&label)](https://www.buymeacoffee.com/bnomei)
 
-Minimal tmux popup radar that can be used standalone like a sidebar or as a tmux-popup.
+Ilmari is a tmux popup radar for coding-agent panes.
 
-Supported agent CLIs: Antigravity CLI (`agy`), Gemini CLI (`gemini`), Codex (`codex`), Amp (`amp`), Claude Code (`claude`), OpenCode (`opencode`), Pi (`pi`, `pi-agent`), Auggie (`auggie`), Grok (`grok`), GitHub Copilot CLI (`copilot`), and Kiro CLI (`kiro-cli`).
+It scans the tmux panes you already have running, detects supported agent CLIs,
+groups panes by workspace, shows each pane's state and recent output, and jumps
+you back to the selected pane. It is observer-only: it does not launch agents,
+manage workflows, or own your tmux layout.
 
-Planned agent CLI support: [Cursor CLI](https://github.com/bnomei/ilmari/issues/11) (`cursor`), [Aider](https://github.com/bnomei/ilmari/issues/12) (`aider`), [Cline CLI](https://github.com/bnomei/ilmari/issues/13) (`cline`), [Goose CLI](https://github.com/bnomei/ilmari/issues/14) (`goose`), and [OpenHands CLI](https://github.com/bnomei/ilmari/issues/16) (`openhands`). PRs welcome: each linked CLI name opens its tracking issue.
+[![Ilmari tmux popup screenshot](https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot.png)](https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot.png)
+
+## What it helps you answer
+
+Use Ilmari when one tmux workspace has several agent sessions and you need to
+answer these questions quickly:
+
+- Which agent pane is still running?
+- Which pane is waiting for input?
+- Which workspace does that pane belong to?
+- What did the pane print most recently?
+- How do I jump back to it without cycling through panes manually?
+
+Ilmari can also publish the same read-only pane state through a local Unix JSON
+socket or a loopback MCP resource server for connector processes.
+
+## Supported agents
+
+Ilmari enables detection for these agent CLIs:
+
+The table lists the canonical commands. Some adapters also recognize wrapped,
+remote, or title-based executions when tmux metadata, the process tree, or pane
+output identifies an enabled agent.
+
+| Agent | Commands |
+| --- | --- |
+| Antigravity CLI | `agy` |
+| Gemini CLI | `gemini` |
+| Codex | `codex` |
+| Amp | `amp` |
+| Claude Code | `claude` |
+| OpenCode | `opencode` |
+| Pi | `pi`, `pi-agent` |
+| Auggie | `auggie` |
+| Grok | `grok` |
+| GitHub Copilot CLI | `copilot` |
+| Kiro CLI | `kiro-cli` |
+
+Tracked but disabled agent adapters:
+
+| Agent | Tracking issue |
+| --- | --- |
+| Cursor CLI | [#11](https://github.com/bnomei/ilmari/issues/11) |
+| Aider | [#12](https://github.com/bnomei/ilmari/issues/12) |
+| Cline CLI | [#13](https://github.com/bnomei/ilmari/issues/13) |
+| Goose CLI | [#14](https://github.com/bnomei/ilmari/issues/14) |
+| OpenHands CLI | [#16](https://github.com/bnomei/ilmari/issues/16) |
 
 ## Platform support
 
-Ilmari is built for Unix-like tmux environments. The supported release
-artifacts are Linux and macOS binaries, and runtime usage assumes a Unix-like
-shell with tmux available. Windows is currently out of scope: no Windows release
-artifact is published unless Windows tmux behavior is implemented and tested.
+Ilmari targets Unix-like tmux environments. Published release artifacts are
+Linux and macOS binaries, and runtime usage assumes a Unix-like shell with
+`tmux` available. Windows is currently out of scope because Windows tmux
+behavior is not implemented or tested.
 
-Ilmari exists for the moment when a tmux workspace has multiple agent panes and
-you need to answer three questions quickly:
+tmux popup usage requires tmux 3.2 or newer. Cargo builds require Rust 1.86.0
+or newer.
 
-- which pane is still running
-- which pane is waiting on you
-- which workspace that pane belongs to
+## Quickstart
 
-It opens as a tmux popup, inspects the panes you already have running, groups
-them by workspace, shows agent state plus a visible output excerpt, and jumps
-you straight to the selected pane.
+### Prerequisites
 
-Ilmari is popup-first and observer-only. It does not launch agents, manage
-workflows, or own your tmux layout. It gives you a fast index over the agent
-sessions that already exist.
+- `tmux` is installed and running.
+- tmux is version 3.2 or newer if you want popup mode.
+- At least one supported agent CLI is already running in a tmux pane.
 
+### 1. Install Ilmari
 
-<a title="click to open" target="_blank" style="cursor: zoom-in;" href="https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot.png
-"><img src="https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot.png" alt="screenshot" style="width: 100%;" /></a>
+```bash
+cargo install ilmari
+```
 
-## What Ilmari Solves
+Verify the binary is on your `PATH`:
 
-When several agents are running at once, the normal tmux workflow gets noisy:
+```bash
+ilmari --version
+```
 
-- waiting panes are easy to miss
-- finished panes and still-running panes blur together
-- workspaces get split across sessions and windows
-- you end up cycling panes manually just to find the one that matters
+Expected output:
 
-Ilmari reduces that to a popup:
+```text
+ilmari <version>
+```
 
-- detect supported agent panes from tmux metadata and output
-- classify panes as running, waiting, finished, terminated, or unknown
-- group panes by workspace path
-- show lightweight git change context per workspace
-- jump to the selected pane and get out of the way
+### 2. Add a tmux popup binding
+
+Add this to `~/.tmux.conf`:
+
+```tmux
+bind-key i display-popup -E -w 90% -h 85% "ilmari"
+```
+
+Reload tmux:
+
+```bash
+tmux source-file ~/.tmux.conf
+```
+
+### 3. Open the radar
+
+Press your tmux prefix, then `i`.
+
+Typical flow:
+
+1. Open `ilmari`.
+2. Move the selection with `j` / `k` or the arrow keys.
+3. Press `Enter` to jump to the selected pane.
+4. Press `q`, `Esc`, or `Ctrl-C` to quit.
+
+When Ilmari runs in a tmux popup, activating a pane returns you to that pane and
+closes the popup. When it runs directly in a pane, activation switches to the
+target pane and Ilmari keeps running.
 
 ## Installation
 
-### Cargo (crates.io)
+### Cargo
 
-```sh
+```bash
 cargo install ilmari
 ```
 
@@ -72,9 +143,12 @@ brew install bnomei/ilmari/ilmari
 
 ### GitHub Releases
 
-Download a prebuilt Linux or macOS archive from the GitHub Releases page,
-extract it, and place `ilmari` on your `PATH`. Windows archives are not
-published because Windows runtime behavior is not supported yet.
+Download a prebuilt Linux or macOS archive from
+[GitHub Releases](https://github.com/bnomei/ilmari/releases), extract it, and
+put `ilmari` on your `PATH`.
+
+Windows archives are not published because Windows runtime behavior is not
+supported.
 
 ### From source
 
@@ -84,240 +158,95 @@ cd ilmari
 cargo build --release
 ```
 
-## Popup-First Setup
+Verify the build:
 
-tmux popup support requires tmux 3.2 or newer.
-
-### 1. Add a tmux binding
-
-Assuming `ilmari` is already installed and available on your `PATH`:
-
-```tmux
-bind-key i display-popup -E -w 90% -h 85% "ilmari"
+```bash
+target/release/ilmari --help
 ```
 
-Reload tmux after editing `~/.tmux.conf`:
+## Popup controls
 
-```sh
-tmux source-file ~/.tmux.conf
-```
+| Key | Action |
+| --- | --- |
+| `j`, `Down` | Move to the next visible pane. |
+| `k`, `Up` | Move to the previous visible pane. |
+| `%`, then digits | Select a pane by tmux pane id. |
+| `Enter` | Jump to the selected pane. |
+| `q`, `Esc`, `Ctrl-C` | Quit. |
+| `a` | Toggle the agent/app column. |
+| `m` | Toggle the model/detail column. |
+| `t` | Toggle inactive time. |
+| `o` | Toggle recent output excerpts. |
+| `g` | Toggle git summaries. |
+| `s` | Toggle CPU and memory stats. |
+| `=` | Expand or collapse subprocess stats for the selected pane. |
+| `b` | Toggle terminal bell alerts. |
 
-### 2. Open the popup
+Ilmari sorts panes by workspace. Inside each workspace, running panes appear
+first, waiting panes appear next, and finished, terminated, or unknown panes
+follow. The most recent waiting pane is selected automatically when possible.
 
-Press your tmux prefix, then the bound key.
+## What the radar shows
 
-Typical popup flow:
+| Field | Description |
+| --- | --- |
+| Workspace | Derived from each pane's current path. |
+| Status | `running`, `waiting-input`, `finished`, `terminated`, or `unknown`. |
+| Pane id | Stable tmux pane id such as `%12`. |
+| Agent | Detected agent kind, such as `Codex` or `Claude Code`. |
+| Detail | Agent-specific model or mode label when the adapter can extract one. |
+| Output | Recent, sanitized pane output excerpt when output-tail capture is enabled. |
+| Git | Branch plus insertion/deletion summary for the workspace repository. |
+| Stats | Agent and spawned subprocess CPU/memory samples when stats are visible. |
 
-- open `ilmari`
-- move selection with `j` / `k` or arrow keys
-- press `Enter` to jump to the selected pane
-- press `q` or `Esc` to quit
-
-When `ilmari` is launched as a tmux popup, activation returns you to the target
-pane and closes the popup.
+Terminal bell alerts fire when a pane transitions into a waiting-input or
+finished state from a running, unknown, or retained terminated state. Use `b` or
+`--no-bell` to disable them for the current run.
 
 ## Configuration
 
-Ilmari configures through command-line flags and environment variables. It reads
-environment defaults first, then command-line flags override the same setting for
-that run.
+Ilmari reads environment defaults first. Command-line flags override the same
+settings for that run.
 
-| Flag | Purpose | Env fallback |
+| Flag | Environment fallback | Description |
 | --- | --- | --- |
-| `--refresh-seconds <SECONDS>` | Main tmux scan cadence | `ILMARI_REFRESH_SECONDS` |
-| `--process-refresh-seconds <SECONDS>` | CPU and memory sampling cadence | `ILMARI_PROCESS_REFRESH_SECONDS` |
-| `--palette <CSV>` | 18-slot palette override | `ILMARI_TUI_PALETTE`, then `ILMARI_PALETTE` |
-| `--no-tui` | Run headless without terminal UI | `ILMARI_TUI=0` |
-| `--no-git` | Start with git summaries hidden | none |
-| `--no-output-tail` | Skip pane output tail capture | `ILMARI_OUTPUT_TAIL=0` |
-| `--no-bell` | Disable terminal bell alerts | none |
-| `--socket` | Enable local JSON socket publishing | `ILMARI_SOCKET=1` |
-| `--no-socket` | Disable local JSON socket publishing | `ILMARI_SOCKET=0` |
-| `--socket-path <PATH>` | Local JSON socket path override | `ILMARI_SOCKET_PATH` |
-| `--mcp` | Enable loopback MCP resource server | `ILMARI_MCP=1` |
-| `--no-mcp` | Disable loopback MCP resource server | `ILMARI_MCP=0` |
-| `--mcp-port <PORT>` | Loopback MCP port, default `62778`; `0` chooses a free port | `ILMARI_MCP_PORT` |
-| `--help` / `-h` | Print help | none |
-| `--version` / `-V` | Print version | none |
+| `--refresh-seconds <SECONDS>` | `ILMARI_REFRESH_SECONDS` | Main tmux scan cadence. Positive integer seconds. Default: `5`. |
+| `--process-refresh-seconds <SECONDS>` | `ILMARI_PROCESS_REFRESH_SECONDS` | CPU and memory sampling cadence. Positive integer seconds. Default: `15`. |
+| `--palette <CSV>` | `ILMARI_TUI_PALETTE`, then `ILMARI_PALETTE` | 18-slot terminal palette override. |
+| `--no-tui` | `ILMARI_TUI=0` | Run without the terminal UI. Use with `--socket` or `--mcp` for headless publishing. |
+| `--no-git` | none | Start with git summaries hidden. |
+| `--no-output-tail` | `ILMARI_OUTPUT_TAIL=0` | Disable `tmux capture-pane` output tails. |
+| `--no-bell` | none | Disable terminal bell alerts. |
+| `--socket` | `ILMARI_SOCKET=1` | Enable local Unix JSON socket publishing. |
+| `--no-socket` | `ILMARI_SOCKET=0` | Disable local Unix JSON socket publishing. |
+| `--socket-path <PATH>` | `ILMARI_SOCKET_PATH` | Use a specific socket path. Setting a path enables the socket unless socket publishing is also disabled. |
+| `--mcp` | `ILMARI_MCP=1` | Enable the loopback MCP resource server. |
+| `--no-mcp` | `ILMARI_MCP=0` | Disable the loopback MCP resource server. |
+| `--mcp-port <PORT>` | `ILMARI_MCP_PORT` | Use a specific MCP loopback port. Default: `62778`. Use `0` for an OS-assigned free port. |
+| `-h`, `--help` | none | Print help. |
+| `-V`, `--version` | none | Print version. |
 
-| Variable | Purpose | Default | Notes |
-| --- | --- | --- | --- |
-| `ILMARI_REFRESH_SECONDS` | Main tmux scan cadence | `5` | Positive integer seconds. Empty, invalid, or non-positive values fall back to the default. |
-| `ILMARI_PROCESS_REFRESH_SECONDS` | CPU and memory sampling cadence | `15` | Separate from the main refresh so `ilmari` does not call `ps` on every redraw. Empty, invalid, or non-positive values fall back to the default. |
-| `ILMARI_TUI` | Terminal UI | enabled when compiled with feature `tui` | Set to `0`, `false`, `no`, or `off` to run headless. |
-| `ILMARI_OUTPUT_TAIL` | Pane output tail capture | enabled | Set to `0`, `false`, `no`, or `off` to skip `tmux capture-pane` output tail capture. |
-| `ILMARI_SOCKET` | Local JSON socket publisher | disabled | Set to `1`, `true`, `yes`, or `on` to enable. |
-| `ILMARI_SOCKET_PATH` | Local JSON socket path | temp dir path scoped by user and tmux socket | Setting a path enables the socket unless `ILMARI_SOCKET=0` is also set. |
-| `ILMARI_MCP` | Loopback MCP resource server | disabled | Set to `1`, `true`, `yes`, or `on` to enable. |
-| `ILMARI_MCP_PORT` | Loopback MCP port | `62778` | Setting a port enables MCP unless `ILMARI_MCP=0` is also set. Use `0` to ask the OS for a free port. |
-| `ILMARI_TUI_PALETTE` | Primary palette override | terminal ANSI theme | Takes an 18-slot CSV palette. Takes precedence over `ILMARI_PALETTE`. |
-| `ILMARI_PALETTE` | Compatibility alias for palette override | terminal ANSI theme | Used only when `ILMARI_TUI_PALETTE` is unset. |
+Boolean environment variables treat `1`, `true`, `yes`, and `on` as enabled.
+For variables that default to enabled, `0`, `false`, `no`, and `off` disable
+the setting.
 
 Examples:
 
-```sh
+```bash
 ILMARI_REFRESH_SECONDS=10 ilmari
 ILMARI_PROCESS_REFRESH_SECONDS=30 ilmari
 ILMARI_OUTPUT_TAIL=0 ilmari
+ilmari --no-git --no-bell
 ilmari --no-tui --socket
-ilmari --socket
-ILMARI_SOCKET_PATH=/tmp/ilmari.sock ilmari
+ILMARI_SOCKET_PATH=/tmp/ilmari.sock ilmari --socket
 ilmari --no-tui --mcp
 ilmari --no-tui --mcp --mcp-port 0
 ```
 
-### Build-time features
+### Palette format
 
-The default Cargo build includes the TUI and both endpoint implementations:
-
-```sh
-cargo build
-```
-
-Features can be removed at build time:
-
-```sh
-cargo build --no-default-features
-cargo build --no-default-features --features tui
-cargo build --no-default-features --features socket
-cargo build --no-default-features --features mcp
-cargo build --no-default-features --features rmcp
-cargo build --no-default-features --features socket,mcp
-cargo build --no-default-features --features tui,socket,mcp
-```
-
-Feature meanings:
-
-| Feature | Effect |
-| --- | --- |
-| `tui` | Builds the terminal UI and pulls in `ratatui` and `crossterm`. |
-| `socket` | Builds the local Unix-domain JSON socket endpoint. |
-| `mcp` | Builds the loopback MCP resource endpoint and pulls in `rmcp`, `axum`, `tokio`, and `tokio-util`. |
-| `rmcp` | Alias for `mcp`, for builds that name the backing crate explicitly. |
-
-Runtime flags remain parseable when an endpoint is compiled out. Enabling a
-compiled-out endpoint reports a status warning such as `socket support was not
-compiled in` or `MCP support was not compiled in`. Builds without feature `tui`
-run in headless mode.
-
-### Local JSON socket
-
-When enabled, Ilmari publishes a local Unix-domain socket while it is running.
-The socket is not a network listener. It accepts one line commands and returns
-one JSON object per request:
-
-```text
-ping
-list
-ls
-detail 12
-detail %12
-detail ilmari://1/7/12
-```
-
-`detail` accepts bare pane numbers like `12`, tmux pane ids like `%12`, and
-prefixed ids like `tmux:%12`, plus Ilmari resource URIs. Responses use the
-canonical tmux pane id form.
-
-When Ilmari successfully owns the socket, it also writes the path into the tmux
-global option `@ilmari_socket_path` so connector processes can discover it from
-tmux. If another Ilmari process already owns the same socket, the later process
-keeps running without taking over that endpoint.
-
-`list` returns a compact action queue for consumers. Items include the pane id,
-resource URI, consumer state, agent slug, current workspace path, and a prebuilt
-tmux `argv` command where an immediate tmux action is useful. Finished sessions
-use the `result` intent:
-
-```json
-{
-  "ok": true,
-  "type": "list",
-  "schema_version": 1,
-  "revision": 42,
-  "resource": "ilmari://list",
-  "observed_at": "2026-06-21T16:40:12.123Z",
-  "ttl_ms": 15000,
-  "items": [
-    {
-      "resource": "ilmari://1/7/12",
-      "id": "%12",
-      "state": "needs-input",
-      "agent": "codex",
-      "cwd": "/workspace/ilmari",
-      "next": {
-        "intent": "inspect",
-        "kind": "tmux",
-        "argv": ["tmux", "capture-pane", "-p", "-J", "-t", "%12", "-S", "-80"]
-      }
-    },
-    {
-      "resource": "ilmari://1/7/13",
-      "id": "%13",
-      "state": "done",
-      "agent": "claude-code",
-      "cwd": "/workspace/site",
-      "next": {
-        "intent": "result",
-        "kind": "tmux",
-        "argv": ["tmux", "capture-pane", "-p", "-J", "-t", "%13", "-S", "-200"]
-      }
-    }
-  ],
-  "warnings": []
-}
-```
-
-### MCP resources
-
-When enabled with `--mcp` or `ILMARI_MCP=1`, Ilmari starts a local-only MCP
-Streamable HTTP server on `127.0.0.1:62778` by default. `--mcp-port <PORT>` or
-`ILMARI_MCP_PORT` selects another port, and `--mcp-port 0` asks the OS for a
-free port. The server publishes its URL to the tmux global option
-`@ilmari_mcp_url`, for example `http://127.0.0.1:62778/mcp`.
-
-The MCP server exposes resources only. It does not expose tools. Resource
-descriptors are kept plain for client compatibility, while resource contents
-carry `_meta.readOnly = true`.
-
-Available resources:
-
-| Resource | Shape |
-| --- | --- |
-| `ilmari://list` | Same JSON as socket `list`. |
-| `ilmari://<session>/<window>/<pane>` | Same JSON as socket `detail`, using sigil-free tmux ids such as `ilmari://1/7/12`. |
-
-Resource subscriptions are supported through MCP `resources/subscribe`.
-Subscribers to a pane URI receive `notifications/resources/updated` when that
-pane resource changes. Subscribers to `ilmari://list` receive
-`notifications/resources/updated` when the list JSON changes and
-`notifications/resources/list_changed` when the visible resource set changes.
-
-State mapping:
-
-| Ilmari status | Consumer state | Next intent |
-| --- | --- | --- |
-| `running` | `running` | `wait` |
-| `waiting-input` | `needs-input` | `inspect` |
-| `finished` | `done` | `result` |
-| `terminated` | `gone` | `cleanup` |
-| `unknown` | `unknown` | `inspect` |
-
-### Pane output privacy
-
-By default, Ilmari captures a small recent tail from supported agent panes with
-`tmux capture-pane` so it can classify waiting states and show the latest output
-excerpt. That pane buffer/history text may contain prompts, command output, file
-paths, tokens, or other sensitive information. If you do not want Ilmari to read
-pane contents, disable output tail capture with `ILMARI_OUTPUT_TAIL=0`; pane
-tails remain enabled by default unless that variable is set to `0`, `false`,
-`no`, or `off`.
-
-Ilmari uses semantic color roles in code, but by default those resolve through
-your terminal's current ANSI palette. If you want explicit colors, provide an
-18-slot CSV palette override using `ILMARI_TUI_PALETTE` or `ILMARI_PALETTE`.
-
-Slot order:
+`--palette`, `ILMARI_TUI_PALETTE`, and `ILMARI_PALETTE` accept an 18-slot CSV
+palette in this order:
 
 ```text
 fg,bg,black,red,green,yellow,blue,magenta,cyan,white,bright_black,bright_red,bright_green,bright_yellow,bright_blue,bright_magenta,bright_cyan,bright_white
@@ -332,8 +261,284 @@ Accepted color formats:
 - `rgb:RR/GG/BB`
 - `rgb:RRRR/GGGG/BBBB`
 
-Behavior:
+Malformed palette values are ignored and Ilmari falls back to the terminal ANSI
+theme.
 
-- `ILMARI_TUI_PALETTE` takes precedence over `ILMARI_PALETTE`
-- empty or malformed palette values are ignored
-- if neither is set, `ilmari` uses the terminal's default ANSI theme
+## Build-time features
+
+The default Cargo build includes the TUI and both publishing endpoints:
+
+```bash
+cargo build
+```
+
+You can remove features when building:
+
+```bash
+cargo build --no-default-features
+cargo build --no-default-features --features tui
+cargo build --no-default-features --features socket
+cargo build --no-default-features --features mcp
+cargo build --no-default-features --features rmcp
+cargo build --no-default-features --features socket,mcp
+cargo build --no-default-features --features tui,socket,mcp
+```
+
+| Feature | Effect |
+| --- | --- |
+| `tui` | Builds the terminal UI and pulls in `ratatui` and `crossterm`. |
+| `socket` | Builds the local Unix JSON socket endpoint. |
+| `mcp` | Builds the loopback MCP resource endpoint and pulls in `rmcp`, `axum`, `tokio`, and `tokio-util`. |
+| `rmcp` | Alias for `mcp`, for builds that name the backing crate explicitly. |
+
+Runtime flags remain parseable when an endpoint is compiled out. Enabling a
+compiled-out endpoint reports a status warning such as `socket support was not
+compiled in` or `MCP support was not compiled in`. Builds without feature `tui`
+run in headless mode.
+
+## Local JSON socket
+
+Enable the socket:
+
+```bash
+ilmari --socket
+```
+
+Run it without the TUI:
+
+```bash
+ilmari --no-tui --socket
+```
+
+The socket is a local Unix-domain socket, not a network listener. By default,
+Ilmari puts it under `$XDG_RUNTIME_DIR` when that variable is set, otherwise
+under `/tmp/ilmari-<user>/<tmux-hash>/ilmari.sock`. When Ilmari owns the
+socket, it publishes the active path to the tmux global option
+`@ilmari_socket_path`:
+
+```bash
+tmux show-option -gqv @ilmari_socket_path
+```
+
+If another live Ilmari process already owns the configured socket path, the
+later process keeps running without taking over that endpoint.
+
+The socket accepts one line command per request and returns one JSON object:
+
+```text
+ping
+list
+ls
+detail 12
+detail %12
+detail tmux:%12
+detail ilmari://1/7/12
+read ilmari://1/7/12
+```
+
+`detail` accepts bare pane numbers, tmux pane ids, `tmux:%12` ids, and Ilmari
+resource URIs. `read` accepts Ilmari resource URIs. Responses use canonical tmux
+pane ids such as `%12`.
+
+`list` returns a compact action queue for consumers. Each item includes the pane
+id, resource URI, consumer state, agent slug, workspace path, and a suggested
+next action:
+
+```json
+{
+  "ok": true,
+  "type": "list",
+  "schema_version": 1,
+  "resource": "ilmari://list",
+  "items": [
+    {
+      "resource": "ilmari://1/7/12",
+      "id": "%12",
+      "state": "needs-input",
+      "agent": "codex",
+      "cwd": "/workspace/ilmari",
+      "next": {
+        "intent": "inspect",
+        "kind": "tmux",
+        "argv": ["tmux", "capture-pane", "-p", "-J", "-t", "%12", "-S", "-80"]
+      }
+    }
+  ],
+  "warnings": []
+}
+```
+
+State mapping:
+
+| Ilmari status | Consumer state | Next intent |
+| --- | --- | --- |
+| `running` | `running` | `wait` |
+| `waiting-input` | `needs-input` | `inspect` |
+| `finished` | `done` | `result` |
+| `terminated` | `gone` | `cleanup` |
+| `unknown` | `unknown` | `inspect` |
+
+## MCP resources
+
+Enable the MCP server:
+
+```bash
+ilmari --no-tui --mcp
+```
+
+By default, Ilmari starts a local-only Streamable HTTP MCP server at
+`http://127.0.0.1:62778/mcp`. Use `--mcp-port <PORT>` or `ILMARI_MCP_PORT` to
+select another port, or `--mcp-port 0` for an OS-assigned free port.
+
+When the server starts, Ilmari publishes the active URL to the tmux global
+option `@ilmari_mcp_url`:
+
+```bash
+tmux show-option -gqv @ilmari_mcp_url
+```
+
+The MCP server exposes resources only. It does not expose tools.
+
+| Resource | Shape |
+| --- | --- |
+| `ilmari://list` | Same JSON as socket `list`. |
+| `ilmari://<session>/<window>/<pane>` | Same JSON as socket `detail`, using sigil-free tmux ids such as `ilmari://1/7/12`. |
+
+Resource descriptors are plain for client compatibility. Resource contents carry
+read-only metadata. Resource subscriptions are supported:
+
+- Subscribers to a pane URI receive `notifications/resources/updated` when that
+  pane resource changes.
+- Subscribers to `ilmari://list` receive `notifications/resources/updated` when
+  the list JSON changes.
+- Subscribers to `ilmari://list` receive `notifications/resources/list_changed`
+  when the visible resource set changes.
+
+## Pane output privacy
+
+By default, Ilmari captures recent output from supported agent panes with
+`tmux capture-pane` so it can classify waiting states and show output excerpts.
+Pane buffer text can contain prompts, command output, file paths, tokens, or
+other sensitive information.
+
+Disable output-tail capture when you do not want Ilmari to read pane contents:
+
+```bash
+ILMARI_OUTPUT_TAIL=0 ilmari
+ilmari --no-output-tail
+```
+
+Disabling output tails can reduce classification quality for adapters that need
+recent terminal text.
+
+The JSON socket is local-only and the default managed socket directories are
+created as private user-owned directories. The MCP server binds to loopback only.
+Both endpoints still expose pane state to local clients that can reach the
+configured socket path or loopback port.
+
+## Troubleshooting
+
+### `no supported agent sessions detected`
+
+Cause: tmux has no visible panes matching enabled agent adapters, or output-tail
+capture is disabled for an adapter that needs recent terminal text.
+
+Fix:
+
+1. Start one of the supported agent CLIs in a tmux pane.
+2. Run `ilmari` from inside tmux.
+3. Re-enable output-tail capture if you disabled it.
+
+### The popup does not open
+
+Cause: tmux popup support needs tmux 3.2 or newer, or the binding is not loaded.
+
+Fix:
+
+1. Check the tmux version:
+
+   ```bash
+   tmux -V
+   ```
+
+2. Reload your tmux config:
+
+   ```bash
+   tmux source-file ~/.tmux.conf
+   ```
+
+3. Confirm `ilmari` is on the `PATH` visible to tmux.
+
+### Headless mode appears to do nothing
+
+Cause: `--no-tui` disables the terminal UI. Without `--socket` or `--mcp`, there
+is no consumer-facing endpoint.
+
+Fix:
+
+```bash
+ilmari --no-tui --socket
+ilmari --no-tui --mcp
+```
+
+### `socket support was not compiled in`
+
+Cause: the binary was built without the `socket` feature.
+
+Fix:
+
+```bash
+cargo build --features socket
+```
+
+### `MCP support was not compiled in`
+
+Cause: the binary was built without the `mcp` feature.
+
+Fix:
+
+```bash
+cargo build --features mcp
+```
+
+### `refusing to use socket directory`
+
+Cause: the configured socket parent directory is not private, is not owned by
+the current user, or is not a directory.
+
+Fix: choose a private socket path or update the directory ownership and
+permissions before starting Ilmari.
+
+## Development
+
+Run the same checks as CI:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+```
+
+For endpoint feature coverage, also run:
+
+```bash
+cargo test --all-features
+```
+
+Source map:
+
+| Area | Source |
+| --- | --- |
+| CLI flags and help text | [`src/cli.rs`](src/cli.rs) |
+| Runtime config, refresh loop, key handling | [`src/app.rs`](src/app.rs) |
+| Agent support and classification | [`src/agents/mod.rs`](src/agents/mod.rs), [`src/agents/adapters`](src/agents/adapters) |
+| Shared status and view model types | [`src/model.rs`](src/model.rs) |
+| tmux snapshot, output capture, and pane jumps | [`src/tmux.rs`](src/tmux.rs) |
+| Unix JSON socket and published JSON shapes | [`src/ipc.rs`](src/ipc.rs) |
+| MCP resource server | [`src/mcp.rs`](src/mcp.rs) |
+| Terminal rendering and footer controls | [`src/ui.rs`](src/ui.rs) |
+| Palette parsing | [`src/colors.rs`](src/colors.rs) |
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
