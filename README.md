@@ -98,6 +98,33 @@ Expected output:
 ilmari <version>
 ```
 
+
+### TPM tmux plugin
+
+If you manage tmux plugins with [TPM](https://github.com/tmux-plugins/tpm), you
+can install Ilmari as a small tmux plugin that wires the popup binding for you.
+The plugin still expects the `ilmari` binary to already be installed and visible
+on tmux's `PATH`:
+
+```tmux
+set -g @plugin 'bnomei/ilmari'
+```
+
+Reload tmux and install the plugin with `prefix + I`. By default it binds
+`prefix + i` to the same popup command shown in the quickstart. Configure these
+options before TPM initializes plugins:
+
+```tmux
+set -g @ilmari_key 'I'
+set -g @ilmari_command '/opt/homebrew/bin/ilmari --no-git'
+set -g @ilmari_popup_width '90%'
+set -g @ilmari_popup_height '85%'
+set -g @ilmari_bind_key 'on'
+```
+
+Set `@ilmari_bind_key` to `off` if you want TPM to install the plugin but prefer
+to define your own binding.
+
 ### 2. Add a tmux popup binding
 
 Add this to `~/.tmux.conf`:
