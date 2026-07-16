@@ -4,13 +4,15 @@
 //! render snapshot rebuilt on every refresh cycle.
 
 use crate::tmux::PaneSnapshot;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Supported coding-agent identity used for detection, display, and process matching.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentKind {
     Codex,
     Amp,
@@ -114,7 +116,8 @@ impl AgentKind {
 }
 
 /// Classified lifecycle state for one agent pane after adapter output analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SessionStatus {
     Running,
     WaitingInput,
@@ -155,7 +158,7 @@ pub struct SessionRecord {
 }
 
 /// CPU and resident memory sample for one process, in tenths-of-percent and KiB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceUsage {
     pub cpu_tenths_percent: u32,
     pub memory_kib: u64,
@@ -174,7 +177,7 @@ impl ResourceUsage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtaskProcess {
     pub pid: u32,
     pub depth: usize,
@@ -183,14 +186,15 @@ pub struct SubtaskProcess {
 }
 
 /// Rolled-up process usage for the agent binary and its descendant subtasks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionProcessUsage {
     pub agent: ResourceUsage,
     pub spawned: ResourceUsage,
     pub subtasks: Vec<SubtaskProcess>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentDetailTone {
     Neutral,
     AmpDeep,
@@ -198,7 +202,7 @@ pub enum AgentDetailTone {
     AmpRush,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDetail {
     pub label: String,
     pub tone: AgentDetailTone,

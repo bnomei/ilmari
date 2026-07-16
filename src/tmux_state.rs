@@ -1,0 +1,478 @@
+//! Provider-neutral tmux badge and compact status publication.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::config::RendererConfig;
+use crate::model::{SessionRecord, SessionStatus};
+use crate::tmux;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderSettings {
+    pub badges_enabled: bool,
+    pub status_enabled: bool,
+    pub badge_running: String,
+    pub badge_waiting: String,
+    pub badge_finished: String,
+    pub status_running: String,
+    pub status_waiting: String,
+    pub status_finished: String,
+    pub badge_separator: String,
+    pub status_separator: String,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self {
+        Self {
+            badges_enabled: true,
+            status_enabled: true,
+            badge_running: "#[fg=blue]● {agent}#[default]".to_string(),
+            badge_waiting: "#[fg=yellow]◆ {agent}#[default]".to_string(),
+            badge_finished: "#[fg=green]✓ {agent}#[default]".to_string(),
+            status_running: "#[fg=blue]● {count}#[default]".to_string(),
+            status_waiting: "#[fg=yellow]◆ {count}#[default]".to_string(),
+            status_finished: "#[fg=green]✓ {count}#[default]".to_string(),
+            badge_separator: " ".to_string(),
+            status_separator: " ".to_string(),
+        }
+    }
+}
+
+impl RenderSettings {
+    pub fn from_config(badges: &RendererConfig, status: &RendererConfig) -> Self {
+        Self {
+            badges_enabled: badges.enabled,
+            status_enabled: status.enabled,
+            badge_running: styled(&badges.running.style, &badges.running.symbol, "{agent}"),
+            badge_waiting: styled(
+                &badges.waiting_input.style,
+                &badges.waiting_input.symbol,
+                "{agent}",
+            ),
+            badge_finished: styled(&badges.finished.style, &badges.finished.symbol, "{agent}"),
+            status_running: styled(&status.running.style, &status.running.symbol, "{count}"),
+            status_waiting: styled(
+                &status.waiting_input.style,
+                &status.waiting_input.symbol,
+                "{count}",
+            ),
+            status_finished: styled(&status.finished.style, &status.finished.symbol, "{count}"),
+            badge_separator: badges.separator.clone(),
+            status_separator: status.separator.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusCounts {
+    pub running: usize,
+    pub waiting: usize,
+    pub finished: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PaneAttention {
+    last_status: Option<SessionStatus>,
+    waiting: bool,
+    finished: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct TmuxStatePublisher {
+    panes: HashMap<String, PaneAttention>,
+    last_sessions: HashMap<String, SessionRecord>,
+    current_session_ids: HashSet<String>,
+    previously_published: HashSet<String>,
+    badges_enabled: Option<bool>,
+    status_enabled: Option<bool>,
+}
+
+impl TmuxStatePublisher {
+    pub fn publish(
+        &mut self,
+        sessions: &[SessionRecord],
+        live_panes: &[tmux::PaneSnapshot],
+        settings: &RenderSettings,
+    ) {
+        let live_pane_ids =
+            live_panes.iter().map(|pane| pane.pane_id.clone()).collect::<HashSet<_>>();
+        let focused = tmux::focused_pane_ids();
+        let live_sessions = sessions
+            .iter()
+            .filter(|session| live_pane_ids.contains(&session.pane.pane_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.panes.retain(|pane_id, _| live_pane_ids.contains(pane_id));
+        self.last_sessions.retain(|pane_id, _| live_pane_ids.contains(pane_id));
+        for session in &live_sessions {
+            self.last_sessions.insert(session.pane.pane_id.clone(), session.clone());
+        }
+        for pane in live_panes {
+            if let Some(session) = self.last_sessions.get_mut(&pane.pane_id) {
+                session.pane = pane.clone();
+            }
+        }
+        self.current_session_ids =
+            live_sessions.iter().map(|session| session.pane.pane_id.clone()).collect();
+        match focused {
+            Ok(focused) => self.update_attention(&live_sessions, &focused, true),
+            Err(_) => self.update_attention(&live_sessions, &HashSet::new(), false),
+        }
+        let render_sessions = self.sessions_for_render();
+        let rendered = self.render(&render_sessions, settings);
+        self.publish_rendered(&rendered, &live_pane_ids, settings);
+    }
+
+    /// Acknowledge transient focus changes between full collection refreshes.
+    pub fn acknowledge_focus(&mut self, settings: &RenderSettings) {
+        let Ok(state) = tmux::focus_and_renderer_overrides() else {
+            return;
+        };
+        let mut changed = false;
+        for pane_id in state.focused_pane_ids {
+            if let Some(attention) = self.panes.get_mut(&pane_id) {
+                changed |= attention.waiting || attention.finished;
+                attention.waiting = false;
+                attention.finished = false;
+            }
+        }
+        let badges_enabled = option_override_value(state.badges_enabled.as_deref())
+            .unwrap_or(settings.badges_enabled);
+        let status_enabled = option_override_value(state.status_enabled.as_deref())
+            .unwrap_or(settings.status_enabled);
+        let rendering_changed = self.badges_enabled != Some(badges_enabled)
+            || self.status_enabled != Some(status_enabled);
+        if !changed && !rendering_changed {
+            return;
+        }
+        let sessions = self.sessions_for_render();
+        let rendered = self.render(&sessions, settings);
+        let live_pane_ids = self.previously_published.clone();
+        self.publish_rendered(&rendered, &live_pane_ids, settings);
+    }
+
+    fn sessions_for_render(&self) -> Vec<SessionRecord> {
+        let mut sessions = self
+            .last_sessions
+            .iter()
+            .filter_map(|(pane_id, session)| {
+                let attention = self.panes.get(pane_id).copied().unwrap_or_default();
+                (self.current_session_ids.contains(pane_id)
+                    || attention.waiting
+                    || attention.finished)
+                    .then(|| session.clone())
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by(|left, right| left.pane.pane_id.cmp(&right.pane.pane_id));
+        sessions
+    }
+
+    fn publish_rendered(
+        &mut self,
+        rendered: &RenderedState,
+        live_pane_ids: &HashSet<String>,
+        settings: &RenderSettings,
+    ) {
+        for pane_id in self.previously_published.difference(live_pane_ids) {
+            let _ = tmux::set_pane_option(pane_id, "@ilmari_state", None);
+            let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", None);
+        }
+        for pane_id in live_pane_ids {
+            if let Some((state, badge)) = rendered.pane_values.get(pane_id) {
+                let _ = tmux::set_pane_option(pane_id, "@ilmari_state", Some(state));
+                let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", Some(badge));
+            } else {
+                let _ = tmux::set_pane_option(pane_id, "@ilmari_state", None);
+                let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", None);
+            }
+        }
+
+        let badges_enabled =
+            option_override("@ilmari_badges_enabled").unwrap_or(settings.badges_enabled);
+        let status_enabled =
+            option_override("@ilmari_status_enabled").unwrap_or(settings.status_enabled);
+        self.badges_enabled = Some(badges_enabled);
+        self.status_enabled = Some(status_enabled);
+        let _ = tmux::set_global_option(
+            "@ilmari_window_badges",
+            if badges_enabled { &rendered.window_fragment } else { "" },
+        );
+        let _ = tmux::set_global_option(
+            "@ilmari_status_summary",
+            if status_enabled { &rendered.status_summary } else { "" },
+        );
+        let _ =
+            tmux::set_global_option("@ilmari_running_count", &rendered.counts.running.to_string());
+        let _ =
+            tmux::set_global_option("@ilmari_waiting_count", &rendered.counts.waiting.to_string());
+        let _ = tmux::set_global_option(
+            "@ilmari_finished_count",
+            &rendered.counts.finished.to_string(),
+        );
+        self.previously_published = live_pane_ids.clone();
+    }
+
+    fn update_attention(
+        &mut self,
+        sessions: &[SessionRecord],
+        focused: &HashSet<String>,
+        allow_new_attention: bool,
+    ) {
+        for pane_id in focused {
+            if let Some(attention) = self.panes.get_mut(pane_id) {
+                attention.waiting = false;
+                attention.finished = false;
+            }
+        }
+
+        for session in sessions {
+            let attention = self.panes.entry(session.pane.pane_id.clone()).or_default();
+            let transitioned = attention.last_status.is_some_and(|last| last != session.status);
+            if allow_new_attention && transitioned && !focused.contains(&session.pane.pane_id) {
+                match session.status {
+                    SessionStatus::WaitingInput => attention.waiting = true,
+                    SessionStatus::Finished => attention.finished = true,
+                    _ => {}
+                }
+            }
+            attention.last_status = Some(session.status);
+        }
+    }
+
+    fn render(&self, sessions: &[SessionRecord], settings: &RenderSettings) -> RenderedState {
+        let mut counts = StatusCounts::default();
+        let mut windows: HashMap<&str, Vec<String>> = HashMap::new();
+        let mut pane_values = HashMap::new();
+
+        for session in sessions {
+            let attention = self.panes.get(&session.pane.pane_id).copied().unwrap_or_default();
+            let (state, format) = if attention.waiting {
+                counts.waiting += 1;
+                ("waiting-input", Some(settings.badge_waiting.as_str()))
+            } else if attention.finished {
+                counts.finished += 1;
+                ("finished", Some(settings.badge_finished.as_str()))
+            } else if session.status == SessionStatus::Running {
+                counts.running += 1;
+                ("running", Some(settings.badge_running.as_str()))
+            } else {
+                (session.status.as_str(), None)
+            };
+            let badge = format.map(|format| render_badge(format, session)).unwrap_or_default();
+            if !badge.is_empty() {
+                windows.entry(&session.pane.window_id).or_default().push(badge.clone());
+            }
+            pane_values.insert(session.pane.pane_id.clone(), (state.to_string(), badge));
+        }
+
+        let mut window_ids = windows.keys().copied().collect::<Vec<_>>();
+        window_ids.sort_unstable();
+        let window_fragment = window_ids
+            .into_iter()
+            .map(|window_id| {
+                let badges = windows
+                    .get(window_id)
+                    .cloned()
+                    .unwrap_or_default()
+                    .join(&settings.badge_separator)
+                    .replace(',', "#,");
+                "#{?#{==:#{window_id},WINDOW},BADGES,}"
+                    .replace("WINDOW", window_id)
+                    .replace("BADGES", &badges)
+            })
+            .collect::<String>();
+
+        let mut status_parts = Vec::new();
+        if counts.waiting > 0 {
+            status_parts.push(render_count(&settings.status_waiting, counts.waiting));
+        }
+        if counts.finished > 0 {
+            status_parts.push(render_count(&settings.status_finished, counts.finished));
+        }
+        if counts.running > 0 {
+            status_parts.push(render_count(&settings.status_running, counts.running));
+        }
+
+        RenderedState {
+            counts,
+            pane_values,
+            window_fragment,
+            status_summary: status_parts.join(&settings.status_separator),
+        }
+    }
+}
+
+struct RenderedState {
+    counts: StatusCounts,
+    pane_values: HashMap<String, (String, String)>,
+    window_fragment: String,
+    status_summary: String,
+}
+
+fn render_badge(format: &str, session: &SessionRecord) -> String {
+    format
+        .replace("{agent}", session.kind.display_name())
+        .replace("{pane}", &session.pane.pane_id)
+        .replace("{status}", session.status.as_str())
+}
+
+fn render_count(format: &str, count: usize) -> String {
+    format.replace("{count}", &count.to_string())
+}
+
+fn styled(style: &str, symbol: &str, suffix: &str) -> String {
+    let style = style.trim();
+    let prefix = if style.is_empty() { String::new() } else { format!("#[{style}]") };
+    format!("{prefix}{symbol} {suffix}#[default]")
+}
+
+fn option_override(name: &str) -> Option<bool> {
+    option_override_value(tmux::global_option(name).ok().as_deref())
+}
+
+fn option_override_value(value: Option<&str>) -> Option<bool> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "1" | "on" | "true" | "yes" => Some(true),
+        "0" | "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RenderSettings, TmuxStatePublisher};
+    use crate::model::{AgentKind, SessionRecord, SessionStatus};
+    use crate::tmux::PaneSnapshot;
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    #[test]
+    fn sticky_attention_acknowledges_exact_focused_pane_and_does_not_recreate_unchanged() {
+        let mut publisher = TmuxStatePublisher::default();
+        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+        let waiting = session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput);
+        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        assert_eq!(
+            publisher
+                .render(std::slice::from_ref(&waiting), &RenderSettings::default())
+                .counts
+                .waiting,
+            1
+        );
+
+        publisher.update_attention(
+            std::slice::from_ref(&waiting),
+            &HashSet::from(["%1".to_string()]),
+            true,
+        );
+        assert_eq!(
+            publisher
+                .render(std::slice::from_ref(&waiting), &RenderSettings::default())
+                .counts
+                .waiting,
+            0
+        );
+        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        assert_eq!(
+            publisher
+                .render(std::slice::from_ref(&waiting), &RenderSettings::default())
+                .counts
+                .waiting,
+            0
+        );
+    }
+
+    #[test]
+    fn focus_query_failure_neither_creates_nor_clears_attention() {
+        let mut publisher = TmuxStatePublisher::default();
+        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+
+        let waiting = session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput);
+        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), false);
+        assert_eq!(
+            publisher
+                .render(std::slice::from_ref(&waiting), &RenderSettings::default())
+                .counts
+                .waiting,
+            0
+        );
+
+        let running_again = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        publisher.update_attention(std::slice::from_ref(&running_again), &HashSet::new(), true);
+        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        assert_eq!(
+            publisher
+                .render(std::slice::from_ref(&waiting), &RenderSettings::default())
+                .counts
+                .waiting,
+            1
+        );
+    }
+
+    #[test]
+    fn finished_attention_retains_metadata_after_agent_record_disappears_until_focus() {
+        let mut publisher = TmuxStatePublisher::default();
+        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        publisher.last_sessions.insert("%1".to_string(), running.clone());
+        publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+        let finished = session("%1", "@1", AgentKind::Codex, SessionStatus::Finished);
+        publisher.last_sessions.insert("%1".to_string(), finished.clone());
+        publisher.update_attention(std::slice::from_ref(&finished), &HashSet::new(), true);
+
+        publisher.current_session_ids.clear();
+        let retained = publisher.sessions_for_render();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(publisher.render(&retained, &RenderSettings::default()).counts.finished, 1);
+
+        publisher.update_attention(&[], &HashSet::from(["%1".to_string()]), true);
+        assert!(publisher.sessions_for_render().is_empty());
+    }
+
+    #[test]
+    fn aggregates_multiple_providers_in_one_window_with_priority_counts() {
+        let mut publisher = TmuxStatePublisher::default();
+        let initial = vec![
+            session("%1", "@1", AgentKind::Codex, SessionStatus::Running),
+            session("%2", "@1", AgentKind::ClaudeCode, SessionStatus::Running),
+        ];
+        publisher.update_attention(&initial, &HashSet::new(), true);
+        let changed = vec![
+            session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput),
+            session("%2", "@1", AgentKind::ClaudeCode, SessionStatus::Running),
+        ];
+        publisher.update_attention(&changed, &HashSet::new(), true);
+        let rendered = publisher.render(&changed, &RenderSettings::default());
+        assert_eq!(rendered.counts.waiting, 1);
+        assert_eq!(rendered.counts.running, 1);
+        assert!(rendered.window_fragment.contains("Codex"));
+        assert!(rendered.window_fragment.contains("Claude Code"));
+        assert!(
+            rendered.status_summary.find("◆").unwrap() < rendered.status_summary.find("●").unwrap()
+        );
+    }
+
+    fn session(
+        pane_id: &str,
+        window_id: &str,
+        kind: AgentKind,
+        status: SessionStatus,
+    ) -> SessionRecord {
+        let now = Instant::now();
+        SessionRecord {
+            pane: PaneSnapshot::parse(&format!(
+                "{pane_id}\t1\t$1\tdev\t{window_id}\tagents\t0\t/tmp\tcodex\ttitle"
+            ))
+            .unwrap(),
+            kind,
+            status,
+            detail: None,
+            output_excerpt: None,
+            process_usage: None,
+            output_fingerprint: None,
+            last_changed_at: now,
+            last_seen_at: now,
+            retained_until: None,
+        }
+    }
+}

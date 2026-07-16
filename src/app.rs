@@ -8,6 +8,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -29,6 +30,7 @@ use time::{OffsetDateTime, UtcOffset};
 
 use crate::agents::SessionTracker;
 use crate::colors::Palette;
+use crate::config::{LoadedConfig, ResolvedViews, ViewOverrides};
 use crate::git::{GitSummaryCache, GitSummaryReport};
 use crate::ipc::{
     self, IpcConfig, IpcError, IpcServer, PublishedState, PublishedStateHandle, StateBuildOptions,
@@ -42,11 +44,14 @@ use crate::process::{self, ProcessTree};
 #[cfg(feature = "tui")]
 use crate::sound;
 use crate::tmux::{self, PaneSnapshot};
+use crate::tmux_state::{RenderSettings, TmuxStatePublisher};
 #[cfg(feature = "tui")]
 use crate::ui;
+use crate::view_state::{ViewState, ViewStateStore};
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 type PaneSnapshotCollector = fn() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError>;
 type OutputTailCollector =
     fn(&[PaneSnapshot], &SessionTracker, &HashMap<String, AgentKind>) -> tmux::OutputTailCapture;
@@ -60,51 +65,108 @@ pub struct AppConfig {
     pub quit_on_activate: bool,
     pub tui_enabled: bool,
     pub show_git: bool,
+    pub git_scanner_enabled: bool,
     pub bell_enabled: bool,
     pub output_tail_capture_enabled: bool,
+    pub views: ResolvedViews,
+    pub reset_views: ResolvedViews,
+    pub view_state_store: ViewStateStore,
+    pub view_state_warning: Option<String>,
+    pub render_settings: RenderSettings,
+    pub daemon_mode: bool,
     pub ipc: IpcConfig,
     pub mcp: McpConfig,
 }
 
 impl AppConfig {
-    pub fn from_env() -> Self {
+    pub fn load(view_overrides: ViewOverrides) -> Result<Self> {
         let env = env::vars().collect::<BTreeMap<_, _>>();
-        Self::from_env_map(&env)
+        Self::from_env_map(&env, view_overrides)
     }
 
-    pub(crate) fn from_env_map(env: &BTreeMap<String, String>) -> Self {
-        Self {
-            palette: Palette::from_env_map(env),
-            refresh_interval: refresh_interval_from_var(
-                env.get("ILMARI_REFRESH_SECONDS").map(String::as_str),
-            ),
-            process_refresh_interval: process_refresh_interval_from_var(
-                env.get("ILMARI_PROCESS_REFRESH_SECONDS").map(String::as_str),
-            ),
+    pub(crate) fn from_env_map(
+        env: &BTreeMap<String, String>,
+        view_overrides: ViewOverrides,
+    ) -> Result<Self> {
+        let loaded = LoadedConfig::load_from_env_map(env)?;
+        let store = ViewStateStore::from_env_map(env);
+        let remembered = store.load();
+        let views = loaded.resolve_views(view_overrides, remembered.state.as_ref());
+        let reset_views = loaded.resolve_views(view_overrides, None);
+        let values = loaded.values;
+        let socket_path =
+            values.socket.path.clone().unwrap_or_else(|| IpcConfig::runtime_default_path(env));
+        Ok(Self {
+            palette: values.palette.clone(),
+            refresh_interval: values.runtime.refresh_interval(),
+            process_refresh_interval: values.runtime.process_refresh_interval(),
             quit_on_activate: quit_on_activate_from_vars(
                 env.get("TMUX").map(String::as_str),
                 env.get("TMUX_PANE").map(String::as_str),
             ),
-            tui_enabled: tui_enabled_from_var(env.get("ILMARI_TUI").map(String::as_str)),
+            tui_enabled: values.tui.enabled,
+            show_git: values.scanner.git && views.values.git,
+            git_scanner_enabled: values.scanner.git,
+            bell_enabled: values.tui.bell,
+            output_tail_capture_enabled: values.scanner.output_tail,
+            views,
+            reset_views,
+            view_state_store: store,
+            view_state_warning: remembered.warning,
+            render_settings: RenderSettings::from_config(&values.badges, &values.status),
+            daemon_mode: false,
+            ipc: IpcConfig { enabled: values.socket.enabled, socket_path },
+            mcp: McpConfig { enabled: values.mcp.enabled, port: values.mcp.port },
+        })
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            palette: Palette::default(),
+            refresh_interval: DEFAULT_REFRESH_INTERVAL,
+            process_refresh_interval: DEFAULT_PROCESS_REFRESH_INTERVAL,
+            quit_on_activate: false,
+            tui_enabled: cfg!(feature = "tui"),
             show_git: true,
+            git_scanner_enabled: true,
             bell_enabled: true,
-            output_tail_capture_enabled: output_tail_capture_enabled_from_var(
-                env.get("ILMARI_OUTPUT_TAIL").map(String::as_str),
-            ),
-            ipc: IpcConfig::from_env_map(env),
-            mcp: McpConfig::from_env_map(env),
+            output_tail_capture_enabled: true,
+            views: ResolvedViews::default(),
+            reset_views: ResolvedViews::default(),
+            view_state_store: ViewStateStore::disabled(),
+            view_state_warning: None,
+            render_settings: RenderSettings::default(),
+            daemon_mode: false,
+            ipc: IpcConfig::disabled(),
+            mcp: McpConfig::disabled(),
         }
     }
 }
 
 /// Start Ilmari in TUI mode when enabled, otherwise run the headless refresh loop.
-pub fn run(config: AppConfig) -> Result<()> {
+pub fn run(mut config: AppConfig) -> Result<()> {
+    config.ipc.socket_path = ipc::resolve_daemon_socket_path(&config.ipc.socket_path);
     #[cfg(feature = "tui")]
     if config.tui_enabled {
         return run_tui(config);
     }
 
-    run_headless(config)
+    run_headless(config, false)
+}
+
+/// Run the foreground daemon collector until stopped or its tmux server disappears.
+pub fn run_daemon(mut config: AppConfig) -> Result<()> {
+    config.tui_enabled = false;
+    config.bell_enabled = false;
+    config.ipc.enabled = true;
+    config.show_git = config.git_scanner_enabled;
+    config.views.values.git = config.git_scanner_enabled;
+    config.views.values.stats = true;
+    config.daemon_mode = true;
+    install_shutdown_handlers();
+    run_headless(config, true)
 }
 
 #[cfg(feature = "tui")]
@@ -116,22 +178,81 @@ fn run_tui(config: AppConfig) -> Result<()> {
     result
 }
 
-fn run_headless(mut config: AppConfig) -> Result<()> {
+fn run_headless(mut config: AppConfig, daemon_mode: bool) -> Result<()> {
     config.tui_enabled = false;
     config.bell_enabled = false;
     let mut app = App::from_config(config);
+    app.publish_tmux_state = daemon_mode;
+    if daemon_mode && app._ipc_server.is_none() {
+        for _ in 0..20 {
+            if ipc::daemon_is_healthy(&app.daemon_socket_path) {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        anyhow::bail!("failed to acquire the per-tmux-server daemon socket");
+    }
     app.refresh(true);
+    let mut missing_tmux_proofs = 0_u8;
+    let mut last_tmux_probe = Instant::now();
+    let mut last_focus_probe = Instant::now();
 
     loop {
-        let timeout = app.poll_timeout();
+        if daemon_mode
+            && (SHUTDOWN_SIGNAL.load(AtomicOrdering::Relaxed) || app.shutdown_requested())
+        {
+            break;
+        }
+        let timeout = if daemon_mode {
+            app.poll_timeout().min(Duration::from_millis(100))
+        } else {
+            app.poll_timeout()
+        };
         if !timeout.is_zero() {
             thread::sleep(timeout);
         }
         if app.refresh_due() {
             app.refresh(false);
         }
+        if daemon_mode && last_focus_probe.elapsed() >= Duration::from_millis(100) {
+            app.tmux_publisher.acknowledge_focus(&app.render_settings);
+            last_focus_probe = Instant::now();
+        }
+        if daemon_mode && last_tmux_probe.elapsed() >= Duration::from_secs(1) {
+            if tmux::server_is_alive() {
+                missing_tmux_proofs = 0;
+            } else {
+                missing_tmux_proofs = missing_tmux_proofs.saturating_add(1);
+                if missing_tmux_proofs >= 3 {
+                    break;
+                }
+            }
+            last_tmux_probe = Instant::now();
+        }
+    }
+
+    if daemon_mode && tmux::server_is_alive() {
+        tmux::clear_published_state();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_shutdown_handlers() {
+    extern "C" fn handle_signal(_signal: libc::c_int) {
+        SHUTDOWN_SIGNAL.store(true, AtomicOrdering::Relaxed);
+    }
+    // SAFETY: the handler only stores to a lock-free atomic and is valid for signals.
+    unsafe {
+        let handler = handle_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGHUP, handler);
     }
 }
+
+#[cfg(not(unix))]
+fn install_shutdown_handlers() {}
 
 #[cfg(feature = "tui")]
 fn run_app(terminal: &mut DefaultTerminal, config: AppConfig) -> Result<()> {
@@ -182,6 +303,7 @@ struct App {
     pane_jump_digits: Option<String>,
     show_app: bool,
     show_git: bool,
+    git_scanner_enabled: bool,
     show_detail: bool,
     show_time: bool,
     show_output: bool,
@@ -189,8 +311,12 @@ struct App {
     show_app_pinned: bool,
     show_detail_pinned: bool,
     show_stats_pinned: bool,
+    view_state_store: ViewStateStore,
+    view_remember: bool,
+    reset_views: ResolvedViews,
     bell_enabled: bool,
     output_tail_capture_enabled: bool,
+    daemon_socket_path: PathBuf,
     published_state: PublishedStateHandle,
     published_revision: u64,
     _ipc_server: Option<IpcServer>,
@@ -199,8 +325,12 @@ struct App {
     ipc_warning: Option<String>,
     mcp_warning: Option<String>,
     hydrated: bool,
-    // Survives tmux snapshot errors: `sessions` is cleared on failure, but this map
-    // keeps the last known status per pane so post-outage transitions still ring bells.
+    has_good_rows: bool,
+    render_settings: RenderSettings,
+    tmux_publisher: TmuxStatePublisher,
+    publish_tmux_state: bool,
+    daemon_mode: bool,
+    // Survives tmux snapshot errors so post-outage transitions still ring bells.
     alert_baseline: HashMap<String, SessionStatus>,
 }
 
@@ -360,25 +490,15 @@ impl ProcessUsageCache {
 
 impl Default for App {
     fn default() -> Self {
-        Self::from_config(AppConfig {
-            palette: Palette::default(),
-            refresh_interval: DEFAULT_REFRESH_INTERVAL,
-            process_refresh_interval: DEFAULT_PROCESS_REFRESH_INTERVAL,
-            quit_on_activate: false,
-            tui_enabled: cfg!(feature = "tui"),
-            show_git: true,
-            bell_enabled: true,
-            output_tail_capture_enabled: true,
-            ipc: IpcConfig::disabled(),
-            mcp: McpConfig::disabled(),
-        })
+        Self::from_config(AppConfig::default())
     }
 }
 
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 impl App {
     fn from_config(config: AppConfig) -> Self {
-        Self::new_with_process_refresh(
+        let views = config.views.clone();
+        let mut app = Self::new_internal(
             config.palette,
             config.refresh_interval,
             config.process_refresh_interval,
@@ -389,7 +509,30 @@ impl App {
             config.output_tail_capture_enabled,
             config.ipc,
             config.mcp,
-        )
+            config.daemon_mode,
+        );
+        app.show_app = views.values.app;
+        app.show_git = config.show_git && views.values.git;
+        app.git_scanner_enabled = config.git_scanner_enabled;
+        app.show_detail = views.values.detail;
+        app.show_time = views.values.time;
+        app.show_output = views.values.output;
+        app.show_stats = views.values.stats;
+        app.show_app_pinned = views.pinned.app;
+        app.show_detail_pinned = views.pinned.detail;
+        app.show_stats_pinned = views.pinned.stats;
+        app.view_state_store = config.view_state_store;
+        app.view_remember = views.remember;
+        app.reset_views = config.reset_views;
+        app.render_settings = config.render_settings;
+        if let Some(warning) = config.view_state_warning {
+            app.headless_warning = Some(match app.headless_warning.take() {
+                Some(existing) => format!("{existing}; {warning}"),
+                None => warning,
+            });
+        }
+        app.refresh_view_preferences();
+        app
     }
 
     #[cfg(test)]
@@ -414,6 +557,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn new_with_process_refresh(
         palette: Palette,
         refresh_interval: Duration,
@@ -426,10 +570,42 @@ impl App {
         ipc_config: IpcConfig,
         mcp_config: McpConfig,
     ) -> Self {
+        Self::new_internal(
+            palette,
+            refresh_interval,
+            process_refresh_interval,
+            quit_on_activate,
+            tui_enabled,
+            show_git,
+            bell_enabled,
+            output_tail_capture_enabled,
+            ipc_config,
+            mcp_config,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_internal(
+        palette: Palette,
+        refresh_interval: Duration,
+        process_refresh_interval: Duration,
+        quit_on_activate: bool,
+        tui_enabled: bool,
+        show_git: bool,
+        bell_enabled: bool,
+        output_tail_capture_enabled: bool,
+        ipc_config: IpcConfig,
+        mcp_config: McpConfig,
+        daemon_mode: bool,
+    ) -> Self {
         let mut model = AppModel::placeholder();
         model.refresh_interval = refresh_interval;
         let status_line = model.status_line.clone();
-        let published_state = PublishedStateHandle::new(PublishedState::empty(refresh_interval));
+        let published_state = PublishedStateHandle::new(
+            PublishedState::empty(refresh_interval).with_daemon_role(daemon_mode),
+        );
+        let daemon_socket_path = ipc_config.socket_path.clone();
         let (ipc_server, ipc_warning) = start_ipc_server(&ipc_config, published_state.clone());
         let (mcp_server, mcp_warning) = start_mcp_server(&mcp_config, published_state.clone());
         let headless_warning = (!tui_enabled && !ipc_config.enabled && !mcp_config.enabled)
@@ -454,6 +630,7 @@ impl App {
             pane_jump_digits: None,
             show_app: false,
             show_git,
+            git_scanner_enabled: true,
             show_detail: false,
             show_time: true,
             show_output: true,
@@ -461,8 +638,12 @@ impl App {
             show_app_pinned: false,
             show_detail_pinned: false,
             show_stats_pinned: false,
+            view_state_store: ViewStateStore::disabled(),
+            view_remember: false,
+            reset_views: ResolvedViews::default(),
             bell_enabled,
             output_tail_capture_enabled,
+            daemon_socket_path,
             published_state,
             published_revision: 0,
             _ipc_server: ipc_server,
@@ -471,6 +652,11 @@ impl App {
             ipc_warning,
             mcp_warning,
             hydrated: false,
+            has_good_rows: false,
+            render_settings: RenderSettings::default(),
+            tmux_publisher: TmuxStatePublisher::default(),
+            publish_tmux_state: false,
+            daemon_mode,
             alert_baseline: HashMap::new(),
         }
     }
@@ -487,6 +673,10 @@ impl App {
 
     fn refresh_due(&self) -> bool {
         self.model.last_refresh.elapsed() >= self.model.refresh_interval
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        self._ipc_server.as_ref().is_some_and(IpcServer::shutdown_requested)
     }
 
     #[cfg(feature = "tui")]
@@ -544,6 +734,11 @@ impl App {
                         if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                     {
                         self.toggle_show_stats()
+                    }
+                    (KeyCode::Char('R'), mods)
+                        if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        self.reset_remembered_views()
                     }
                     (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.move_selection(1),
                     (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.move_selection(-1),
@@ -609,6 +804,39 @@ impl App {
         let refreshed_at = Instant::now();
         let refreshed_at_wallclock = SystemTime::now();
         let previous_statuses = self.alert_baseline.clone();
+
+        if self._ipc_server.is_none() {
+            match ipc::request_snapshot(&self.daemon_socket_path) {
+                Ok(snapshot) => {
+                    let (sessions, git_summaries, mut warnings) =
+                        snapshot.into_runtime(refreshed_at);
+                    warnings.extend(
+                        self.headless_warning
+                            .iter()
+                            .chain(self.ipc_warning.iter())
+                            .chain(self.mcp_warning.iter())
+                            .cloned(),
+                    );
+                    self.sessions = sessions;
+                    normalize_expanded_pane_ids(&mut self.expanded_pane_ids, &self.sessions);
+                    self.emit_bells(count_alert_transitions(&previous_statuses, &self.sessions));
+                    self.alert_baseline = current_statuses(&self.sessions);
+                    let status_line = warnings.join("; ");
+                    self.has_good_rows = true;
+                    self.sync_model(
+                        status_line,
+                        if self.show_git { git_summaries } else { Vec::new() },
+                        refreshed_at,
+                        refreshed_at_wallclock,
+                    );
+                    return;
+                }
+                Err(_error) => {
+                    // The daemon is an acceleration source. Direct scanning below remains
+                    // authoritative fallback and is retried on every refresh.
+                }
+            }
+        }
 
         match (self.collect_pane_snapshots)() {
             Ok(collection) => {
@@ -683,15 +911,22 @@ impl App {
                 };
 
                 self.sync_model(status_line, git_summaries, refreshed_at, refreshed_at_wallclock);
+                if self.publish_tmux_state {
+                    self.tmux_publisher.publish(&self.sessions, &panes, &self.render_settings);
+                }
+                self.has_good_rows = true;
             }
             Err(error) => {
-                self.sessions.clear();
-                self.selected_pane_id = None;
-                self.expanded_pane_ids.clear();
-                self.pane_jump_digits = None;
+                let warning = format!("tmux snapshot failed: {error}");
+                if !self.has_good_rows {
+                    self.sessions.clear();
+                    self.selected_pane_id = None;
+                    self.expanded_pane_ids.clear();
+                    self.pane_jump_digits = None;
+                }
                 self.sync_model(
-                    format!("tmux snapshot failed: {error}"),
-                    Vec::new(),
+                    warning,
+                    self.git_summaries.clone(),
                     refreshed_at,
                     refreshed_at_wallclock,
                 );
@@ -721,7 +956,9 @@ impl App {
             refreshed_at,
             refresh_interval: self.model.refresh_interval,
             revision: self.published_revision,
-        });
+        })
+        .with_git_summaries(&self.git_summaries)
+        .with_daemon_role(self.daemon_mode);
         let change = self.published_state.publish(state);
         if let Some(mcp_server) = &self.mcp_server {
             mcp_server.publish_change(change);
@@ -775,6 +1012,49 @@ impl App {
         self.model.show_time = self.show_time;
         self.model.show_output = self.show_output;
         self.model.show_stats = self.show_stats;
+    }
+
+    fn current_view_state(&self) -> ViewState {
+        ViewState {
+            app: self.show_app,
+            git: self.show_git,
+            detail: self.show_detail,
+            time: self.show_time,
+            output: self.show_output,
+            stats: self.show_stats,
+        }
+    }
+
+    fn persist_views(&mut self) {
+        if !self.view_remember {
+            return;
+        }
+        if let Err(error) = self.view_state_store.save(self.current_view_state()) {
+            self.status_line = format!("view state: {error}");
+            self.model.status_line = self.status_line.clone();
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    fn reset_remembered_views(&mut self) -> bool {
+        if let Err(error) = self.view_state_store.clear() {
+            self.status_line = format!("view state: {error}");
+            self.model.status_line = self.status_line.clone();
+            return true;
+        }
+        let reset = self.reset_views.clone();
+        self.show_app = reset.values.app;
+        self.show_git = self.git_scanner_enabled && reset.values.git;
+        self.show_detail = reset.values.detail;
+        self.show_time = reset.values.time;
+        self.show_output = reset.values.output;
+        self.show_stats = reset.values.stats;
+        self.show_app_pinned = reset.pinned.app;
+        self.show_detail_pinned = reset.pinned.detail;
+        self.show_stats_pinned = reset.pinned.stats;
+        self.git_summaries.clear();
+        self.refresh(true);
+        true
     }
 
     fn emit_bells(&mut self, transitions: usize) {
@@ -844,6 +1124,7 @@ impl App {
         self.show_detail = !self.show_detail;
         self.show_detail_pinned = true;
         self.refresh_view_preferences();
+        self.persist_views();
         true
     }
 
@@ -851,6 +1132,7 @@ impl App {
         self.show_app = !self.show_app;
         self.show_app_pinned = true;
         self.refresh_view_preferences();
+        self.persist_views();
         true
     }
 
@@ -862,6 +1144,14 @@ impl App {
     }
 
     fn toggle_show_git(&mut self) -> bool {
+        if !self.git_scanner_enabled {
+            self.show_git = false;
+            self.git_summaries.clear();
+            self.status_line = "git scanner: disabled by configuration".to_string();
+            self.model.status_line = self.status_line.clone();
+            self.persist_views();
+            return true;
+        }
         self.show_git = !self.show_git;
         let refreshed_at = Instant::now();
         if self.show_git {
@@ -875,18 +1165,21 @@ impl App {
             self.git_summaries.clear();
         }
         self.rebuild_model(refreshed_at, SystemTime::now());
+        self.persist_views();
         true
     }
 
     fn toggle_show_time(&mut self) -> bool {
         self.show_time = !self.show_time;
         self.refresh_view_preferences();
+        self.persist_views();
         true
     }
 
     fn toggle_show_output(&mut self) -> bool {
         self.show_output = !self.show_output;
         self.refresh_view_preferences();
+        self.persist_views();
         true
     }
 
@@ -904,6 +1197,7 @@ impl App {
             self.status_line = format!("ps: {error}");
         }
         self.rebuild_model(refreshed_at, SystemTime::now());
+        self.persist_views();
         true
     }
 
@@ -1434,14 +1728,8 @@ fn should_alert_transition(previous: SessionStatus, current: SessionStatus) -> b
     )
 }
 
+#[cfg(test)]
 fn output_tail_capture_enabled_from_var(value: Option<&str>) -> bool {
-    !matches!(
-        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("0" | "false" | "no" | "off")
-    )
-}
-
-fn tui_enabled_from_var(value: Option<&str>) -> bool {
     !matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("0" | "false" | "no" | "off")
@@ -1452,14 +1740,17 @@ fn quit_on_activate_from_vars(tmux: Option<&str>, tmux_pane: Option<&str>) -> bo
     tmux.is_some() && tmux_pane.is_none()
 }
 
+#[cfg(test)]
 fn refresh_interval_from_var(value: Option<&str>) -> Duration {
     refresh_interval_from_var_or(value, DEFAULT_REFRESH_INTERVAL)
 }
 
+#[cfg(test)]
 fn process_refresh_interval_from_var(value: Option<&str>) -> Duration {
     refresh_interval_from_var_or(value, DEFAULT_PROCESS_REFRESH_INTERVAL)
 }
 
+#[cfg(test)]
 fn refresh_interval_from_var_or(value: Option<&str>, default: Duration) -> Duration {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return default;
@@ -2055,6 +2346,20 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn disabled_git_scanner_cannot_be_reenabled_by_view_toggle() {
+        let mut app = App::default();
+        app.git_scanner_enabled = false;
+        app.show_git = false;
+
+        app.handle_key_event(KeyCode::Char('g'), KeyModifiers::NONE);
+
+        assert!(!app.show_git);
+        assert!(app.git_summaries.is_empty());
+        assert_eq!(app.status_line, "git scanner: disabled by configuration");
+    }
+
+    #[test]
     fn stats_visibility_toggles_with_s_and_defaults_to_disabled() {
         let mut app = App::default();
 
@@ -2272,10 +2577,11 @@ mod tests {
         assert_eq!(app.sessions.len(), 1);
         assert!(app.alert_baseline.contains_key("%5"));
 
-        // Snapshot errors clear visible sessions but must not discard the bell baseline.
+        // Snapshot errors retain the last good rows and must not discard the bell baseline.
         app.collect_pane_snapshots = failing_pane_snapshot;
         app.refresh(false);
-        assert!(app.sessions.is_empty());
+        assert_eq!(app.sessions.len(), 1);
+        assert!(app.model.status_line.contains("tmux snapshot failed"));
         assert!(app.alert_baseline.contains_key("%5"));
     }
 
@@ -2375,6 +2681,28 @@ mod tests {
         assert!(app.model.show_time);
         assert!(app.model.show_output);
         assert!(!app.model.show_stats);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn view_toggles_persist_and_uppercase_r_clears_remembered_state() {
+        let path = std::env::temp_dir().join(format!(
+            "ilmari-app-view-state-{}-{}.json",
+            std::process::id(),
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut app = App::default();
+        app.view_state_store = crate::view_state::ViewStateStore::at(&path);
+        app.view_remember = true;
+        app.collect_pane_snapshots = warning_only_empty_pane_snapshot;
+
+        app.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.view_state_store.load().state.map(|state| state.app), Some(true));
+
+        app.handle_key_event(KeyCode::Char('R'), KeyModifiers::NONE);
+        assert!(!path.exists());
+        assert!(!app.model.show_app);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Loopback MCP resource server that exposes Ilmari's published pane snapshots.
 //!
-//! When `ILMARI_MCP` or `ILMARI_MCP_PORT` enables the feature, a dedicated thread
+//! When TOML or CLI configuration enables the feature, a dedicated thread
 //! serves read-only `ilmari://` resources over HTTP on localhost. Subscriptions track
 //! pane identity across tmux window moves and notify clients when list or detail
 //! content changes.
@@ -48,7 +48,9 @@ use crate::ipc::{PublishedStateChange, PublishedStateHandle};
 #[cfg(feature = "mcp")]
 use crate::tmux;
 
+#[cfg(test)]
 const DEFAULT_MCP_ENV: &str = "ILMARI_MCP";
+#[cfg(test)]
 const DEFAULT_MCP_PORT_ENV: &str = "ILMARI_MCP_PORT";
 const DEFAULT_MCP_PORT: u16 = 62778;
 #[cfg(feature = "mcp")]
@@ -56,7 +58,7 @@ const MCP_PATH: &str = "/mcp";
 #[cfg(feature = "mcp")]
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Opt-in loopback MCP server settings from `ILMARI_MCP` and `ILMARI_MCP_PORT`.
+/// Opt-in loopback MCP server settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpConfig {
     pub enabled: bool,
@@ -68,6 +70,7 @@ impl McpConfig {
         Self { enabled: false, port: DEFAULT_MCP_PORT }
     }
 
+    #[cfg(test)]
     pub fn from_env_map(env: &std::collections::BTreeMap<String, String>) -> Self {
         let port_value = env
             .get(DEFAULT_MCP_PORT_ENV)
@@ -432,6 +435,7 @@ fn state_unavailable() -> McpErrorData {
     McpErrorData::invalid_request("Ilmari state is unavailable", None)
 }
 
+#[cfg(test)]
 fn mcp_enabled_from_var(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
@@ -439,6 +443,7 @@ fn mcp_enabled_from_var(value: Option<&str>) -> bool {
     )
 }
 
+#[cfg(test)]
 fn parse_port(value: &str) -> Option<u16> {
     value.trim().parse::<u16>().ok()
 }

@@ -1,8 +1,9 @@
 //! Terminal palette parsing and semantic color roles for the TUI.
 //!
-//! Eighteen-slot CSV overrides come from `ILMARI_TUI_PALETTE` or `ILMARI_PALETTE`;
+//! Eighteen-slot CSV overrides come from TOML or the one-run CLI flag;
 //! `SemanticRole` maps session status, agent labels, and git diff colors onto those slots.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 #[cfg(feature = "tui")]
@@ -88,6 +89,7 @@ impl Palette {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn from_env_map(env: &BTreeMap<String, String>) -> Self {
         let Some(value) = env.get("ILMARI_TUI_PALETTE").or_else(|| env.get("ILMARI_PALETTE"))
         else {

@@ -27,20 +27,25 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 #[cfg(all(unix, feature = "socket"))]
 use std::thread::{self, JoinHandle};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::model::{AgentKind, SessionRecord, SessionStatus};
+use crate::model::{
+    AgentDetail, AgentKind, GitSummaryRow, SessionProcessUsage, SessionRecord, SessionStatus,
+};
 use crate::tmux::{self, PaneSnapshot};
 
 pub const SCHEMA_VERSION: u32 = 1;
 #[cfg(feature = "mcp")]
 pub const RESOURCE_MIME_TYPE: &str = "application/json";
 pub const LIST_RESOURCE_URI: &str = "ilmari://list";
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
+#[cfg(test)]
 const DEFAULT_SOCKET_ENV: &str = "ILMARI_SOCKET";
+#[cfg(test)]
 const DEFAULT_SOCKET_PATH_ENV: &str = "ILMARI_SOCKET_PATH";
 const SOCKET_DIR_PREFIX: &str = "ilmari";
 const SOCKET_FILE_NAME: &str = "ilmari.sock";
@@ -52,7 +57,7 @@ const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(all(unix, feature = "socket"))]
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Opt-in Unix-socket IPC settings resolved from `ILMARI_SOCKET` and `ILMARI_SOCKET_PATH`.
+/// Unix-socket IPC settings resolved by TOML/CLI runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpcConfig {
     pub enabled: bool,
@@ -64,6 +69,7 @@ impl IpcConfig {
         Self { enabled: false, socket_path: env::temp_dir().join(SOCKET_FILE_NAME) }
     }
 
+    #[cfg(test)]
     pub fn from_env_map(env: &BTreeMap<String, String>) -> Self {
         let socket_path_value =
             env.get(DEFAULT_SOCKET_PATH_ENV).filter(|value| !value.trim().is_empty());
@@ -75,6 +81,10 @@ impl IpcConfig {
             socket_path_value.map(PathBuf::from).unwrap_or_else(|| default_socket_path(env));
 
         Self { enabled, socket_path }
+    }
+
+    pub fn runtime_default_path(env: &BTreeMap<String, String>) -> PathBuf {
+        default_socket_path(env)
     }
 }
 
@@ -92,14 +102,54 @@ pub struct StateBuildOptions<'a> {
 /// Versioned, read-only snapshot of visible agent panes exposed to IPC and MCP consumers.
 #[derive(Debug, Clone)]
 pub struct PublishedState {
-    #[cfg(any(feature = "socket", test))]
     producer: Producer,
     revision: u64,
     observed_at: String,
+    observed_unix_ms: u64,
     ttl_ms: u64,
     wait_after_ms: u64,
     items: Vec<PublishedItem>,
+    snapshot_items: Vec<SnapshotItem>,
+    git_summaries: Vec<SnapshotGitSummary>,
     warnings: Vec<String>,
+}
+
+/// Render-neutral daemon snapshot consumed by the popup in one request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotResponse {
+    pub ok: bool,
+    #[serde(rename = "type")]
+    pub response_type: String,
+    pub schema_version: u32,
+    pub producer: Producer,
+    pub revision: u64,
+    pub observed_at: String,
+    pub observed_unix_ms: u64,
+    pub ttl_ms: u64,
+    pub items: Vec<SnapshotItem>,
+    pub git_summaries: Vec<SnapshotGitSummary>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotItem {
+    pub pane: PaneSnapshot,
+    pub status: SessionStatus,
+    pub agent_kind: AgentKind,
+    pub agent_detail: Option<AgentDetail>,
+    pub excerpt: Option<String>,
+    pub process: Option<SessionProcessUsage>,
+    pub last_seen_ago_ms: u64,
+    pub last_changed_ago_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotGitSummary {
+    pub workspace_path: PathBuf,
+    pub workspace_label: String,
+    pub branch_name: String,
+    pub insertions: u32,
+    pub deletions: u32,
 }
 
 #[cfg(feature = "mcp")]
@@ -185,6 +235,11 @@ impl PublishedState {
                 .map(|session| session.pane.pane_current_path.to_string_lossy().into_owned()),
         );
         let observed_at = format_system_time(options.observed_at);
+        let observed_unix_ms = options
+            .observed_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(duration_ms)
+            .unwrap_or_default();
         let ttl_ms = ttl_ms(options.refresh_interval);
         let wait_after_ms = duration_ms(options.refresh_interval);
         let warnings = options
@@ -207,6 +262,24 @@ impl PublishedState {
                 )
             })
             .collect();
+        let snapshot_items = options
+            .sessions
+            .iter()
+            .map(|session| SnapshotItem {
+                pane: session.pane.clone(),
+                status: session.status,
+                agent_kind: session.kind,
+                agent_detail: session.detail.as_deref().cloned(),
+                excerpt: session.output_excerpt.as_deref().map(ToOwned::to_owned),
+                process: session.process_usage.as_deref().cloned(),
+                last_seen_ago_ms: duration_ms(
+                    options.refreshed_at.saturating_duration_since(session.last_seen_at),
+                ),
+                last_changed_ago_ms: duration_ms(
+                    options.refreshed_at.saturating_duration_since(session.last_changed_at),
+                ),
+            })
+            .collect();
 
         items.sort_by(|left, right| {
             consumer_state_rank(left.state)
@@ -216,14 +289,51 @@ impl PublishedState {
         });
 
         Self {
-            #[cfg(any(feature = "socket", test))]
             producer: Producer::current(),
             revision: options.revision,
             observed_at,
+            observed_unix_ms,
             ttl_ms,
             wait_after_ms,
             items,
+            snapshot_items,
+            git_summaries: Vec::new(),
             warnings,
+        }
+    }
+
+    pub fn with_git_summaries(mut self, summaries: &[GitSummaryRow]) -> Self {
+        self.git_summaries = summaries
+            .iter()
+            .map(|summary| SnapshotGitSummary {
+                workspace_path: summary.workspace_path.clone(),
+                workspace_label: summary.workspace_label.clone(),
+                branch_name: summary.branch_name.clone(),
+                insertions: summary.insertions,
+                deletions: summary.deletions,
+            })
+            .collect();
+        self
+    }
+
+    pub fn with_daemon_role(mut self, daemon: bool) -> Self {
+        self.producer.role = if daemon { "daemon" } else { "app" }.to_string();
+        self
+    }
+
+    pub fn snapshot_response(&self) -> SnapshotResponse {
+        SnapshotResponse {
+            ok: true,
+            response_type: "snapshot".to_string(),
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            producer: self.producer.clone(),
+            revision: self.revision,
+            observed_at: self.observed_at.clone(),
+            observed_unix_ms: self.observed_unix_ms,
+            ttl_ms: self.ttl_ms,
+            items: self.snapshot_items.clone(),
+            git_summaries: self.git_summaries.clone(),
+            warnings: self.warnings.clone(),
         }
     }
 
@@ -500,18 +610,25 @@ impl ConsumerState {
     }
 }
 
-#[cfg(any(feature = "socket", test))]
-#[derive(Debug, Clone, Serialize)]
-struct Producer {
-    name: &'static str,
-    version: &'static str,
-    pid: u32,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Producer {
+    pub name: String,
+    pub version: String,
+    pub pid: u32,
+    pub role: String,
+    pub tmux_socket_path: Option<String>,
 }
 
-#[cfg(any(feature = "socket", test))]
 impl Producer {
     fn current() -> Self {
-        Self { name: "ilmari", version: env!("CARGO_PKG_VERSION"), pid: std::process::id() }
+        Self {
+            name: "ilmari".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            pid: std::process::id(),
+            role: "app".to_string(),
+            tmux_socket_path: tmux::origin_socket_path()
+                .map(|path| path.to_string_lossy().into_owned()),
+        }
     }
 }
 
@@ -686,8 +803,7 @@ impl CommandSpec {
             intent,
             kind: Some("tmux"),
             after_ms: None,
-            argv: Some(vec![
-                "tmux".to_string(),
+            argv: Some(tmux_command_argv([
                 "capture-pane".to_string(),
                 "-p".to_string(),
                 "-J".to_string(),
@@ -695,7 +811,7 @@ impl CommandSpec {
                 pane_id.to_string(),
                 "-S".to_string(),
                 start.to_string(),
-            ]),
+            ])),
             argv_prefix: None,
             submit: None,
         }
@@ -706,8 +822,7 @@ impl CommandSpec {
             intent: "focus",
             kind: Some("tmux"),
             after_ms: None,
-            argv: Some(vec![
-                "tmux".to_string(),
+            argv: Some(tmux_command_argv([
                 "switch-client".to_string(),
                 "-t".to_string(),
                 target.session_id.clone(),
@@ -719,7 +834,7 @@ impl CommandSpec {
                 "select-pane".to_string(),
                 "-t".to_string(),
                 target.pane_id.clone(),
-            ]),
+            ])),
             argv_prefix: None,
             submit: None,
         }
@@ -731,15 +846,24 @@ impl CommandSpec {
             kind: Some("tmux"),
             after_ms: None,
             argv: None,
-            argv_prefix: Some(vec![
-                "tmux".to_string(),
+            argv_prefix: Some(tmux_command_argv([
                 "send-keys".to_string(),
                 "-t".to_string(),
                 pane_id.to_string(),
-            ]),
+            ])),
             submit: Some(vec!["Enter".to_string()]),
         }
     }
+}
+
+fn tmux_command_argv(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut argv = vec!["tmux".to_string()];
+    if let Some(socket_path) = tmux::origin_socket_path() {
+        argv.push("-S".to_string());
+        argv.push(socket_path.to_string_lossy().into_owned());
+    }
+    argv.extend(args);
+    argv
 }
 
 #[cfg(any(feature = "socket", test))]
@@ -774,11 +898,32 @@ pub enum IpcError {
     InsecureSocketDir { path: PathBuf, reason: &'static str },
 }
 
+#[derive(Debug, Error)]
+pub enum SnapshotClientError {
+    #[error("failed to connect to daemon socket {path}: {source}")]
+    Connect { path: PathBuf, source: io::Error },
+    #[error("failed to communicate with daemon socket: {0}")]
+    Io(#[from] io::Error),
+    #[error("daemon returned malformed snapshot JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("daemon snapshot is incompatible (schema {0})")]
+    Incompatible(u32),
+    #[error("daemon snapshot is stale")]
+    Stale,
+    #[error("daemon did not return a healthy response")]
+    Unhealthy,
+    #[error("Unix socket support is unavailable on this platform or build")]
+    #[allow(dead_code)]
+    Unavailable,
+}
+
 /// Background Unix-socket listener serving line-oriented published-state requests.
 #[cfg(all(unix, feature = "socket"))]
 pub struct IpcServer {
     path: PathBuf,
+    socket_identity: Option<(u64, u64)>,
     running: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -793,20 +938,35 @@ impl IpcServer {
         }
 
         let listener = bind_listener(&config.socket_path)?;
+        let socket_identity = socket_identity(&config.socket_path);
         listener
             .set_nonblocking(true)
             .map_err(|source| IpcError::Configure { path: config.socket_path.clone(), source })?;
 
         let running = Arc::new(AtomicBool::new(true));
+        let stop_requested = Arc::new(AtomicBool::new(false));
         let thread_state = state.clone();
         let thread_running = Arc::clone(&running);
-        let handle = thread::spawn(move || serve(listener, thread_state, thread_running));
+        let thread_stop_requested = Arc::clone(&stop_requested);
+        let handle = thread::spawn(move || {
+            serve(listener, thread_state, thread_running, thread_stop_requested)
+        });
 
-        Ok(Some(Self { path: config.socket_path.clone(), running, handle: Some(handle) }))
+        Ok(Some(Self {
+            path: config.socket_path.clone(),
+            socket_identity,
+            running,
+            stop_requested,
+            handle: Some(handle),
+        }))
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn shutdown_requested(&self) -> bool {
+        self.stop_requested.load(AtomicOrdering::Relaxed)
     }
 }
 
@@ -817,7 +977,9 @@ impl Drop for IpcServer {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        let _ = fs::remove_file(&self.path);
+        if socket_identity(&self.path) == self.socket_identity {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -839,6 +1001,10 @@ impl IpcServer {
 
     pub fn path(&self) -> &Path {
         Path::new("")
+    }
+
+    pub fn shutdown_requested(&self) -> bool {
+        false
     }
 }
 
@@ -959,10 +1125,27 @@ fn current_uid() -> u32 {
 }
 
 #[cfg(all(unix, feature = "socket"))]
-fn serve(listener: UnixListener, state: PublishedStateHandle, running: Arc<AtomicBool>) {
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    fs::symlink_metadata(path).ok().map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+#[cfg(all(unix, feature = "socket"))]
+fn serve(
+    listener: UnixListener,
+    state: PublishedStateHandle,
+    running: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
+) {
     while running.load(AtomicOrdering::Relaxed) {
         match listener.accept() {
-            Ok((stream, _)) => handle_stream(stream, &state),
+            Ok((stream, _)) => {
+                handle_stream(stream, &state, &stop_requested);
+                if stop_requested.load(AtomicOrdering::Relaxed) {
+                    running.store(false, AtomicOrdering::Relaxed);
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(SOCKET_POLL_INTERVAL);
             }
@@ -972,7 +1155,11 @@ fn serve(listener: UnixListener, state: PublishedStateHandle, running: Arc<Atomi
 }
 
 #[cfg(all(unix, feature = "socket"))]
-fn handle_stream(mut stream: UnixStream, state: &PublishedStateHandle) {
+fn handle_stream(
+    mut stream: UnixStream,
+    state: &PublishedStateHandle,
+    stop_requested: &AtomicBool,
+) {
     let _ = stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT));
     let mut request = String::new();
     let read_result = stream
@@ -982,6 +1169,10 @@ fn handle_stream(mut stream: UnixStream, state: &PublishedStateHandle) {
 
     let response = match read_result {
         Ok(0) => encode_error("empty-request", "Expected ping, list, ls, or detail <pane-id>"),
+        Ok(_) if request.trim() == "stop" => {
+            stop_requested.store(true, AtomicOrdering::Relaxed);
+            "{\"ok\":true,\"type\":\"stop\"}".to_string()
+        }
         Ok(_) => match state.snapshot() {
             Some(state) => encode_request(request.trim(), &state),
             None => encode_error("state-unavailable", "State lock is unavailable"),
@@ -1001,6 +1192,9 @@ fn encode_request(request: &str, state: &PublishedState) -> String {
     if matches!(request, "list" | "ls") {
         return state.list_resource_text();
     }
+    if request == "snapshot" {
+        return encode_json(&state.snapshot_response());
+    }
     if let Some(id) = request.strip_prefix("detail ") {
         return match state.detail_resource_text(id.trim()) {
             Ok(response) => response,
@@ -1014,7 +1208,7 @@ fn encode_request(request: &str, state: &PublishedState) -> String {
         };
     }
 
-    encode_error("unknown-command", "Expected ping, list, ls, or detail <pane-id>")
+    encode_error("unknown-command", "Expected ping, snapshot, list, ls, or detail <pane-id>")
 }
 
 #[cfg(any(feature = "socket", test))]
@@ -1026,6 +1220,158 @@ fn encode_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| {
         "{\"ok\":false,\"error\":{\"code\":\"encode-failed\",\"message\":\"Failed to encode response\"}}".to_string()
     })
+}
+
+#[cfg(all(unix, feature = "socket"))]
+fn socket_request(path: &Path, request: &str) -> Result<String, SnapshotClientError> {
+    use std::io::{Read, Write};
+
+    let mut stream = UnixStream::connect(path)
+        .map_err(|source| SnapshotClientError::Connect { path: path.to_path_buf(), source })?;
+    stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(SOCKET_READ_TIMEOUT))?;
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(b"\n")?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+#[cfg(not(all(unix, feature = "socket")))]
+fn socket_request(_path: &Path, _request: &str) -> Result<String, SnapshotClientError> {
+    Err(SnapshotClientError::Unavailable)
+}
+
+/// Fetch and validate a fresh compatible daemon snapshot in one socket request.
+pub fn request_snapshot(path: &Path) -> Result<SnapshotResponse, SnapshotClientError> {
+    let response: SnapshotResponse =
+        serde_json::from_str(socket_request(path, "snapshot")?.trim())?;
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(duration_ms)
+        .unwrap_or_default();
+    validate_snapshot(response, now_ms)
+}
+
+fn validate_snapshot(
+    response: SnapshotResponse,
+    now_ms: u64,
+) -> Result<SnapshotResponse, SnapshotClientError> {
+    if !response.ok
+        || response.response_type != "snapshot"
+        || response.producer.name != "ilmari"
+        || response.producer.role != "daemon"
+    {
+        return Err(SnapshotClientError::Unhealthy);
+    }
+    if response.schema_version != SNAPSHOT_SCHEMA_VERSION {
+        return Err(SnapshotClientError::Incompatible(response.schema_version));
+    }
+    let expected_tmux_socket =
+        tmux::origin_socket_path().map(|path| path.to_string_lossy().into_owned());
+    if response.producer.tmux_socket_path != expected_tmux_socket || response.revision == 0 {
+        return Err(SnapshotClientError::Unhealthy);
+    }
+    if now_ms > response.observed_unix_ms.saturating_add(response.ttl_ms) {
+        return Err(SnapshotClientError::Stale);
+    }
+    Ok(response)
+}
+
+/// Return true only for a healthy compatible daemon on this socket.
+pub fn daemon_is_healthy(path: &Path) -> bool {
+    let Ok(response) = socket_request(path, "ping") else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response.trim()) else {
+        return false;
+    };
+    let expected_tmux_socket =
+        tmux::origin_socket_path().map(|path| path.to_string_lossy().into_owned());
+    value["ok"] == true
+        && value["type"] == "ping"
+        && value["schema_version"].as_u64() == Some(u64::from(SCHEMA_VERSION))
+        && value["producer"]["name"] == "ilmari"
+        && value["producer"]["role"] == "daemon"
+        && value["producer"]["tmux_socket_path"].as_str() == expected_tmux_socket.as_deref()
+}
+
+/// Prefer the daemon path already published by this exact tmux server.
+pub fn resolve_daemon_socket_path(configured: &Path) -> PathBuf {
+    tmux::global_option("@ilmari_socket_path")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| daemon_is_healthy(path))
+        .unwrap_or_else(|| configured.to_path_buf())
+}
+
+pub fn daemon_socket_is_live(path: &Path) -> bool {
+    #[cfg(all(unix, feature = "socket"))]
+    {
+        UnixStream::connect(path).is_ok()
+    }
+    #[cfg(not(all(unix, feature = "socket")))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Ask a daemon to stop, returning false when no healthy listener is reachable.
+pub fn request_daemon_stop(path: &Path) -> bool {
+    socket_request(path, "stop")
+        .ok()
+        .and_then(|response| serde_json::from_str::<serde_json::Value>(response.trim()).ok())
+        .is_some_and(|value| value["ok"] == true && value["type"] == "stop")
+}
+
+impl SnapshotResponse {
+    pub fn into_runtime(
+        self,
+        now: Instant,
+    ) -> (Vec<SessionRecord>, Vec<GitSummaryRow>, Vec<String>) {
+        let snapshot_age_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(duration_ms)
+            .unwrap_or_default()
+            .saturating_sub(self.observed_unix_ms);
+        let sessions = self
+            .items
+            .into_iter()
+            .map(|item| SessionRecord {
+                pane: item.pane,
+                kind: item.agent_kind,
+                status: item.status,
+                detail: item.agent_detail.map(Arc::new),
+                output_excerpt: item.excerpt.map(Arc::from),
+                process_usage: item.process.map(Arc::new),
+                output_fingerprint: None,
+                last_changed_at: now
+                    .checked_sub(Duration::from_millis(
+                        item.last_changed_ago_ms.saturating_add(snapshot_age_ms),
+                    ))
+                    .unwrap_or(now),
+                last_seen_at: now
+                    .checked_sub(Duration::from_millis(
+                        item.last_seen_ago_ms.saturating_add(snapshot_age_ms),
+                    ))
+                    .unwrap_or(now),
+                retained_until: None,
+            })
+            .collect();
+        let git_summaries = self
+            .git_summaries
+            .into_iter()
+            .map(|summary| GitSummaryRow {
+                workspace_path: summary.workspace_path,
+                workspace_label: summary.workspace_label,
+                branch_name: summary.branch_name,
+                insertions: summary.insertions,
+                deletions: summary.deletions,
+            })
+            .collect();
+        (sessions, git_summaries, self.warnings)
+    }
 }
 
 fn next_command_for_state(state: ConsumerState, pane_id: &str, wait_after_ms: u64) -> CommandSpec {
@@ -1061,6 +1407,7 @@ fn consumer_state_rank(state: ConsumerState) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn socket_enabled_from_var(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
@@ -1271,22 +1618,84 @@ pub fn publish_socket_path_to_tmux(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_request, socket_enabled_from_var, IpcConfig, PublishedState, PublishedStateHandle,
-        StateBuildOptions, LIST_RESOURCE_URI,
+        encode_request, socket_enabled_from_var, validate_snapshot, IpcConfig, PublishedState,
+        PublishedStateHandle, SnapshotClientError, StateBuildOptions, LIST_RESOURCE_URI,
     };
     #[cfg(all(unix, feature = "socket"))]
     use super::{
         ensure_private_dir, prepare_socket_directory, socket_base_dir, IpcError, IpcServer,
     };
     use crate::model::{
-        AgentDetail, AgentDetailTone, AgentKind, ResourceUsage, SessionProcessUsage, SessionRecord,
-        SessionStatus,
+        AgentDetail, AgentDetailTone, AgentKind, GitSummaryRow, ResourceUsage, SessionProcessUsage,
+        SessionRecord, SessionStatus, SubtaskProcess,
     };
     use crate::tmux::PaneSnapshot;
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime};
+
+    #[test]
+    fn snapshot_is_versioned_deserializable_and_contains_render_neutral_facts() {
+        let now = Instant::now();
+        let mut record = session("%12", SessionStatus::Running, now);
+        record.kind = AgentKind::ClaudeCode;
+        record.detail = Some(Arc::new(AgentDetail {
+            label: "Sonnet 4.6 high".to_string(),
+            tone: AgentDetailTone::Neutral,
+        }));
+        record.output_excerpt = Some(Arc::from("Implementing the daemon"));
+        record.process_usage = Some(Arc::new(SessionProcessUsage {
+            agent: ResourceUsage { cpu_tenths_percent: 41, memory_kib: 1024 },
+            spawned: ResourceUsage { cpu_tenths_percent: 7, memory_kib: 512 },
+            subtasks: vec![SubtaskProcess {
+                pid: 77,
+                depth: 1,
+                command_label: "cargo test".to_string(),
+                usage: ResourceUsage { cpu_tenths_percent: 7, memory_kib: 512 },
+            }],
+        }));
+        let state = PublishedState::from_sessions(StateBuildOptions {
+            sessions: &[record],
+            status_line: Some("one warning"),
+            observed_at: SystemTime::now(),
+            refreshed_at: now,
+            refresh_interval: Duration::from_secs(5),
+            revision: 9,
+        })
+        .with_daemon_role(true)
+        .with_git_summaries(&[GitSummaryRow {
+            workspace_path: "/workspace/ilmari".into(),
+            workspace_label: "ilmari".to_string(),
+            branch_name: "main".to_string(),
+            insertions: 12,
+            deletions: 3,
+        }]);
+
+        let response = encode_request("snapshot", &state);
+        let snapshot: super::SnapshotResponse =
+            serde_json::from_str(&response).expect("snapshot must deserialize");
+        assert_eq!(snapshot.schema_version, super::SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(snapshot.revision, 9);
+        assert_eq!(snapshot.items[0].pane.pane_id, "%12");
+        assert_eq!(snapshot.items[0].agent_kind, AgentKind::ClaudeCode);
+        assert_eq!(snapshot.items[0].process.as_ref().unwrap().subtasks[0].pid, 77);
+        assert_eq!(snapshot.git_summaries[0].branch_name, "main");
+        assert_eq!(snapshot.warnings, ["one warning"]);
+
+        let now_ms = snapshot.observed_unix_ms;
+        assert!(validate_snapshot(snapshot.clone(), now_ms).is_ok());
+        assert!(matches!(
+            validate_snapshot(snapshot.clone(), now_ms + snapshot.ttl_ms + 1),
+            Err(SnapshotClientError::Stale)
+        ));
+        let mut incompatible = snapshot;
+        incompatible.schema_version += 1;
+        assert!(matches!(
+            validate_snapshot(incompatible, now_ms),
+            Err(SnapshotClientError::Incompatible(_))
+        ));
+    }
 
     #[test]
     fn list_maps_statuses_to_consumer_actions() {
@@ -1321,7 +1730,15 @@ mod tests {
         assert_eq!(items[1]["next"]["intent"], "result");
         assert_eq!(
             items[1]["next"]["argv"],
-            serde_json::json!(["tmux", "capture-pane", "-p", "-J", "-t", "%13", "-S", "-200"])
+            serde_json::json!(super::tmux_command_argv([
+                "capture-pane".to_string(),
+                "-p".to_string(),
+                "-J".to_string(),
+                "-t".to_string(),
+                "%13".to_string(),
+                "-S".to_string(),
+                "-200".to_string(),
+            ]))
         );
 
         let alias: Value = serde_json::from_str(&encode_request("ls", &state)).expect("valid json");

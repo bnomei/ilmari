@@ -10,10 +10,15 @@ use anyhow::{bail, Result};
 
 use crate::app::AppConfig;
 use crate::colors::Palette;
+use crate::config::ViewOverrides;
 
 /// Parsed top-level command after argv handling.
 pub enum CliCommand {
     Run(AppConfig),
+    DaemonStart(AppConfig),
+    DaemonStop(AppConfig),
+    DaemonStatus(AppConfig),
+    Status(AppConfig),
     Help,
     Version,
 }
@@ -31,6 +36,7 @@ struct CliOptions {
     socket_path: Option<PathBuf>,
     mcp_enabled: Option<bool>,
     mcp_port: Option<u16>,
+    view_overrides: ViewOverrides,
 }
 
 impl CliOptions {
@@ -49,6 +55,7 @@ impl CliOptions {
         }
         if let Some(show_git) = self.show_git {
             config.show_git = show_git;
+            config.views.values.git = show_git;
         }
         if let Some(bell_enabled) = self.bell_enabled {
             config.bell_enabled = bell_enabled;
@@ -80,7 +87,31 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    parse_args_with_config_loader(args, AppConfig::from_env)
+    let args = args.into_iter().map(Into::into).collect::<Vec<String>>();
+    if args.first().is_some_and(|arg| arg == "daemon") {
+        let Some(action) = args.get(1).map(String::as_str) else {
+            bail!("daemon requires start, stop, or status; try `ilmari --help`");
+        };
+        let trailing = args.iter().skip(2).cloned().collect::<Vec<_>>();
+        return match action {
+            "start" => parse_run_args(trailing, AppConfig::load, CliCommand::DaemonStart),
+            "stop" if trailing.is_empty() => {
+                Ok(CliCommand::DaemonStop(AppConfig::load(ViewOverrides::default())?))
+            }
+            "status" if trailing.is_empty() => {
+                Ok(CliCommand::DaemonStatus(AppConfig::load(ViewOverrides::default())?))
+            }
+            "stop" | "status" => bail!("daemon {action} does not accept options"),
+            _ => bail!("unknown daemon action `{action}`; expected start, stop, or status"),
+        };
+    }
+    if args.first().is_some_and(|arg| arg == "status") {
+        if args.len() != 1 {
+            bail!("status does not accept options");
+        }
+        return Ok(CliCommand::Status(AppConfig::load(ViewOverrides::default())?));
+    }
+    parse_args_with_config_loader(args, AppConfig::load)
 }
 
 #[cfg(test)]
@@ -89,14 +120,27 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    parse_args_with_config_loader(args, || base_config)
+    parse_args_with_config_loader(args, |_| Ok(base_config))
 }
 
 fn parse_args_with_config_loader<I, S, F>(args: I, base_config: F) -> Result<CliCommand>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
-    F: FnOnce() -> AppConfig,
+    F: FnOnce(ViewOverrides) -> Result<AppConfig>,
+{
+    parse_run_args(args, base_config, CliCommand::Run)
+}
+
+fn parse_run_args<I, S, F>(
+    args: I,
+    base_config: F,
+    wrap: fn(AppConfig) -> CliCommand,
+) -> Result<CliCommand>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+    F: FnOnce(ViewOverrides) -> Result<AppConfig>,
 {
     let mut args = args.into_iter().map(Into::into).peekable();
     let mut options = CliOptions {
@@ -111,6 +155,7 @@ where
         socket_path: None,
         mcp_enabled: None,
         mcp_port: None,
+        view_overrides: ViewOverrides::default(),
     };
 
     while let Some(arg) = args.next() {
@@ -132,7 +177,10 @@ where
                 options.palette = Some(parse_palette(&value)?);
             }
             "--no-tui" => options.tui_enabled = Some(false),
-            "--no-git" => options.show_git = Some(false),
+            "--no-git" => {
+                options.show_git = Some(false);
+                options.view_overrides.git = Some(false);
+            }
             "--no-bell" => options.bell_enabled = Some(false),
             "--no-output-tail" => options.output_tail_capture_enabled = Some(false),
             "--socket" => options.socket_enabled = Some(true),
@@ -167,7 +215,9 @@ where
         }
     }
 
-    Ok(CliCommand::Run(options.apply_to(base_config())))
+    let view_overrides = options.view_overrides;
+    let config = base_config(view_overrides)?;
+    Ok(wrap(options.apply_to(config)))
 }
 
 /// Static help text including version, flags, and environment variable names.
@@ -176,7 +226,9 @@ pub fn help_text() -> &'static str {
         "ilmari ",
         env!("CARGO_PKG_VERSION"),
         "\n\n",
-        "Usage: ilmari [OPTIONS]\n\n",
+        "Usage: ilmari [OPTIONS]\n",
+        "       ilmari daemon <start|stop|status>\n",
+        "       ilmari status\n\n",
         "Options:\n",
         "  --refresh-seconds <SECONDS>          Main tmux scan cadence\n",
         "  --process-refresh-seconds <SECONDS>  CPU and memory sampling cadence\n",
@@ -193,12 +245,8 @@ pub fn help_text() -> &'static str {
         "  --mcp-port <PORT>                     Loopback MCP port, default 62778; 0 chooses a free port\n",
         "  -h, --help                           Print help\n",
         "  -V, --version                        Print version\n\n",
-        "Environment defaults:\n",
-        "  ILMARI_REFRESH_SECONDS, ILMARI_PROCESS_REFRESH_SECONDS,\n",
-        "  ILMARI_TUI, ILMARI_OUTPUT_TAIL, ILMARI_SOCKET, ILMARI_SOCKET_PATH,\n",
-        "  ILMARI_MCP, ILMARI_MCP_PORT,\n",
-        "  ILMARI_TUI_PALETTE, ILMARI_PALETTE\n\n",
-        "Flags override environment defaults for the same setting.\n",
+        "Configuration: $XDG_CONFIG_HOME/ilmari/config.toml or ~/.config/ilmari/config.toml\n",
+        "Flags override TOML settings for the same run.\n",
     )
 }
 
@@ -274,19 +322,19 @@ mod tests {
         ] {
             assert!(help_text().contains(flag), "help should mention {flag}");
         }
-        assert!(help_text().contains("Flags override environment defaults"));
+        assert!(help_text().contains("Flags override TOML settings"));
         assert_eq!(version_text(), concat!("ilmari ", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
     fn help_and_version_do_not_load_runtime_config() {
         assert!(matches!(
-            parse_args_with_config_loader(["--help"], || panic!("config should not load"))
+            parse_args_with_config_loader(["--help"], |_| panic!("config should not load"))
                 .expect("help parses"),
             CliCommand::Help
         ));
         assert!(matches!(
-            parse_args_with_config_loader(["--version"], || panic!("config should not load"))
+            parse_args_with_config_loader(["--version"], |_| panic!("config should not load"))
                 .expect("version parses"),
             CliCommand::Version
         ));
@@ -331,9 +379,25 @@ mod tests {
     }
 
     #[test]
-    fn flags_override_environment_backed_config() {
-        let env_palette =
-            "#010101,#020202,#030303,#040404,#050505,#060606,#070707,#080808,#090909,#0a0a0a,#0b0b0b,#0c0c0c,#0d0d0d,#0e0e0e,#0f0f0f,#101010,#111111,#121212";
+    fn daemon_and_compact_status_commands_parse_without_changing_normal_run() {
+        assert!(matches!(
+            parse_args(["daemon", "start", "--no-tui"]).expect("daemon start"),
+            CliCommand::DaemonStart(_)
+        ));
+        assert!(matches!(
+            parse_args(["daemon", "stop"]).expect("daemon stop"),
+            CliCommand::DaemonStop(_)
+        ));
+        assert!(matches!(
+            parse_args(["daemon", "status"]).expect("daemon status"),
+            CliCommand::DaemonStatus(_)
+        ));
+        assert!(matches!(parse_args(["status"]).expect("status"), CliCommand::Status(_)));
+        assert!(parse_args(["daemon", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn flags_override_config_and_legacy_ilmari_environment_is_ignored() {
         let flag_palette =
             "#111111,#222222,#000000,#ff0000,#00ff00,#ffff00,#0000ff,#ff00ff,#00ffff,#cccccc,#555555,#ff5555,#55ff55,#ffff55,#5555ff,#ff55ff,#55ffff,#ffffff";
         let mut env = BTreeMap::new();
@@ -345,7 +409,7 @@ mod tests {
         env.insert("ILMARI_SOCKET_PATH".to_string(), "/tmp/env.sock".to_string());
         env.insert("ILMARI_MCP".to_string(), "0".to_string());
         env.insert("ILMARI_MCP_PORT".to_string(), "8888".to_string());
-        env.insert("ILMARI_TUI_PALETTE".to_string(), env_palette.to_string());
+        env.insert("ILMARI_TUI_PALETTE".to_string(), "ignored".to_string());
 
         let command = parse_args_with_config(
             [
@@ -353,6 +417,7 @@ mod tests {
                 "9",
                 "--process-refresh-seconds",
                 "44",
+                "--no-tui",
                 "--palette",
                 flag_palette,
                 "--no-git",
@@ -363,7 +428,8 @@ mod tests {
                 "--mcp-port",
                 "9999",
             ],
-            AppConfig::from_env_map(&env),
+            AppConfig::from_env_map(&env, crate::config::ViewOverrides::default())
+                .expect("built-in config should load"),
         )
         .expect("flags should parse");
 

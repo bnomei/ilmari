@@ -5,11 +5,14 @@
 //! tab-separated format into stable pane ids, and surface per-line parse failures as
 //! warnings so one malformed row cannot blank the whole radar.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::env;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::agents::SessionTracker;
@@ -20,9 +23,10 @@ pub const LIST_PANES_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_id}\t#{s
 /// Default `capture-pane -S` window for output-tail classification.
 pub const DEFAULT_CAPTURE_START: &str = "-80";
 const PANE_SNAPSHOT_FIELD_COUNT: usize = 10;
+static ORIGIN_SOCKET_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Parsed tmux pane row from `list-panes -aF` with stable session, window, and pane ids.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub pane_id: String,
     pub pane_pid: Option<u32>,
@@ -122,20 +126,29 @@ impl TmuxCommand {
         &self.args
     }
 
-    fn as_command(&self) -> Command {
+    #[cfg(test)]
+    pub fn argv_for_socket(&self, socket_path: &Path) -> Vec<String> {
+        let mut argv = vec!["-S".to_string(), socket_path.display().to_string()];
+        argv.extend(self.args.iter().cloned());
+        argv
+    }
+
+    fn as_command(&self, socket_path: &Path) -> Command {
         let mut command = Command::new("tmux");
-        command.args(&self.args);
+        command.arg("-S").arg(socket_path).args(&self.args);
         command
     }
 
-    fn render(&self) -> String {
-        format!("tmux {}", self.args.join(" "))
+    fn render(&self, socket_path: &Path) -> String {
+        format!("tmux -S {} {}", socket_path.display(), self.args.join(" "))
     }
 }
 
 /// Failure from executing or decoding a tmux subprocess.
 #[derive(Debug, Error)]
 pub enum TmuxError {
+    #[error("tmux socket is unavailable; run Ilmari from the target tmux server")]
+    MissingSocket,
     #[error("failed to execute tmux: {0}")]
     Io(#[from] io::Error),
     #[error("tmux output was not valid utf-8: {0}")]
@@ -275,11 +288,138 @@ pub fn set_global_option(name: &str, value: &str) -> Result<(), TmuxError> {
     Ok(())
 }
 
+/// Resolve and freeze the tmux server socket that originated this process.
+///
+/// `TMUX` starts with the server socket path. Caching it prevents a later
+/// environment mutation from redirecting subprocesses to another server.
+pub fn origin_socket_path() -> Option<&'static Path> {
+    ORIGIN_SOCKET_PATH
+        .get_or_init(|| {
+            let candidate = env::var_os("TMUX").and_then(|value| {
+                let value = value.to_string_lossy();
+                value.split(',').next().filter(|path| !path.is_empty()).map(PathBuf::from)
+            })?;
+            let canonical = Command::new("tmux")
+                .arg("-S")
+                .arg(&candidate)
+                .args(["display-message", "-p", "#{socket_path}"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from);
+            Some(canonical.unwrap_or(candidate))
+        })
+        .as_deref()
+}
+
+/// Return whether the originating tmux server still answers on its exact socket.
+pub fn server_is_alive() -> bool {
+    run_tmux_command(&TmuxCommand::new(["display-message", "-p", "#{socket_path}"])).is_ok()
+}
+
+/// Read one global user option from the originating server.
+pub fn global_option(name: &str) -> Result<String, TmuxError> {
+    run_tmux_command(&TmuxCommand::new(["show-option", "-gqv", name]))
+        .map(|value| value.trim_end().to_string())
+}
+
+/// Remove one global user option from the originating server.
+pub fn unset_global_option(name: &str) -> Result<(), TmuxError> {
+    run_tmux_command(&TmuxCommand::new(["set-option", "-gu", name]))?;
+    Ok(())
+}
+
+/// Set or clear a pane-local user option on an exact pane id.
+pub fn set_pane_option(pane_id: &str, name: &str, value: Option<&str>) -> Result<(), TmuxError> {
+    let command = match value {
+        Some(value) => TmuxCommand::new(["set-option", "-pq", "-t", pane_id, name, value]),
+        None => TmuxCommand::new(["set-option", "-pu", "-t", pane_id, name]),
+    };
+    run_tmux_command(&command)?;
+    Ok(())
+}
+
+/// Collect exact panes currently focused by any attached tmux client.
+pub fn focused_pane_ids() -> Result<HashSet<String>, TmuxError> {
+    let output = run_tmux_command(&TmuxCommand::new(["list-clients", "-F", "#{pane_id}"]))?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|pane_id| pane_id.starts_with('%'))
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+/// Focused panes and live renderer overrides sampled in one tmux round trip.
+pub struct FocusRendererState {
+    pub focused_pane_ids: HashSet<String>,
+    pub badges_enabled: Option<String>,
+    pub status_enabled: Option<String>,
+}
+
+pub fn focus_and_renderer_overrides() -> Result<FocusRendererState, TmuxError> {
+    let output = run_tmux_command(&TmuxCommand::new([
+        "list-clients",
+        "-F",
+        "focus:#{pane_id}",
+        ";",
+        "display-message",
+        "-p",
+        "badges:#{@ilmari_badges_enabled}",
+        ";",
+        "display-message",
+        "-p",
+        "status:#{@ilmari_status_enabled}",
+    ]))?;
+    let mut state = FocusRendererState {
+        focused_pane_ids: HashSet::new(),
+        badges_enabled: None,
+        status_enabled: None,
+    };
+    for line in output.lines() {
+        if let Some(pane_id) =
+            line.strip_prefix("focus:").filter(|pane_id| pane_id.starts_with('%'))
+        {
+            state.focused_pane_ids.insert(pane_id.to_string());
+        } else if let Some(value) = line.strip_prefix("badges:") {
+            state.badges_enabled = (!value.is_empty()).then(|| value.to_string());
+        } else if let Some(value) = line.strip_prefix("status:") {
+            state.status_enabled = (!value.is_empty()).then(|| value.to_string());
+        }
+    }
+    Ok(state)
+}
+
+/// Clear all daemon-owned pane/global publication without touching theme formats.
+pub fn clear_published_state() {
+    if let Ok(collection) = collect_pane_snapshots() {
+        for pane in collection.snapshots {
+            let _ = set_pane_option(&pane.pane_id, "@ilmari_state", None);
+            let _ = set_pane_option(&pane.pane_id, "@ilmari_badge", None);
+        }
+    }
+    for option in [
+        "@ilmari_window_badges",
+        "@ilmari_status_summary",
+        "@ilmari_running_count",
+        "@ilmari_waiting_count",
+        "@ilmari_finished_count",
+        "@ilmari_socket_path",
+        "@ilmari_mcp_url",
+    ] {
+        let _ = unset_global_option(option);
+    }
+}
+
 fn run_tmux_command(command: &TmuxCommand) -> Result<String, TmuxError> {
-    let output = command.as_command().output()?;
+    let socket_path = origin_socket_path().ok_or(TmuxError::MissingSocket)?;
+    let output = command.as_command(socket_path).output()?;
     if !output.status.success() {
         return Err(TmuxError::CommandFailed {
-            command: command.render(),
+            command: command.render(socket_path),
             exit_code: output.status.code(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
@@ -306,6 +446,15 @@ mod tests {
         assert_eq!(
             command.args(),
             &["list-panes".to_string(), "-aF".to_string(), LIST_PANES_FORMAT.to_string(),]
+        );
+    }
+
+    #[test]
+    fn every_executed_command_prefixes_the_originating_socket() {
+        let command = pane_snapshot_command();
+        assert_eq!(
+            &command.argv_for_socket(std::path::Path::new("/tmp/tmux-exact"))[..3],
+            &["-S", "/tmp/tmux-exact", "list-panes"]
         );
     }
 

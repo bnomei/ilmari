@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-07-16
+
+### Added
+
+- Added a provider-neutral, singleton daemon per tmux server, with foreground `daemon start`, `daemon stop`, and `daemon status` commands plus a compact `ilmari status` helper.
+- Added a versioned full-state JSON socket snapshot so popups can reuse one fresh daemon collection without per-pane request fan-out while preserving the existing socket commands and MCP resources.
+- Added exact-pane sticky attention tracking and tmux-published per-window badges and global running, waiting-input, and unacknowledged-finished counts for every enabled agent adapter.
+- Added optional, strongly typed XDG TOML configuration for runtime, scanner, TUI, palette, socket, MCP, view, badge, and status settings, with built-in defaults and strict unknown-field validation.
+- Added versioned XDG view-state persistence for the six popup views, including immediate save on toggle and `R` to clear remembered choices.
+- Added a TPM tmux plugin entrypoint that keeps the configurable popup binding, starts the per-server daemon by default, supports explicit daemon opt-out and command overrides, and leaves user layout and theme formats under user control.
+
+### Changed
+
+- Popup refreshes now prefer a compatible daemon snapshot within its TTL, retry direct tmux scanning when daemon data is absent, stale, malformed, or incompatible, and retain the last good rows with a warning if both sources fail.
+- All tmux subprocesses are pinned to the originating tmux socket so separate tmux servers do not share daemon, scan, focus, or published state accidentally.
+- Window badges and status summaries are explicit user-placeable tmux format fragments; Ilmari never rewrites `window-status-format`, `window-status-current-format`, `status-left`, or `status-right`.
+- Removed non-secret `ILMARI_*` configuration environment variables in favor of TOML and existing one-run CLI overrides. Standard runtime discovery variables such as `TMUX`, `TMUX_PANE`, and `XDG_*` remain supported.
+
+### Fixed
+
+- Focus acknowledgement now uses exact focused-pane facts across tmux clients, clears attention only for the pane actually viewed, avoids recreating attention on unchanged scans, and removes published state for panes that disappear.
+- Daemon shutdown, signals, TPM opt-out, and vanished tmux servers now clean stale pane/global options instead of leaving badges, counts, or discovery paths behind.
+
 ## 0.7.0 - 2026-06-29
 
 ### Changed
