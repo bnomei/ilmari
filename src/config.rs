@@ -149,18 +149,24 @@ pub struct ViewPins {
 
 /// View booleans after CLI, TOML, remembered state, and defaults are merged.
 ///
-/// `pinned` marks fields that came from CLI or explicit TOML so responsive width
-/// defaults must not override them mid-session.
+/// `pinned` marks values that must not yield to responsive width defaults. `explicit`
+/// records the narrower CLI/TOML precedence used by long-running state publishers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedViews {
     pub values: ViewState,
     pub pinned: ViewPins,
+    pub explicit: ViewPins,
     pub remember: bool,
 }
 
 impl Default for ResolvedViews {
     fn default() -> Self {
-        Self { values: ViewConfig::default().values(), pinned: ViewPins::default(), remember: true }
+        Self {
+            values: ViewConfig::default().values(),
+            pinned: ViewPins::default(),
+            explicit: ViewPins::default(),
+            remember: true,
+        }
     }
 }
 
@@ -258,6 +264,14 @@ impl LoadedConfig {
                 time: time_pinned,
                 output: output_pinned,
                 stats: stats_pinned,
+            },
+            explicit: ViewPins {
+                app: cli.app.is_some() || self.explicit_views.app.is_some(),
+                git: cli.git.is_some() || self.explicit_views.git.is_some(),
+                detail: cli.detail.is_some() || self.explicit_views.detail.is_some(),
+                time: cli.time.is_some() || self.explicit_views.time.is_some(),
+                output: cli.output.is_some() || self.explicit_views.output.is_some(),
+                stats: cli.stats.is_some() || self.explicit_views.stats.is_some(),
             },
             remember: self.values.view.remember,
         }
@@ -769,6 +783,17 @@ style = "fg=cyan"
         assert_eq!(
             resolved.pinned,
             ViewPins { app: true, git: true, detail: true, time: true, output: true, stats: true }
+        );
+        assert_eq!(
+            resolved.explicit,
+            ViewPins {
+                app: true,
+                git: true,
+                detail: false,
+                time: true,
+                output: false,
+                stats: false
+            }
         );
     }
 

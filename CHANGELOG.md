@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Made tmux window badges follow the effective popup app-column setting, rendering state symbols without agent names whenever that column is hidden.
+
 ## 0.8.0 - 2026-07-16
 
 ### Added

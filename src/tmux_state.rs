@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::config::RendererConfig;
+use crate::config::{RendererConfig, StateFormat};
 use crate::model::{SessionRecord, SessionStatus};
 use crate::tmux;
 
@@ -16,12 +16,14 @@ use crate::tmux;
 pub struct RenderSettings {
     pub badges_enabled: bool,
     pub status_enabled: bool,
-    pub badge_running: String,
-    pub badge_waiting: String,
-    pub badge_finished: String,
-    pub status_running: String,
-    pub status_waiting: String,
-    pub status_finished: String,
+    /// Whether badges include the same agent identity shown by the popup's app column.
+    pub show_agent_names: bool,
+    pub badge_running: StateFormat,
+    pub badge_waiting: StateFormat,
+    pub badge_finished: StateFormat,
+    pub status_running: StateFormat,
+    pub status_waiting: StateFormat,
+    pub status_finished: StateFormat,
     pub badge_separator: String,
     pub status_separator: String,
 }
@@ -31,12 +33,21 @@ impl Default for RenderSettings {
         Self {
             badges_enabled: true,
             status_enabled: true,
-            badge_running: "#[fg=blue]● {agent}#[default]".to_string(),
-            badge_waiting: "#[fg=yellow]◆ {agent}#[default]".to_string(),
-            badge_finished: "#[fg=green]✓ {agent}#[default]".to_string(),
-            status_running: "#[fg=blue]● {count}#[default]".to_string(),
-            status_waiting: "#[fg=yellow]◆ {count}#[default]".to_string(),
-            status_finished: "#[fg=green]✓ {count}#[default]".to_string(),
+            show_agent_names: false,
+            badge_running: StateFormat { symbol: "●".to_string(), style: "fg=blue".to_string() },
+            badge_waiting: StateFormat {
+                symbol: "◆".to_string(), style: "fg=yellow".to_string()
+            },
+            badge_finished: StateFormat {
+                symbol: "✓".to_string(), style: "fg=green".to_string()
+            },
+            status_running: StateFormat { symbol: "●".to_string(), style: "fg=blue".to_string() },
+            status_waiting: StateFormat {
+                symbol: "◆".to_string(), style: "fg=yellow".to_string()
+            },
+            status_finished: StateFormat {
+                symbol: "✓".to_string(), style: "fg=green".to_string()
+            },
             badge_separator: " ".to_string(),
             status_separator: " ".to_string(),
         }
@@ -45,24 +56,21 @@ impl Default for RenderSettings {
 
 impl RenderSettings {
     /// Build pane badge and global status templates from the two renderer config blocks.
-    pub fn from_config(badges: &RendererConfig, status: &RendererConfig) -> Self {
+    pub fn from_config(
+        badges: &RendererConfig,
+        status: &RendererConfig,
+        show_agent_names: bool,
+    ) -> Self {
         Self {
             badges_enabled: badges.enabled,
             status_enabled: status.enabled,
-            badge_running: styled(&badges.running.style, &badges.running.symbol, "{agent}"),
-            badge_waiting: styled(
-                &badges.waiting_input.style,
-                &badges.waiting_input.symbol,
-                "{agent}",
-            ),
-            badge_finished: styled(&badges.finished.style, &badges.finished.symbol, "{agent}"),
-            status_running: styled(&status.running.style, &status.running.symbol, "{count}"),
-            status_waiting: styled(
-                &status.waiting_input.style,
-                &status.waiting_input.symbol,
-                "{count}",
-            ),
-            status_finished: styled(&status.finished.style, &status.finished.symbol, "{count}"),
+            show_agent_names,
+            badge_running: badges.running.clone(),
+            badge_waiting: badges.waiting_input.clone(),
+            badge_finished: badges.finished.clone(),
+            status_running: status.running.clone(),
+            status_waiting: status.waiting_input.clone(),
+            status_finished: status.finished.clone(),
             badge_separator: badges.separator.clone(),
             status_separator: status.separator.clone(),
         }
@@ -290,17 +298,19 @@ impl TmuxStatePublisher {
             let attention = self.panes.get(&session.pane.pane_id).copied().unwrap_or_default();
             let (state, format) = if attention.waiting {
                 counts.waiting += 1;
-                ("waiting-input", Some(settings.badge_waiting.as_str()))
+                ("waiting-input", Some(&settings.badge_waiting))
             } else if attention.finished {
                 counts.finished += 1;
-                ("finished", Some(settings.badge_finished.as_str()))
+                ("finished", Some(&settings.badge_finished))
             } else if session.status == SessionStatus::Running {
                 counts.running += 1;
-                ("running", Some(settings.badge_running.as_str()))
+                ("running", Some(&settings.badge_running))
             } else {
                 (session.status.as_str(), None)
             };
-            let badge = format.map(|format| render_badge(format, session)).unwrap_or_default();
+            let badge = format
+                .map(|format| render_badge(format, session, settings.show_agent_names))
+                .unwrap_or_default();
             if !badge.is_empty() {
                 windows.entry(&session.pane.window_id).or_default().push(badge.clone());
             }
@@ -351,21 +361,23 @@ struct RenderedState {
     status_summary: String,
 }
 
-fn render_badge(format: &str, session: &SessionRecord) -> String {
-    format
-        .replace("{agent}", session.kind.display_name())
-        .replace("{pane}", &session.pane.pane_id)
-        .replace("{status}", session.status.as_str())
+fn render_badge(format: &StateFormat, session: &SessionRecord, show_agent_names: bool) -> String {
+    let label = if show_agent_names { session.kind.display_name() } else { "" };
+    styled(&format.style, &format.symbol, label)
 }
 
-fn render_count(format: &str, count: usize) -> String {
-    format.replace("{count}", &count.to_string())
+fn render_count(format: &StateFormat, count: usize) -> String {
+    styled(&format.style, &format.symbol, &count.to_string())
 }
 
 fn styled(style: &str, symbol: &str, suffix: &str) -> String {
     let style = style.trim();
     let prefix = if style.is_empty() { String::new() } else { format!("#[{style}]") };
-    format!("{prefix}{symbol} {suffix}#[default]")
+    if suffix.is_empty() {
+        format!("{prefix}{symbol}#[default]")
+    } else {
+        format!("{prefix}{symbol} {suffix}#[default]")
+    }
 }
 
 fn option_override(name: &str) -> Option<bool> {
@@ -526,7 +538,8 @@ mod tests {
             session("%2", "@1", AgentKind::ClaudeCode, SessionStatus::Running),
         ];
         publisher.update_attention(&changed, &HashSet::new(), true);
-        let rendered = publisher.render(&changed, &RenderSettings::default());
+        let settings = RenderSettings { show_agent_names: true, ..RenderSettings::default() };
+        let rendered = publisher.render(&changed, &settings);
         assert_eq!(rendered.counts.waiting, 1);
         assert_eq!(rendered.counts.running, 1);
         assert!(rendered.window_fragment.contains("Codex"));
@@ -534,6 +547,34 @@ mod tests {
         assert!(
             rendered.status_summary.find("◆").unwrap() < rendered.status_summary.find("●").unwrap()
         );
+    }
+
+    #[test]
+    fn window_badges_omit_agent_names_when_the_app_column_is_hidden() {
+        let mut publisher = TmuxStatePublisher::default();
+        let initial = vec![
+            session("%1", "@1", AgentKind::Codex, SessionStatus::Running),
+            session("%2", "@1", AgentKind::ClaudeCode, SessionStatus::Running),
+        ];
+        publisher.update_attention(&initial, &HashSet::new(), true);
+        let changed = vec![
+            session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput),
+            session("%2", "@1", AgentKind::ClaudeCode, SessionStatus::Running),
+        ];
+        publisher.update_attention(&changed, &HashSet::new(), true);
+
+        let hidden = publisher.render(&changed, &RenderSettings::default());
+        assert!(hidden.window_fragment.contains("◆"));
+        assert!(hidden.window_fragment.contains("●"));
+        assert!(!hidden.window_fragment.contains("Codex"));
+        assert!(!hidden.window_fragment.contains("Claude Code"));
+
+        let visible = publisher.render(
+            &changed,
+            &RenderSettings { show_agent_names: true, ..RenderSettings::default() },
+        );
+        assert!(visible.window_fragment.contains("Codex"));
+        assert!(visible.window_fragment.contains("Claude Code"));
     }
 
     fn session(

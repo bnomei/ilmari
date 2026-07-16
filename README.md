@@ -312,6 +312,11 @@ counts are also available as `@ilmari_waiting_count`, `@ilmari_finished_count`,
 and `@ilmari_running_count`. Pane-local `@ilmari_state` and `@ilmari_badge`
 options are available to advanced custom formats.
 
+Window badges include each agent's name only while the popup app column is
+enabled. Set `view.app = true`, or toggle `a` in the popup; remembered changes
+are reflected by the daemon on its next refresh. With the app column hidden,
+badges show only their state symbols.
+
 Running state is live. Waiting-input and finished attention is sticky only after
 a qualifying transition occurs while that exact pane is not focused by any tmux
 client. Focusing the pane acknowledges it. An unchanged later scan does not

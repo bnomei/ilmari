@@ -96,6 +96,7 @@ impl AppConfig {
         let store = ViewStateStore::from_env_map(env);
         let remembered = store.load();
         let views = loaded.resolve_views(view_overrides, remembered.state.as_ref());
+        let show_agent_names = views.values.app;
         let reset_views = loaded.resolve_views(view_overrides, None);
         let values = loaded.values;
         let socket_path =
@@ -117,7 +118,11 @@ impl AppConfig {
             reset_views,
             view_state_store: store,
             view_state_warning: remembered.warning,
-            render_settings: RenderSettings::from_config(&values.badges, &values.status),
+            render_settings: RenderSettings::from_config(
+                &values.badges,
+                &values.status,
+                show_agent_names,
+            ),
             daemon_mode: false,
             ipc: IpcConfig { enabled: values.socket.enabled, socket_path },
             mcp: McpConfig { enabled: values.mcp.enabled, port: values.mcp.port },
@@ -330,6 +335,8 @@ struct App {
     show_stats: bool,
     /// CLI/TOML pins that block responsive width defaults for these columns.
     show_app_pinned: bool,
+    /// CLI/TOML sources that take precedence over later remembered app-column changes.
+    show_app_explicit: bool,
     show_detail_pinned: bool,
     show_stats_pinned: bool,
     view_state_store: ViewStateStore,
@@ -544,6 +551,7 @@ impl App {
         app.show_output = views.values.output;
         app.show_stats = views.values.stats;
         app.show_app_pinned = views.pinned.app;
+        app.show_app_explicit = views.explicit.app;
         app.show_detail_pinned = views.pinned.detail;
         app.show_stats_pinned = views.pinned.stats;
         app.view_state_store = config.view_state_store;
@@ -673,6 +681,7 @@ impl App {
             show_output: true,
             show_stats: false,
             show_app_pinned: false,
+            show_app_explicit: false,
             show_detail_pinned: false,
             show_stats_pinned: false,
             view_state_store: ViewStateStore::disabled(),
@@ -976,6 +985,7 @@ impl App {
 
                 self.sync_model(status_line, git_summaries, refreshed_at, refreshed_at_wallclock);
                 if self.publish_tmux_state {
+                    self.sync_badge_agent_names_from_view_state();
                     self.tmux_publisher.publish(&self.sessions, &panes, &self.render_settings);
                 }
                 self.has_good_rows = true;
@@ -1117,6 +1127,7 @@ impl App {
         self.show_output = reset.values.output;
         self.show_stats = reset.values.stats;
         self.show_app_pinned = reset.pinned.app;
+        self.show_app_explicit = reset.explicit.app;
         self.show_detail_pinned = reset.pinned.detail;
         self.show_stats_pinned = reset.pinned.stats;
         self.git_summaries.clear();
@@ -1199,9 +1210,28 @@ impl App {
     fn toggle_show_app(&mut self) -> bool {
         self.show_app = !self.show_app;
         self.show_app_pinned = true;
+        self.render_settings.show_agent_names = self.show_app;
         self.refresh_view_preferences();
         self.persist_views();
         true
+    }
+
+    /// Keep daemon-published badge labels aligned with the remembered app-column setting.
+    ///
+    /// Explicit TOML and one-run CLI choices pin the column and deliberately take precedence
+    /// over later popup persistence, matching [`LoadedConfig::resolve_views`].
+    fn sync_badge_agent_names_from_view_state(&mut self) {
+        if self.show_app_explicit || !self.view_remember {
+            return;
+        }
+        let show_app = self
+            .view_state_store
+            .load()
+            .state
+            .map(|state| state.app)
+            .unwrap_or(self.reset_views.values.app);
+        self.show_app = show_app;
+        self.render_settings.show_agent_names = show_app;
     }
 
     fn toggle_bell(&mut self) -> bool {
@@ -2888,6 +2918,8 @@ mod tests {
         let mut app = App::default();
         app.view_state_store = crate::view_state::ViewStateStore::at(&path);
         app.view_remember = true;
+        // Remembered state pins responsive layout, but not daemon synchronization.
+        app.show_app_pinned = true;
         app.collect_pane_snapshots = warning_only_empty_pane_snapshot;
 
         app.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
@@ -2896,6 +2928,46 @@ mod tests {
         app.handle_key_event(KeyCode::Char('R'), KeyModifiers::NONE);
         assert!(!path.exists());
         assert!(!app.model.show_app);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn remembered_app_visibility_updates_badge_labels_without_overriding_pins() {
+        let path = std::env::temp_dir().join(format!(
+            "ilmari-daemon-badge-view-state-{}-{}.json",
+            std::process::id(),
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut app = App::default();
+        app.view_state_store = crate::view_state::ViewStateStore::at(&path);
+        app.view_remember = true;
+        // `resolve_views` pins remembered state against responsive layout, but it
+        // must remain live for a daemon publishing badges.
+        app.show_app_pinned = true;
+
+        assert!(!app.render_settings.show_agent_names);
+        app.view_state_store
+            .save(crate::view_state::ViewState {
+                app: true,
+                git: true,
+                detail: false,
+                time: true,
+                output: true,
+                stats: false,
+            })
+            .expect("remembered app-column view should save");
+        app.sync_badge_agent_names_from_view_state();
+        assert!(app.show_app);
+        assert!(app.render_settings.show_agent_names);
+
+        app.show_app_explicit = true;
+        app.show_app = false;
+        app.render_settings.show_agent_names = false;
+        app.sync_badge_agent_names_from_view_state();
+        assert!(!app.show_app);
+        assert!(!app.render_settings.show_agent_names);
+
         let _ = std::fs::remove_file(path);
     }
 
