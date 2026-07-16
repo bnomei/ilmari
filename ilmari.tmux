@@ -59,10 +59,28 @@ socket_file_identity() {
 }
 
 tmux_socket_file_identity="$(socket_file_identity "$tmux_socket")"
-if [[ -z "$tmux_socket_file_identity" ]]; then
-  printf '%s\n' 'ilmari.tmux: could not bind the originating tmux socket identity' >&2
-  exit 1
-fi
+case "$tmux_socket_file_identity" in
+  *:*)
+    tmux_socket_device="${tmux_socket_file_identity%%:*}"
+    tmux_socket_inode="${tmux_socket_file_identity#*:}"
+    ;;
+  *)
+    tmux_socket_device=''
+    tmux_socket_inode=''
+    ;;
+esac
+case "$tmux_socket_device" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'ilmari.tmux: could not bind the originating tmux socket identity' >&2
+    exit 1
+    ;;
+esac
+case "$tmux_socket_inode" in
+  ''|*[!0-9]*)
+    printf '%s\n' 'ilmari.tmux: could not bind the originating tmux socket identity' >&2
+    exit 1
+    ;;
+esac
 
 tmux_format_literal_into() {
   local destination="$1"
@@ -149,6 +167,40 @@ tmux_guarded() {
   local action
   action="$(tmux_command_list "$@")"
   tmux_guarded_raw "$action"
+}
+
+lifecycle_environment_into() {
+  local destination="$1"
+  local quoted_context quoted_device quoted_inode
+
+  shell_quote_into quoted_context "$tmux_context"
+  shell_quote_into quoted_device "$tmux_socket_device"
+  shell_quote_into quoted_inode "$tmux_socket_inode"
+  printf -v "$destination" \
+    'TMUX=%s ILMARI_TMUX_ORIGIN_SOCKET_DEVICE=%s ILMARI_TMUX_ORIGIN_SOCKET_INODE=%s' \
+    "$quoted_context" "$quoted_device" "$quoted_inode"
+}
+
+daemon_start_shell_command_into() {
+  local destination="$1"
+  local command="$2"
+  local lifecycle_environment quoted_command
+
+  lifecycle_environment_into lifecycle_environment
+  shell_quote_into quoted_command "$command"
+  printf -v "$destination" '%s nohup sh -c %s </dev/null >/dev/null 2>&1' \
+    "$lifecycle_environment" "$quoted_command"
+}
+
+daemon_stop_shell_command_into() {
+  local destination="$1"
+  local command="$2"
+  local lifecycle_environment quoted_command
+
+  lifecycle_environment_into lifecycle_environment
+  shell_quote_into quoted_command "$command"
+  printf -v "$destination" '%s sh -c %s </dev/null >/dev/null 2>&1 || true' \
+    "$lifecycle_environment" "$quoted_command"
 }
 
 get_tmux_option_into() {
@@ -259,14 +311,20 @@ build_daemon_render_cleanup() {
 }
 
 start_daemon() {
+  local start_shell_command
+
   # The command is deliberately interpreted as a shell command because the tmux
   # option may include an absolute binary path and arguments. Quoting it as one
-  # `sh -c` argument keeps it isolated from this entrypoint's shell.
-  TMUX="$tmux_context" nohup sh -c "$ilmari_daemon_command" </dev/null >/dev/null 2>&1 &
+  # `sh -c` argument keeps it isolated from this entrypoint's shell. The
+  # receiving server starts it only inside the accepted generation guard, and
+  # `run-shell -b` keeps plugin reload nonblocking.
+  daemon_start_shell_command_into start_shell_command "$ilmari_daemon_command"
+  tmux_guarded run-shell -b "$start_shell_command"
 }
 
 stop_daemon() {
   local snapshot_prefix snapshot_owner snapshot_socket snapshot_mcp snapshot_action
+  local stop_shell_command
 
   # The paired stop command is explicit because start commands may contain
   # wrappers or arbitrary arguments that cannot be reversed safely. Cleanup is
@@ -278,8 +336,9 @@ stop_daemon() {
   snapshot_action="$(tmux_command_list set-option -gqF "$snapshot_owner" 'x#{@ilmari_daemon_owner_pid}')"
   snapshot_action+=" ; $(tmux_command_list set-option -gqF "$snapshot_socket" 'x#{@ilmari_daemon_socket_path}')"
   snapshot_action+=" ; $(tmux_command_list set-option -gqF "$snapshot_mcp" 'x#{@ilmari_daemon_mcp_url}')"
+  daemon_stop_shell_command_into stop_shell_command "$ilmari_daemon_stop_command"
+  snapshot_action+=" ; $(tmux_command_list run-shell "$stop_shell_command")"
   tmux_guarded_raw "$snapshot_action" 2>/dev/null || return 1
-  TMUX="$tmux_context" sh -c "$ilmari_daemon_stop_command" </dev/null >/dev/null 2>&1 || true
   clear_published_state "$snapshot_owner" "$snapshot_socket" "$snapshot_mcp"
 }
 

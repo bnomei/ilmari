@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,8 @@ pub const DEFAULT_CAPTURE_START: &str = "-80";
 const PANE_SNAPSHOT_FIELD_COUNT: usize = 10;
 const GENERATION_ACCEPTED_MARKER: &str = "__ILMARI_TMUX_GENERATION_ACCEPTED__";
 const GENERATION_REJECTED_MARKER: &str = "__ILMARI_TMUX_GENERATION_REJECTED__";
+const TPM_ORIGIN_SOCKET_DEVICE_ENV: &str = "ILMARI_TMUX_ORIGIN_SOCKET_DEVICE";
+const TPM_ORIGIN_SOCKET_INODE_ENV: &str = "ILMARI_TMUX_ORIGIN_SOCKET_INODE";
 static ORIGIN_SERVER_IDENTITY: OnceLock<Option<TmuxServerIdentity>> = OnceLock::new();
 
 /// Immutable identity of the tmux server generation that originated this process.
@@ -523,15 +526,45 @@ fn tmux_context_from_value(value: &str) -> Option<(PathBuf, u32)> {
     (!path.is_empty()).then(|| (PathBuf::from(path), server_pid))
 }
 
+#[cfg(test)]
 fn bind_origin_identity(value: &str, probed: TmuxServerIdentity) -> Option<TmuxServerIdentity> {
+    bind_origin_identity_with_frozen_socket(value, probed, None, None)
+}
+
+fn bind_origin_identity_with_frozen_socket(
+    value: &str,
+    probed: TmuxServerIdentity,
+    frozen_device: Option<&OsStr>,
+    frozen_inode: Option<&OsStr>,
+) -> Option<TmuxServerIdentity> {
+    let frozen_identity = parse_frozen_socket_identity(frozen_device, frozen_inode)?;
     let (context_path, context_server_pid) = tmux_context_from_value(value)?;
     let canonical_context_path = fs::canonicalize(&context_path).unwrap_or(context_path);
     let canonical_probed_path =
         fs::canonicalize(&probed.socket_path).unwrap_or_else(|_| probed.socket_path.clone());
-    (probed.server_pid == context_server_pid
+    let frozen_identity_matches = frozen_identity.is_none_or(|(device, inode)| {
+        probed.socket_device == Some(device) && probed.socket_inode == Some(inode)
+    });
+    (frozen_identity_matches
+        && probed.server_pid == context_server_pid
         && canonical_probed_path == canonical_context_path
         && server_identity_has_socket_file(&probed))
     .then_some(probed)
+}
+
+fn parse_frozen_socket_identity(
+    frozen_device: Option<&OsStr>,
+    frozen_inode: Option<&OsStr>,
+) -> Option<Option<(u64, u64)>> {
+    match (frozen_device, frozen_inode) {
+        (None, None) => Some(None),
+        (Some(device), Some(inode)) => {
+            let device = device.to_str()?.parse::<u64>().ok()?;
+            let inode = inode.to_str()?.parse::<u64>().ok()?;
+            Some(Some((device, inode)))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(unix)]
@@ -552,7 +585,14 @@ pub fn origin_server_identity() -> Option<&'static TmuxServerIdentity> {
             let context = context.to_string_lossy();
             let (candidate, _context_server_pid) = tmux_context_from_value(context.as_ref())?;
             let probed = probe_server_identity_at(&candidate)?;
-            bind_origin_identity(context.as_ref(), probed)
+            let frozen_device = env::var_os(TPM_ORIGIN_SOCKET_DEVICE_ENV);
+            let frozen_inode = env::var_os(TPM_ORIGIN_SOCKET_INODE_ENV);
+            bind_origin_identity_with_frozen_socket(
+                context.as_ref(),
+                probed,
+                frozen_device.as_deref(),
+                frozen_inode.as_deref(),
+            )
         })
         .as_ref()
 }
@@ -847,17 +887,18 @@ fn decode_guarded_stdout(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_origin_identity, capture_output_tail_command,
+        bind_origin_identity, bind_origin_identity_with_frozen_socket, capture_output_tail_command,
         capture_output_tails_with_process_kinds_using, daemon_mcp_publication_command,
         daemon_publication_matches, decode_guarded_stdout, jump_command, pane_snapshot_command,
-        parse_pane_snapshots, popup_alias_command, publication_value_matches, quote_tmux_argument,
-        socket_path_from_tmux_context, strip_tmux_record_newline, PaneSnapshot,
-        PaneSnapshotParseError, TmuxCommand, TmuxError, TmuxServerIdentity,
-        DAEMON_LEGACY_MCP_CLAIM, DEFAULT_CAPTURE_START, GENERATION_ACCEPTED_MARKER,
-        GENERATION_REJECTED_MARKER, LIST_PANES_FORMAT,
+        parse_frozen_socket_identity, parse_pane_snapshots, popup_alias_command,
+        publication_value_matches, quote_tmux_argument, socket_path_from_tmux_context,
+        strip_tmux_record_newline, PaneSnapshot, PaneSnapshotParseError, TmuxCommand, TmuxError,
+        TmuxServerIdentity, DAEMON_LEGACY_MCP_CLAIM, DEFAULT_CAPTURE_START,
+        GENERATION_ACCEPTED_MARKER, GENERATION_REJECTED_MARKER, LIST_PANES_FORMAT,
     };
     use crate::agents::SessionTracker;
     use std::collections::HashMap;
+    use std::ffi::OsStr;
     use std::path::PathBuf;
 
     #[test]
@@ -1032,6 +1073,61 @@ mod tests {
             Some(responding.clone())
         );
         assert!(bind_origin_identity("/tmp/another.sock,11,7", responding).is_none());
+    }
+
+    #[test]
+    fn frozen_tpm_socket_identity_is_optional_but_exact_when_present() {
+        let responding = TmuxServerIdentity {
+            socket_path: PathBuf::from("/tmp/ilmari,custom/tmux.sock"),
+            server_pid: 11,
+            socket_device: Some(7),
+            socket_inode: Some(101),
+        };
+        let context = "/tmp/ilmari,custom/tmux.sock,11,7";
+
+        assert_eq!(
+            bind_origin_identity_with_frozen_socket(context, responding.clone(), None, None),
+            Some(responding.clone())
+        );
+        assert_eq!(
+            bind_origin_identity_with_frozen_socket(
+                context,
+                responding.clone(),
+                Some(OsStr::new("7")),
+                Some(OsStr::new("101")),
+            ),
+            Some(responding.clone())
+        );
+        assert!(bind_origin_identity_with_frozen_socket(
+            context,
+            responding.clone(),
+            Some(OsStr::new("7")),
+            Some(OsStr::new("102")),
+        )
+        .is_none());
+        assert!(bind_origin_identity_with_frozen_socket(
+            context,
+            responding,
+            Some(OsStr::new("8")),
+            Some(OsStr::new("101")),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn frozen_tpm_socket_identity_fails_closed_when_partial_or_malformed() {
+        assert_eq!(parse_frozen_socket_identity(None, None), Some(None));
+        assert_eq!(
+            parse_frozen_socket_identity(Some(OsStr::new("7")), Some(OsStr::new("101"))),
+            Some(Some((7, 101)))
+        );
+        assert_eq!(parse_frozen_socket_identity(Some(OsStr::new("7")), None), None);
+        assert_eq!(parse_frozen_socket_identity(None, Some(OsStr::new("101"))), None);
+        assert_eq!(
+            parse_frozen_socket_identity(Some(OsStr::new("device")), Some(OsStr::new("101"))),
+            None
+        );
+        assert_eq!(parse_frozen_socket_identity(Some(OsStr::new("7")), Some(OsStr::new(""))), None);
     }
 
     #[test]

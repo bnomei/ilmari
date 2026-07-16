@@ -28,6 +28,18 @@ mkdir -p "$tmp_dir/bin"
 cat >"$tmp_dir/bin/ilmari" <<'FAKE_ILMARI'
 #!/usr/bin/env bash
 set -euo pipefail
+case "$*" in
+  'daemon start'*|'daemon stop'*)
+    case "${ILMARI_TMUX_ORIGIN_SOCKET_DEVICE:-}" in
+      ''|*[!0-9]*) exit 95 ;;
+    esac
+    case "${ILMARI_TMUX_ORIGIN_SOCKET_INODE:-}" in
+      ''|*[!0-9]*) exit 95 ;;
+    esac
+    [[ "${ILMARI_TMUX_ORIGIN_SOCKET_DEVICE}:${ILMARI_TMUX_ORIGIN_SOCKET_INODE}" \
+      == "${ILMARI_EXPECTED_SOCKET_IDENTITY:-}" ]] || exit 94
+    ;;
+esac
 printf '%s|%s\n' "${TMUX:-}" "$*" >>"$ILMARI_TEST_LOG"
 FAKE_ILMARI
 chmod +x "$tmp_dir/bin/ilmari"
@@ -42,6 +54,17 @@ if [[ "${3:-}" == 'display-message' && "${4:-}" == '-p' \
   exec "$REAL_TMUX" "$@"
 fi
 if [[ "${3:-}" == 'if-shell' ]]; then
+  if [[ -n "${ILMARI_REJECT_GUARDED_MATCH:-}" ]]; then
+    if [[ "$*" == *"$ILMARI_REJECT_GUARDED_MATCH"* ]]; then
+      if [[ "${ILMARI_REQUIRE_STOP_SNAPSHOT:-}" == '1' \
+        && "$*" != *'@ilmari_cleanup_'* ]]; then
+        exit 96
+      fi
+      printf '%s\n' '__ILMARI_TMUX_GENERATION_REJECTED__'
+      exit 0
+    fi
+    exec "$REAL_TMUX" "$@"
+  fi
   printf '%s\n' '__ILMARI_TMUX_GENERATION_REJECTED__'
   exit 0
 fi
@@ -53,6 +76,14 @@ tmux -S "$tmux_socket" new-session -d -s ilmari-test 'sleep 120'
 server_pid="$(tmux -S "$tmux_socket" display-message -p '#{pid}')"
 tmux_context="$tmux_socket,$server_pid,0"
 pane_id="$(tmux -S "$tmux_socket" display-message -p '#{pane_id}')"
+expected_socket_identity="$(
+  stat -f '%d:%i' -- "$tmux_socket" 2>/dev/null \
+    || stat -c '%d:%i' -- "$tmux_socket" 2>/dev/null
+)"
+tmux -S "$tmux_socket" set-environment -g PATH "$tmp_dir/bin:$PATH"
+tmux -S "$tmux_socket" set-environment -g ILMARI_TEST_LOG "$test_log"
+tmux -S "$tmux_socket" set-environment -g ILMARI_EXPECTED_SOCKET_IDENTITY \
+  "$expected_socket_identity"
 
 # A process launched by a replaced server must fail closed before it starts or
 # stops anything, even when the replacement reuses the same socket pathname.
@@ -81,6 +112,20 @@ tmux -S "$tmux_socket" set-option -g @ilmari_command 'ilmari --no-git'
 tmux -S "$tmux_socket" set-option -g @ilmari_popup_width '81%'
 tmux -S "$tmux_socket" set-option -g @ilmari_popup_height '73%'
 tmux -S "$tmux_socket" set-option -g @ilmari_popup_extra ''
+
+# All configured-option reads may succeed, but replacing the generation before
+# the receiving server accepts the start action must not launch the command.
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_command \
+  'ilmari daemon start --must-not-start late-rejection'
+: >"$test_log"
+if PATH="$tmp_dir/replacement-bin:$tmp_dir/bin:$PATH" REAL_TMUX="$real_tmux" \
+  ILMARI_REJECT_GUARDED_MATCH='daemon start --must-not-start late-rejection' \
+  ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux" 2>/dev/null; then
+  fail 'TPM accepted a configured start after the final option read'
+fi
+[[ ! -s "$test_log" ]] || fail 'rejected configured start command executed'
+
 tmux -S "$tmux_socket" set-option -g @ilmari_daemon_command 'ilmari daemon start'
 
 PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
@@ -115,6 +160,17 @@ binding="$(read_popup_binding)"
 # command; it does not need to be present in tmux configuration.
 : >"$test_log"
 tmux -S "$tmux_socket" set-option -g @ilmari_daemon 'off'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_stop_command \
+  'ilmari daemon stop --must-not-stop late-rejection'
+if PATH="$tmp_dir/replacement-bin:$tmp_dir/bin:$PATH" REAL_TMUX="$real_tmux" \
+  ILMARI_REJECT_GUARDED_MATCH='daemon stop --must-not-stop late-rejection' \
+  ILMARI_REQUIRE_STOP_SNAPSHOT=1 ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux" 2>/dev/null; then
+  fail 'TPM accepted a configured stop after the final option read'
+fi
+[[ ! -s "$test_log" ]] || fail 'rejected configured stop command executed'
+tmux -S "$tmux_socket" set-option -gu @ilmari_daemon_stop_command
+
 PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
   bash "$repo_root/ilmari.tmux"
 grep -F "$tmux_context|daemon stop" "$test_log" >/dev/null \
