@@ -53,6 +53,8 @@ const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 type PaneSnapshotCollector = fn() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError>;
+type DaemonSnapshotRequester = fn(&Path) -> Result<ipc::SnapshotResponse, ipc::SnapshotClientError>;
+type DaemonSocketResolver = fn(&Path) -> PathBuf;
 type OutputTailCollector =
     fn(&[PaneSnapshot], &SessionTracker, &HashMap<String, AgentKind>) -> tmux::OutputTailCapture;
 
@@ -146,8 +148,7 @@ impl Default for AppConfig {
 }
 
 /// Start Ilmari in TUI mode when enabled, otherwise run the headless refresh loop.
-pub fn run(mut config: AppConfig) -> Result<()> {
-    config.ipc.socket_path = ipc::resolve_daemon_socket_path(&config.ipc.socket_path);
+pub fn run(config: AppConfig) -> Result<()> {
     #[cfg(feature = "tui")]
     if config.tui_enabled {
         return run_tui(config);
@@ -232,7 +233,11 @@ fn run_headless(mut config: AppConfig, daemon_mode: bool) -> Result<()> {
     }
 
     if daemon_mode && tmux::server_is_alive() {
-        tmux::clear_published_state();
+        tmux::clear_published_state(
+            std::process::id(),
+            Some(&app.daemon_socket_path),
+            app.mcp_server.as_ref().map(|server| server.url()),
+        );
     }
     Ok(())
 }
@@ -293,6 +298,8 @@ struct App {
     quit_on_activate: bool,
     display_offset: UtcOffset,
     collect_pane_snapshots: PaneSnapshotCollector,
+    request_daemon_snapshot: DaemonSnapshotRequester,
+    resolve_daemon_socket: DaemonSocketResolver,
     capture_output_tails: OutputTailCollector,
     session_tracker: SessionTracker,
     git_cache: GitSummaryCache,
@@ -605,9 +612,15 @@ impl App {
         let published_state = PublishedStateHandle::new(
             PublishedState::empty(refresh_interval).with_daemon_role(daemon_mode),
         );
-        let daemon_socket_path = ipc_config.socket_path.clone();
-        let (ipc_server, ipc_warning) = start_ipc_server(&ipc_config, published_state.clone());
-        let (mcp_server, mcp_warning) = start_mcp_server(&mcp_config, published_state.clone());
+        let daemon_socket_path = if daemon_mode {
+            ipc_config.socket_path.clone()
+        } else {
+            ipc::daemon_source_socket_path(&ipc_config.socket_path)
+        };
+        let (ipc_server, ipc_warning) =
+            start_ipc_server(&ipc_config, published_state.clone(), daemon_mode);
+        let (mcp_server, mcp_warning) =
+            start_mcp_server(&mcp_config, published_state.clone(), daemon_mode);
         let headless_warning = (!tui_enabled && !ipc_config.enabled && !mcp_config.enabled)
             .then(|| "headless: no socket or MCP endpoint enabled".to_string());
 
@@ -620,6 +633,8 @@ impl App {
             quit_on_activate,
             display_offset: display_utc_offset(),
             collect_pane_snapshots: tmux::collect_pane_snapshots,
+            request_daemon_snapshot: ipc::request_snapshot,
+            resolve_daemon_socket: ipc::resolve_daemon_socket_path,
             capture_output_tails: tmux::capture_output_tails_with_process_kinds,
             session_tracker: SessionTracker::new(),
             git_cache: GitSummaryCache::new(),
@@ -805,8 +820,9 @@ impl App {
         let refreshed_at_wallclock = SystemTime::now();
         let previous_statuses = self.alert_baseline.clone();
 
-        if self._ipc_server.is_none() {
-            match ipc::request_snapshot(&self.daemon_socket_path) {
+        if should_probe_daemon(self.daemon_mode, self._ipc_server.is_some()) {
+            let daemon_socket_path = (self.resolve_daemon_socket)(&self.daemon_socket_path);
+            match (self.request_daemon_snapshot)(&daemon_socket_path) {
                 Ok(snapshot) => {
                     let (sessions, git_summaries, mut warnings) =
                         snapshot.into_runtime(refreshed_at);
@@ -840,8 +856,31 @@ impl App {
 
         match (self.collect_pane_snapshots)() {
             Ok(collection) => {
+                if collection.snapshots.is_empty() && !collection.warnings.is_empty() {
+                    let warning = self
+                        .headless_warning
+                        .iter()
+                        .chain(self.ipc_warning.iter())
+                        .chain(self.mcp_warning.iter())
+                        .cloned()
+                        .chain(collection.warnings)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    if !self.has_good_rows {
+                        self.sessions.clear();
+                        self.selected_pane_id = None;
+                        self.expanded_pane_ids.clear();
+                        self.pane_jump_digits = None;
+                    }
+                    self.sync_model(
+                        warning,
+                        self.git_summaries.clone(),
+                        refreshed_at,
+                        refreshed_at_wallclock,
+                    );
+                    return;
+                }
                 let panes = collection.snapshots;
-                let preserve_alert_baseline = panes.is_empty() && !collection.warnings.is_empty();
                 let mut runtime_warnings = self
                     .headless_warning
                     .iter()
@@ -893,9 +932,7 @@ impl App {
                 };
                 normalize_expanded_pane_ids(&mut self.expanded_pane_ids, &self.sessions);
                 self.emit_bells(count_alert_transitions(&previous_statuses, &self.sessions));
-                if !preserve_alert_baseline {
-                    self.alert_baseline = current_statuses(&self.sessions);
-                }
+                self.alert_baseline = current_statuses(&self.sessions);
 
                 let (status_line, git_summaries) = if self.show_git {
                     let git_report = self.git_cache.summary_rows_for_workspaces(
@@ -1671,10 +1708,15 @@ fn output_tail_capture_warning(failures: &[tmux::OutputTailCaptureFailure]) -> O
 fn start_ipc_server(
     config: &IpcConfig,
     state: PublishedStateHandle,
+    daemon_mode: bool,
 ) -> (Option<IpcServer>, Option<String>) {
     match IpcServer::start(config, state) {
         Ok(Some(server)) => {
-            ipc::publish_socket_path_to_tmux(server.path());
+            if daemon_mode {
+                ipc::publish_daemon_socket_path_to_tmux(server.path());
+            } else {
+                ipc::publish_socket_path_to_tmux(server.path());
+            }
             (Some(server), None)
         }
         Ok(None) | Err(IpcError::AlreadyRunning(_)) => (None, None),
@@ -1682,13 +1724,22 @@ fn start_ipc_server(
     }
 }
 
+fn should_probe_daemon(daemon_mode: bool, _has_local_ipc_server: bool) -> bool {
+    !daemon_mode
+}
+
 fn start_mcp_server(
     config: &McpConfig,
     state: PublishedStateHandle,
+    daemon_mode: bool,
 ) -> (Option<McpServer>, Option<String>) {
     match McpServer::start(config, state) {
         Ok(Some(server)) => {
-            mcp::publish_mcp_url_to_tmux(server.url());
+            if daemon_mode {
+                mcp::publish_daemon_mcp_url_to_tmux(server.url());
+            } else {
+                mcp::publish_mcp_url_to_tmux(server.url());
+            }
             (Some(server), None)
         }
         Ok(None) => (None, None),
@@ -1793,14 +1844,16 @@ mod tests {
     use super::{
         build_model, count_alert_transitions, derive_path_labels, normalize_selected_pane_id,
         output_tail_capture_enabled_from_var, process_refresh_interval_from_var,
-        quit_on_activate_from_vars, refresh_interval_from_var, relabel_git_summaries, App,
-        CachedProcessTree, ProcessUsageCache, DEFAULT_PROCESS_REFRESH_INTERVAL,
-        DEFAULT_REFRESH_INTERVAL,
+        quit_on_activate_from_vars, refresh_interval_from_var, relabel_git_summaries,
+        should_probe_daemon, App, CachedProcessTree, ProcessUsageCache,
+        DEFAULT_PROCESS_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL,
     };
     use crate::agents::SessionTracker;
     use crate::colors::Palette;
     use crate::git::GitSummaryReport;
-    use crate::ipc::IpcConfig;
+    use crate::ipc::{
+        IpcConfig, PublishedState, SnapshotClientError, SnapshotResponse, StateBuildOptions,
+    };
     use crate::mcp::McpConfig;
     use crate::model::{
         AgentDetail, AgentDetailTone, AgentKind, GitSummaryRow, ResourceUsage, SessionProcessUsage,
@@ -1811,6 +1864,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime};
     use time::UtcOffset;
@@ -1829,6 +1883,34 @@ mod tests {
         let mut app = App::default();
         app.handle_key_event(KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn popup_keeps_probing_daemon_when_it_publishes_a_local_socket() {
+        assert!(should_probe_daemon(false, true));
+        assert!(should_probe_daemon(false, false));
+        assert!(!should_probe_daemon(true, true));
+    }
+
+    #[test]
+    fn popup_re_resolves_daemon_socket_after_late_custom_publication() {
+        LATE_DAEMON_DISCOVERY.store(0, AtomicOrdering::SeqCst);
+        let mut app = App {
+            show_git: false,
+            daemon_socket_path: PathBuf::from("/tmp/ilmari-daemon-fallback.sock"),
+            resolve_daemon_socket: late_daemon_socket_resolver,
+            request_daemon_snapshot: late_daemon_snapshot,
+            collect_pane_snapshots: failing_pane_snapshot,
+            ..App::default()
+        };
+
+        app.refresh(false);
+        assert!(app.sessions.is_empty());
+
+        LATE_DAEMON_DISCOVERY.store(1, AtomicOrdering::SeqCst);
+        app.refresh(false);
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].pane.pane_id, "%42");
     }
 
     #[test]
@@ -2611,8 +2693,80 @@ mod tests {
         app.collect_pane_snapshots = warning_only_empty_pane_snapshot;
         app.refresh(false);
 
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].pane.pane_id, "%5");
         assert_eq!(app.alert_baseline.get("%5"), Some(&previous_status));
         assert!(app.model.status_line.contains("skipped malformed pane line"));
+    }
+
+    #[test]
+    fn daemon_rows_survive_malformed_direct_fallback_and_later_direct_recovery() {
+        let mut app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            true,
+            true,
+            true,
+            false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
+        );
+        app.show_git = false;
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.capture_output_tails = panic_if_output_tail_capture_called;
+        app.request_daemon_snapshot = sample_daemon_snapshot;
+        app.collect_pane_snapshots = warning_only_empty_pane_snapshot;
+
+        app.refresh(false);
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].pane.pane_id, "%42");
+
+        app.request_daemon_snapshot = unavailable_daemon_snapshot;
+        app.refresh(false);
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].pane.pane_id, "%42");
+        assert!(app.model.status_line.contains("skipped malformed pane line"));
+
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+        app.refresh(false);
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(app.sessions[0].pane.pane_id, "%5");
+        assert!(!app.model.status_line.contains("skipped malformed pane line"));
+    }
+
+    #[test]
+    fn warning_only_initial_failure_does_not_become_last_good_and_can_recover() {
+        let mut app = App::new_with_process_refresh(
+            Palette::default(),
+            DEFAULT_REFRESH_INTERVAL,
+            DEFAULT_PROCESS_REFRESH_INTERVAL,
+            false,
+            true,
+            true,
+            true,
+            false,
+            IpcConfig::disabled(),
+            McpConfig::disabled(),
+        );
+        app.show_git = false;
+        app.process_cache =
+            ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.capture_output_tails = panic_if_output_tail_capture_called;
+        app.request_daemon_snapshot = unavailable_daemon_snapshot;
+        app.collect_pane_snapshots = warning_only_empty_pane_snapshot;
+
+        app.refresh(false);
+        assert!(!app.has_good_rows);
+        assert!(app.sessions.is_empty());
+        assert!(app.model.status_line.contains("skipped malformed pane line"));
+
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+        app.refresh(false);
+        assert!(app.has_good_rows);
+        assert_eq!(app.sessions[0].pane.pane_id, "%5");
     }
 
     #[test]
@@ -2982,6 +3136,48 @@ mod tests {
             snapshots: Vec::new(),
             warnings: vec!["tmux: skipped malformed pane line 1: invalid row".to_string()],
         })
+    }
+
+    fn sample_daemon_snapshot(_path: &Path) -> Result<SnapshotResponse, SnapshotClientError> {
+        let refreshed_at = Instant::now();
+        let sessions = [session("%42", SessionStatus::Running)];
+        Ok(PublishedState::from_sessions(StateBuildOptions {
+            sessions: &sessions,
+            status_line: None,
+            observed_at: SystemTime::now(),
+            refreshed_at,
+            refresh_interval: DEFAULT_REFRESH_INTERVAL,
+            revision: 1,
+        })
+        .with_daemon_role(true)
+        .snapshot_response())
+    }
+
+    static LATE_DAEMON_DISCOVERY: AtomicUsize = AtomicUsize::new(0);
+
+    fn late_daemon_socket_resolver(fallback: &Path) -> PathBuf {
+        if LATE_DAEMON_DISCOVERY.load(AtomicOrdering::SeqCst) == 0 {
+            fallback.to_path_buf()
+        } else {
+            PathBuf::from("/tmp/ilmari-late-custom-daemon.sock")
+        }
+    }
+
+    fn late_daemon_snapshot(path: &Path) -> Result<SnapshotResponse, SnapshotClientError> {
+        match LATE_DAEMON_DISCOVERY.load(AtomicOrdering::SeqCst) {
+            0 => {
+                assert_eq!(path, Path::new("/tmp/ilmari-daemon-fallback.sock"));
+                Err(SnapshotClientError::Unavailable)
+            }
+            _ => {
+                assert_eq!(path, Path::new("/tmp/ilmari-late-custom-daemon.sock"));
+                sample_daemon_snapshot(path)
+            }
+        }
+    }
+
+    fn unavailable_daemon_snapshot(_path: &Path) -> Result<SnapshotResponse, SnapshotClientError> {
+        Err(SnapshotClientError::Unavailable)
     }
 
     fn sample_panes_for_output_tail_capture(

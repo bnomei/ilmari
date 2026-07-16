@@ -7,10 +7,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,7 +27,16 @@ pub const LIST_PANES_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_id}\t#{s
 /// Default `capture-pane -S` window for output-tail classification.
 pub const DEFAULT_CAPTURE_START: &str = "-80";
 const PANE_SNAPSHOT_FIELD_COUNT: usize = 10;
-static ORIGIN_SOCKET_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static ORIGIN_SERVER_IDENTITY: OnceLock<Option<TmuxServerIdentity>> = OnceLock::new();
+
+/// Immutable identity of the tmux server generation that originated this process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TmuxServerIdentity {
+    pub socket_path: PathBuf,
+    pub server_pid: u32,
+    pub socket_device: Option<u64>,
+    pub socket_inode: Option<u64>,
+}
 
 /// Parsed tmux pane row from `list-panes -aF` with stable session, window, and pane ids.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,36 +301,85 @@ pub fn set_global_option(name: &str, value: &str) -> Result<(), TmuxError> {
     Ok(())
 }
 
-/// Resolve and freeze the tmux server socket that originated this process.
+/// Parse the tmux socket path by removing the numeric server/client suffix from the right.
 ///
-/// `TMUX` starts with the server socket path. Caching it prevents a later
-/// environment mutation from redirecting subprocesses to another server.
-pub fn origin_socket_path() -> Option<&'static Path> {
-    ORIGIN_SOCKET_PATH
-        .get_or_init(|| {
-            let candidate = env::var_os("TMUX").and_then(|value| {
-                let value = value.to_string_lossy();
-                value.split(',').next().filter(|path| !path.is_empty()).map(PathBuf::from)
-            })?;
-            let canonical = Command::new("tmux")
-                .arg("-S")
-                .arg(&candidate)
-                .args(["display-message", "-p", "#{socket_path}"])
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .map(|path| path.trim().to_string())
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from);
-            Some(canonical.unwrap_or(candidate))
-        })
-        .as_deref()
+/// Socket paths may contain commas, so splitting at the first comma is incorrect.
+pub(crate) fn socket_path_from_tmux_context(value: &str) -> Option<PathBuf> {
+    tmux_context_from_value(value).map(|(path, _server_pid)| path)
 }
 
-/// Return whether the originating tmux server still answers on its exact socket.
+fn tmux_context_from_value(value: &str) -> Option<(PathBuf, u32)> {
+    let (path_and_pid, client) = value.rsplit_once(',')?;
+    client.parse::<u64>().ok()?;
+    let (path, pid) = path_and_pid.rsplit_once(',')?;
+    let server_pid = pid.parse::<u32>().ok()?;
+    (!path.is_empty()).then(|| (PathBuf::from(path), server_pid))
+}
+
+fn bind_origin_identity(value: &str, probed: TmuxServerIdentity) -> Option<TmuxServerIdentity> {
+    let (context_path, context_server_pid) = tmux_context_from_value(value)?;
+    let canonical_context_path = fs::canonicalize(&context_path).unwrap_or(context_path);
+    (probed.server_pid == context_server_pid && probed.socket_path == canonical_context_path)
+        .then_some(probed)
+}
+
+/// Resolve and freeze the tmux server generation that originated this process.
+pub fn origin_server_identity() -> Option<&'static TmuxServerIdentity> {
+    ORIGIN_SERVER_IDENTITY
+        .get_or_init(|| {
+            let context = env::var_os("TMUX")?;
+            let context = context.to_string_lossy();
+            let (candidate, _context_server_pid) = tmux_context_from_value(context.as_ref())?;
+            let probed = probe_server_identity_at(&candidate)?;
+            bind_origin_identity(context.as_ref(), probed)
+        })
+        .as_ref()
+}
+
+/// Return the canonical socket path for the frozen originating tmux generation.
+pub fn origin_socket_path() -> Option<&'static Path> {
+    origin_server_identity().map(|identity| identity.socket_path.as_path())
+}
+
+/// Return whether the exact originating tmux server generation still answers.
 pub fn server_is_alive() -> bool {
-    run_tmux_command(&TmuxCommand::new(["display-message", "-p", "#{socket_path}"])).is_ok()
+    origin_server_identity().is_some_and(|origin| {
+        probe_server_identity_at(&origin.socket_path).as_ref() == Some(origin)
+    })
+}
+
+fn probe_server_identity_at(socket_path: &Path) -> Option<TmuxServerIdentity> {
+    let output = Command::new("tmux")
+        .arg("-S")
+        .arg(socket_path)
+        .args(["display-message", "-p", "#{socket_path}\t#{pid}"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let (reported_path, server_pid) = stdout.trim_end().rsplit_once('\t')?;
+    let server_pid = server_pid.parse::<u32>().ok()?;
+    let reported_path = PathBuf::from(reported_path);
+    let canonical_path = fs::canonicalize(&reported_path).unwrap_or(reported_path);
+    let (socket_device, socket_inode) = socket_file_identity(&canonical_path);
+    Some(TmuxServerIdentity {
+        socket_path: canonical_path,
+        server_pid,
+        socket_device,
+        socket_inode,
+    })
+}
+
+#[cfg(unix)]
+fn socket_file_identity(path: &Path) -> (Option<u64>, Option<u64>) {
+    fs::metadata(path)
+        .map(|metadata| (Some(metadata.dev()), Some(metadata.ino())))
+        .unwrap_or_default()
+}
+
+#[cfg(not(unix))]
+fn socket_file_identity(_path: &Path) -> (Option<u64>, Option<u64>) {
+    (None, None)
 }
 
 /// Read one global user option from the originating server.
@@ -393,8 +455,24 @@ pub fn focus_and_renderer_overrides() -> Result<FocusRendererState, TmuxError> {
     Ok(state)
 }
 
-/// Clear all daemon-owned pane/global publication without touching theme formats.
-pub fn clear_published_state() {
+/// Clear daemon-owned publication without removing endpoints published by another role.
+pub fn clear_published_state(
+    owned_daemon_pid: u32,
+    owned_socket_path: Option<&Path>,
+    owned_mcp_url: Option<&str>,
+) {
+    let owned_daemon_pid = owned_daemon_pid.to_string();
+    let owned_socket_path = owned_socket_path.map(|path| path.to_string_lossy().into_owned());
+    if !daemon_publication_matches(
+        global_option("@ilmari_daemon_owner_pid").ok().as_deref(),
+        global_option("@ilmari_daemon_socket_path").ok().as_deref(),
+        global_option("@ilmari_daemon_mcp_url").ok().as_deref(),
+        &owned_daemon_pid,
+        owned_socket_path.as_deref(),
+        owned_mcp_url,
+    ) {
+        return;
+    }
     if let Ok(collection) = collect_pane_snapshots() {
         for pane in collection.snapshots {
             let _ = set_pane_option(&pane.pane_id, "@ilmari_state", None);
@@ -407,15 +485,52 @@ pub fn clear_published_state() {
         "@ilmari_running_count",
         "@ilmari_waiting_count",
         "@ilmari_finished_count",
-        "@ilmari_socket_path",
-        "@ilmari_mcp_url",
     ] {
         let _ = unset_global_option(option);
     }
+    if let Some(path) = owned_socket_path.as_deref() {
+        unset_global_option_if_value("@ilmari_daemon_socket_path", path);
+        unset_global_option_if_value("@ilmari_socket_path", path);
+    }
+    if let Some(url) = owned_mcp_url {
+        unset_global_option_if_value("@ilmari_daemon_mcp_url", url);
+        unset_global_option_if_value("@ilmari_mcp_url", url);
+    }
+    unset_global_option_if_value("@ilmari_daemon_owner_pid", &owned_daemon_pid);
+}
+
+fn daemon_publication_matches(
+    current_owner_pid: Option<&str>,
+    current_socket_path: Option<&str>,
+    current_mcp_url: Option<&str>,
+    expected_owner_pid: &str,
+    expected_socket_path: Option<&str>,
+    expected_mcp_url: Option<&str>,
+) -> bool {
+    current_owner_pid == Some(expected_owner_pid)
+        && expected_socket_path.is_none_or(|expected| current_socket_path == Some(expected))
+        && expected_mcp_url.is_none_or(|expected| current_mcp_url == Some(expected))
+}
+
+fn unset_global_option_if_value(name: &str, expected: &str) {
+    if publication_value_matches(global_option(name).ok().as_deref(), expected) {
+        let _ = unset_global_option(name);
+    }
+}
+
+fn publication_value_matches(current: Option<&str>, expected: &str) -> bool {
+    current == Some(expected)
 }
 
 fn run_tmux_command(command: &TmuxCommand) -> Result<String, TmuxError> {
     let socket_path = origin_socket_path().ok_or(TmuxError::MissingSocket)?;
+    if !server_is_alive() {
+        return Err(TmuxError::CommandFailed {
+            command: command.render(socket_path),
+            exit_code: None,
+            stderr: "originating tmux server generation changed or disappeared".to_string(),
+        });
+    }
     let output = command.as_command(socket_path).output()?;
     if !output.status.success() {
         return Err(TmuxError::CommandFailed {
@@ -431,9 +546,11 @@ fn run_tmux_command(command: &TmuxCommand) -> Result<String, TmuxError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_output_tail_command, capture_output_tails_with_process_kinds_using, jump_command,
-        pane_snapshot_command, parse_pane_snapshots, PaneSnapshot, PaneSnapshotParseError,
-        TmuxError, DEFAULT_CAPTURE_START, LIST_PANES_FORMAT,
+        bind_origin_identity, capture_output_tail_command,
+        capture_output_tails_with_process_kinds_using, daemon_publication_matches, jump_command,
+        pane_snapshot_command, parse_pane_snapshots, publication_value_matches,
+        socket_path_from_tmux_context, PaneSnapshot, PaneSnapshotParseError, TmuxError,
+        TmuxServerIdentity, DEFAULT_CAPTURE_START, LIST_PANES_FORMAT,
     };
     use crate::agents::SessionTracker;
     use std::collections::HashMap;
@@ -456,6 +573,82 @@ mod tests {
             &command.argv_for_socket(std::path::Path::new("/tmp/tmux-exact"))[..3],
             &["-S", "/tmp/tmux-exact", "list-panes"]
         );
+    }
+
+    #[test]
+    fn tmux_context_is_parsed_from_the_right_for_comma_socket_paths() {
+        assert_eq!(
+            socket_path_from_tmux_context("/tmp/ilmari,custom/tmux.sock,4312,7"),
+            Some(PathBuf::from("/tmp/ilmari,custom/tmux.sock"))
+        );
+        assert_eq!(
+            socket_path_from_tmux_context("/tmp/plain.sock,4312,0"),
+            Some(PathBuf::from("/tmp/plain.sock"))
+        );
+        assert_eq!(socket_path_from_tmux_context("/tmp/plain.sock,not-a-pid,0"), None);
+    }
+
+    #[test]
+    fn server_generation_identity_changes_with_pid_or_socket_inode() {
+        let first = TmuxServerIdentity {
+            socket_path: PathBuf::from("/tmp/tmux.sock"),
+            server_pid: 10,
+            socket_device: Some(1),
+            socket_inode: Some(100),
+        };
+        let mut replacement = first.clone();
+        replacement.server_pid = 11;
+        replacement.socket_inode = Some(101);
+
+        assert_ne!(first, replacement);
+    }
+
+    #[test]
+    fn initial_origin_binding_rejects_replacement_before_first_probe() {
+        let responding = TmuxServerIdentity {
+            socket_path: PathBuf::from("/tmp/ilmari,custom/tmux.sock"),
+            server_pid: 11,
+            socket_device: Some(1),
+            socket_inode: Some(101),
+        };
+
+        assert!(
+            bind_origin_identity("/tmp/ilmari,custom/tmux.sock,10,7", responding.clone()).is_none()
+        );
+        assert_eq!(
+            bind_origin_identity("/tmp/ilmari,custom/tmux.sock,11,7", responding.clone()),
+            Some(responding.clone())
+        );
+        assert!(bind_origin_identity("/tmp/another.sock,11,7", responding).is_none());
+    }
+
+    #[test]
+    fn cleanup_only_removes_exact_daemon_role_publications() {
+        assert!(publication_value_matches(
+            Some("http://127.0.0.1:4010/mcp"),
+            "http://127.0.0.1:4010/mcp"
+        ));
+        assert!(!publication_value_matches(
+            Some("http://127.0.0.1:4020/mcp"),
+            "http://127.0.0.1:4010/mcp"
+        ));
+        assert!(!publication_value_matches(None, "daemon-value"));
+        assert!(daemon_publication_matches(
+            Some("42"),
+            Some("/tmp/daemon.sock"),
+            Some("http://127.0.0.1:4010/mcp"),
+            "42",
+            Some("/tmp/daemon.sock"),
+            Some("http://127.0.0.1:4010/mcp"),
+        ));
+        assert!(!daemon_publication_matches(
+            Some("43"),
+            Some("/tmp/replacement.sock"),
+            Some("http://127.0.0.1:4020/mcp"),
+            "42",
+            Some("/tmp/daemon.sock"),
+            Some("http://127.0.0.1:4010/mcp"),
+        ));
     }
 
     #[test]

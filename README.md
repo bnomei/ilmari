@@ -71,7 +71,7 @@ Linux and macOS binaries, and runtime usage assumes a Unix-like shell with
 `tmux` available. Windows is currently out of scope because Windows tmux
 behavior is not implemented or tested.
 
-tmux popup usage requires tmux 3.2 or newer. Cargo builds require Rust 1.86.0
+tmux popup usage requires tmux 3.2 or newer. Cargo builds require Rust 1.88.0
 or newer.
 
 ## Quickstart
@@ -125,6 +125,7 @@ set -g @ilmari_popup_height '85%'
 set -g @ilmari_bind_key 'on'
 set -g @ilmari_daemon 'on'
 set -g @ilmari_daemon_command '/opt/homebrew/bin/ilmari daemon start'
+set -g @ilmari_daemon_stop_command '/opt/homebrew/bin/ilmari daemon stop'
 ```
 
 | TPM option | Default | Purpose |
@@ -136,7 +137,8 @@ set -g @ilmari_daemon_command '/opt/homebrew/bin/ilmari daemon start'
 | `@ilmari_popup_extra` | empty | Additional whitespace-separated `display-popup` arguments. |
 | `@ilmari_bind_key` | `on` | Whether the plugin installs the popup binding. |
 | `@ilmari_daemon` | `on` | Whether this tmux server should run an Ilmari daemon. |
-| `@ilmari_daemon_command` | `ilmari daemon start` | Foreground daemon command that the plugin starts in the background. Commands ending in `daemon start` use the same executable/wrapper for `daemon stop`. |
+| `@ilmari_daemon_command` | `ilmari daemon start` | Foreground daemon command that the plugin starts in the background. |
+| `@ilmari_daemon_stop_command` | `ilmari daemon stop` | Command used to stop the daemon when daemon management is disabled. Set it explicitly whenever the start command is customized. |
 
 Set `@ilmari_bind_key` to `off` if you want TPM to install the plugin but prefer
 to define your own binding. Set `@ilmari_daemon` to `off` to stop the daemon for
@@ -145,6 +147,12 @@ the daemon enabled is safe: `daemon start` recognizes the healthy compatible
 instance and exits successfully instead of starting a duplicate. The plugin
 pins daemon lifecycle and all its own tmux commands to the socket of the server
 that loaded it.
+
+The start and stop options are an explicit pair of shell commands; the plugin
+does not try to derive one from the other. If the start command uses an absolute
+path, wrapper, or additional arguments, configure a matching stop command too.
+Both commands receive the same originating `TMUX` context, including custom
+socket paths that contain commas.
 
 ### 2. Add a tmux popup binding
 

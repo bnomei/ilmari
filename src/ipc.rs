@@ -341,10 +341,16 @@ impl PublishedState {
     fn ping_response(&self) -> PingResponse {
         PingResponse {
             ok: true,
-            response_type: "ping",
+            response_type: "ping".to_string(),
             schema_version: SCHEMA_VERSION,
             producer: self.producer.clone(),
             observed_at: self.observed_at.clone(),
+            snapshot_supported: true,
+            snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION,
+            revision: self.revision,
+            observed_unix_ms: self.observed_unix_ms,
+            heartbeat_unix_ms: self.observed_unix_ms,
+            ttl_ms: self.ttl_ms,
         }
     }
 
@@ -617,30 +623,51 @@ pub struct Producer {
     pub pid: u32,
     pub role: String,
     pub tmux_socket_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_server_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_socket_device: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_socket_inode: Option<u64>,
 }
 
 impl Producer {
     fn current() -> Self {
+        let tmux_identity = tmux::origin_server_identity();
         Self {
             name: "ilmari".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             pid: std::process::id(),
             role: "app".to_string(),
-            tmux_socket_path: tmux::origin_socket_path()
-                .map(|path| path.to_string_lossy().into_owned()),
+            tmux_socket_path: tmux_identity
+                .map(|identity| identity.socket_path.to_string_lossy().into_owned()),
+            tmux_server_pid: tmux_identity.map(|identity| identity.server_pid),
+            tmux_socket_device: tmux_identity.and_then(|identity| identity.socket_device),
+            tmux_socket_inode: tmux_identity.and_then(|identity| identity.socket_inode),
         }
     }
 }
 
-#[cfg(any(feature = "socket", test))]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PingResponse {
     ok: bool,
     #[serde(rename = "type")]
-    response_type: &'static str,
+    response_type: String,
     schema_version: u32,
     producer: Producer,
     observed_at: String,
+    #[serde(default)]
+    snapshot_supported: bool,
+    #[serde(default)]
+    snapshot_schema_version: u32,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    observed_unix_ms: u64,
+    #[serde(default)]
+    heartbeat_unix_ms: u64,
+    #[serde(default)]
+    ttl_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -915,6 +942,15 @@ pub enum SnapshotClientError {
     #[error("Unix socket support is unavailable on this platform or build")]
     #[allow(dead_code)]
     Unavailable,
+}
+
+/// Reachability and snapshot-health classification for a daemon endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonEndpointState {
+    Unreachable,
+    Foreign,
+    OwnedUnhealthy,
+    Healthy,
 }
 
 /// Background Unix-socket listener serving line-oriented published-state requests.
@@ -1257,6 +1293,20 @@ fn validate_snapshot(
     response: SnapshotResponse,
     now_ms: u64,
 ) -> Result<SnapshotResponse, SnapshotClientError> {
+    validate_snapshot_for_origin(
+        response,
+        now_ms,
+        tmux::origin_server_identity(),
+        tmux::server_is_alive(),
+    )
+}
+
+fn validate_snapshot_for_origin(
+    response: SnapshotResponse,
+    now_ms: u64,
+    origin: Option<&tmux::TmuxServerIdentity>,
+    server_is_alive: bool,
+) -> Result<SnapshotResponse, SnapshotClientError> {
     if !response.ok
         || response.response_type != "snapshot"
         || response.producer.name != "ilmari"
@@ -1267,9 +1317,9 @@ fn validate_snapshot(
     if response.schema_version != SNAPSHOT_SCHEMA_VERSION {
         return Err(SnapshotClientError::Incompatible(response.schema_version));
     }
-    let expected_tmux_socket =
-        tmux::origin_socket_path().map(|path| path.to_string_lossy().into_owned());
-    if response.producer.tmux_socket_path != expected_tmux_socket || response.revision == 0 {
+    if !producer_generation_matches(&response.producer, origin, server_is_alive)
+        || response.revision == 0
+    {
         return Err(SnapshotClientError::Unhealthy);
     }
     if now_ms > response.observed_unix_ms.saturating_add(response.ttl_ms) {
@@ -1278,31 +1328,133 @@ fn validate_snapshot(
     Ok(response)
 }
 
-/// Return true only for a healthy compatible daemon on this socket.
+fn daemon_ping(path: &Path) -> Result<PingResponse, SnapshotClientError> {
+    serde_json::from_str(socket_request(path, "ping")?.trim()).map_err(Into::into)
+}
+
+fn producer_has_origin_scope(producer: &Producer) -> bool {
+    producer_has_scope(producer, tmux::origin_server_identity())
+}
+
+fn producer_has_scope(producer: &Producer, origin: Option<&tmux::TmuxServerIdentity>) -> bool {
+    let Some(origin) = origin else {
+        return false;
+    };
+    let expected_path = origin.socket_path.to_string_lossy();
+    producer.name == "ilmari"
+        && producer.role == "daemon"
+        && producer.tmux_socket_path.as_deref() == Some(expected_path.as_ref())
+}
+
+fn producer_generation_matches(
+    producer: &Producer,
+    origin: Option<&tmux::TmuxServerIdentity>,
+    server_is_alive: bool,
+) -> bool {
+    let Some(origin) = origin else {
+        return false;
+    };
+    server_is_alive
+        && producer_has_scope(producer, Some(origin))
+        && producer.tmux_server_pid == Some(origin.server_pid)
+        && origin.socket_device.is_none_or(|device| producer.tmux_socket_device == Some(device))
+        && origin.socket_inode.is_none_or(|inode| producer.tmux_socket_inode == Some(inode))
+}
+
+fn validate_ping(response: &PingResponse, now_ms: u64) -> DaemonEndpointState {
+    validate_ping_for_origin(
+        response,
+        now_ms,
+        tmux::origin_server_identity(),
+        tmux::server_is_alive(),
+    )
+}
+
+fn validate_ping_for_origin(
+    response: &PingResponse,
+    now_ms: u64,
+    origin: Option<&tmux::TmuxServerIdentity>,
+    server_is_alive: bool,
+) -> DaemonEndpointState {
+    if !response.ok
+        || response.response_type != "ping"
+        || !producer_has_scope(&response.producer, origin)
+    {
+        return DaemonEndpointState::Foreign;
+    }
+    if response.schema_version != SCHEMA_VERSION
+        || !producer_generation_matches(&response.producer, origin, server_is_alive)
+        || !response.snapshot_supported
+        || response.snapshot_schema_version != SNAPSHOT_SCHEMA_VERSION
+        || response.revision == 0
+        || response.observed_unix_ms == 0
+        || response.heartbeat_unix_ms != response.observed_unix_ms
+        || response.ttl_ms == 0
+        || now_ms > response.heartbeat_unix_ms.saturating_add(response.ttl_ms)
+    {
+        return DaemonEndpointState::OwnedUnhealthy;
+    }
+    DaemonEndpointState::Healthy
+}
+
+/// Classify a listener separately from compatible-and-fresh snapshot health.
+pub fn daemon_endpoint_state(path: &Path) -> DaemonEndpointState {
+    let Ok(response) = daemon_ping(path) else {
+        return if daemon_socket_is_live(path) {
+            DaemonEndpointState::Foreign
+        } else {
+            DaemonEndpointState::Unreachable
+        };
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(duration_ms)
+        .unwrap_or_default();
+    validate_ping(&response, now_ms)
+}
+
+/// Return true only for a compatible daemon with a fresh snapshot heartbeat.
 pub fn daemon_is_healthy(path: &Path) -> bool {
+    daemon_endpoint_state(path) == DaemonEndpointState::Healthy
+}
+
+/// Return true for an Ilmari daemon in this tmux socket scope, including stale generations.
+pub fn daemon_is_owned(path: &Path) -> bool {
+    daemon_owner_pid(path).is_some()
+}
+
+/// Return the process identity of an owned daemon, including an unhealthy one.
+pub fn daemon_owner_pid(path: &Path) -> Option<u32> {
     let Ok(response) = socket_request(path, "ping") else {
-        return false;
+        return None;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(response.trim()) else {
-        return false;
+    let Ok(response) = serde_json::from_str::<PingResponse>(response.trim()) else {
+        return None;
     };
-    let expected_tmux_socket =
-        tmux::origin_socket_path().map(|path| path.to_string_lossy().into_owned());
-    value["ok"] == true
-        && value["type"] == "ping"
-        && value["schema_version"].as_u64() == Some(u64::from(SCHEMA_VERSION))
-        && value["producer"]["name"] == "ilmari"
-        && value["producer"]["role"] == "daemon"
-        && value["producer"]["tmux_socket_path"].as_str() == expected_tmux_socket.as_deref()
+    (response.ok
+        && response.response_type == "ping"
+        && response.producer.name == "ilmari"
+        && response.producer.role == "daemon"
+        && producer_has_origin_scope(&response.producer))
+    .then_some(response.producer.pid)
 }
 
 /// Prefer the daemon path already published by this exact tmux server.
 pub fn resolve_daemon_socket_path(configured: &Path) -> PathBuf {
-    tmux::global_option("@ilmari_socket_path")
-        .ok()
+    ["@ilmari_daemon_socket_path", "@ilmari_socket_path"]
+        .into_iter()
+        .filter_map(|option| tmux::global_option(option).ok())
         .map(PathBuf::from)
-        .filter(|path| daemon_is_healthy(path))
+        .find(|path| daemon_is_owned(path))
         .unwrap_or_else(|| configured.to_path_buf())
+}
+
+/// Derive the daemon snapshot-source endpoint without taking the legacy app socket.
+pub fn daemon_source_socket_path(configured: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    configured.hash(&mut hasher);
+    let daemon_name = format!("ilmari-daemon-{:016x}.sock", hasher.finish());
+    configured.parent().unwrap_or_else(|| Path::new(".")).join(daemon_name)
 }
 
 pub fn daemon_socket_is_live(path: &Path) -> bool {
@@ -1317,8 +1469,11 @@ pub fn daemon_socket_is_live(path: &Path) -> bool {
     }
 }
 
-/// Ask a daemon to stop, returning false when no healthy listener is reachable.
+/// Ask an owned daemon to stop, even when its snapshot heartbeat is stale or incompatible.
 pub fn request_daemon_stop(path: &Path) -> bool {
+    if !daemon_is_owned(path) {
+        return false;
+    }
     socket_request(path, "stop")
         .ok()
         .and_then(|response| serde_json::from_str::<serde_json::Value>(response.trim()).ok())
@@ -1418,9 +1573,9 @@ fn socket_enabled_from_var(value: Option<&str>) -> bool {
 fn default_socket_path(env: &BTreeMap<String, String>) -> PathBuf {
     let identity = env
         .get("TMUX")
-        .and_then(|value| value.split(',').next())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("standalone");
+        .and_then(|value| tmux::socket_path_from_tmux_context(value))
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| "standalone".to_string());
     let user = safe_path_segment(env.get("USER").map(String::as_str).unwrap_or("unknown"));
     let mut hasher = DefaultHasher::new();
     identity.hash(&mut hasher);
@@ -1609,16 +1764,34 @@ fn last_segments(components: &[String], depth: usize) -> String {
     components[start..].join("/")
 }
 
-/// Publish the active socket path to `@ilmari_socket_path` for external discovery.
+/// Publish the explicit legacy app/socket endpoint without claiming daemon discovery.
 pub fn publish_socket_path_to_tmux(path: &Path) {
     let socket_path = path.to_string_lossy();
     let _ = tmux::set_global_option("@ilmari_socket_path", socket_path.as_ref());
 }
 
+/// Publish the daemon snapshot-source endpoint separately from legacy app sockets.
+pub fn publish_daemon_socket_path_to_tmux(path: &Path) {
+    let socket_path = path.to_string_lossy();
+    let _ = tmux::set_global_option("@ilmari_daemon_socket_path", socket_path.as_ref());
+    let _ = tmux::set_global_option("@ilmari_daemon_owner_pid", &std::process::id().to_string());
+    // MCP startup follows IPC startup. Drop only stale daemon-role metadata;
+    // the public compatibility URL may currently belong to a popup.
+    let _ = tmux::unset_global_option("@ilmari_daemon_mcp_url");
+    let legacy_listener_is_live = tmux::global_option("@ilmari_socket_path")
+        .ok()
+        .filter(|published| !published.is_empty())
+        .is_some_and(|published| daemon_socket_is_live(Path::new(&published)));
+    if !legacy_listener_is_live {
+        let _ = tmux::set_global_option("@ilmari_socket_path", socket_path.as_ref());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_request, socket_enabled_from_var, validate_snapshot, IpcConfig, PublishedState,
+        encode_request, socket_enabled_from_var, validate_ping_for_origin,
+        validate_snapshot_for_origin, DaemonEndpointState, IpcConfig, PingResponse, PublishedState,
         PublishedStateHandle, SnapshotClientError, StateBuildOptions, LIST_RESOURCE_URI,
     };
     #[cfg(all(unix, feature = "socket"))]
@@ -1629,7 +1802,7 @@ mod tests {
         AgentDetail, AgentDetailTone, AgentKind, GitSummaryRow, ResourceUsage, SessionProcessUsage,
         SessionRecord, SessionStatus, SubtaskProcess,
     };
-    use crate::tmux::PaneSnapshot;
+    use crate::tmux::{PaneSnapshot, TmuxServerIdentity};
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -1673,7 +1846,7 @@ mod tests {
         }]);
 
         let response = encode_request("snapshot", &state);
-        let snapshot: super::SnapshotResponse =
+        let mut snapshot: super::SnapshotResponse =
             serde_json::from_str(&response).expect("snapshot must deserialize");
         assert_eq!(snapshot.schema_version, super::SNAPSHOT_SCHEMA_VERSION);
         assert_eq!(snapshot.revision, 9);
@@ -1683,18 +1856,106 @@ mod tests {
         assert_eq!(snapshot.git_summaries[0].branch_name, "main");
         assert_eq!(snapshot.warnings, ["one warning"]);
 
+        let identity = TmuxServerIdentity {
+            socket_path: "/tmp/tmux.sock".into(),
+            server_pid: 412,
+            socket_device: Some(7),
+            socket_inode: Some(99),
+        };
+        snapshot.producer.tmux_socket_path = Some("/tmp/tmux.sock".to_string());
+        snapshot.producer.tmux_server_pid = Some(412);
+        snapshot.producer.tmux_socket_device = Some(7);
+        snapshot.producer.tmux_socket_inode = Some(99);
         let now_ms = snapshot.observed_unix_ms;
-        assert!(validate_snapshot(snapshot.clone(), now_ms).is_ok());
+        assert!(
+            validate_snapshot_for_origin(snapshot.clone(), now_ms, Some(&identity), true).is_ok()
+        );
         assert!(matches!(
-            validate_snapshot(snapshot.clone(), now_ms + snapshot.ttl_ms + 1),
+            validate_snapshot_for_origin(
+                snapshot.clone(),
+                now_ms + snapshot.ttl_ms + 1,
+                Some(&identity),
+                true,
+            ),
             Err(SnapshotClientError::Stale)
         ));
         let mut incompatible = snapshot;
         incompatible.schema_version += 1;
         assert!(matches!(
-            validate_snapshot(incompatible, now_ms),
+            validate_snapshot_for_origin(incompatible, now_ms, Some(&identity), true),
             Err(SnapshotClientError::Incompatible(_))
         ));
+    }
+
+    #[test]
+    fn ping_is_additive_and_requires_fresh_compatible_snapshot_health() {
+        let state = PublishedState::from_sessions(StateBuildOptions {
+            sessions: &[],
+            status_line: None,
+            observed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            refreshed_at: Instant::now(),
+            refresh_interval: Duration::from_secs(5),
+            revision: 8,
+        })
+        .with_daemon_role(true);
+        let json: Value = serde_json::from_str(&encode_request("ping", &state)).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["type"], "ping");
+        assert_eq!(json["schema_version"], super::SCHEMA_VERSION);
+        assert_eq!(json["producer"]["name"], "ilmari");
+        assert_eq!(json["snapshot_supported"], true);
+        assert_eq!(json["snapshot_schema_version"], super::SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(json["revision"], 8);
+        assert_eq!(json["heartbeat_unix_ms"], json["observed_unix_ms"]);
+        assert_eq!(json["ttl_ms"], 15_000);
+
+        let identity = TmuxServerIdentity {
+            socket_path: "/tmp/ilmari,custom/tmux.sock".into(),
+            server_pid: 44,
+            socket_device: Some(3),
+            socket_inode: Some(21),
+        };
+        let mut ping: PingResponse = serde_json::from_value(json).unwrap();
+        ping.producer.tmux_socket_path = Some("/tmp/ilmari,custom/tmux.sock".to_string());
+        ping.producer.tmux_server_pid = Some(44);
+        ping.producer.tmux_socket_device = Some(3);
+        ping.producer.tmux_socket_inode = Some(21);
+        let now_ms = ping.heartbeat_unix_ms;
+        assert_eq!(
+            validate_ping_for_origin(&ping, now_ms, Some(&identity), true),
+            DaemonEndpointState::Healthy
+        );
+
+        let mut replacement_generation = ping.clone();
+        replacement_generation.producer.tmux_server_pid = Some(45);
+        replacement_generation.producer.tmux_socket_inode = Some(22);
+        assert_eq!(
+            validate_ping_for_origin(&replacement_generation, now_ms, Some(&identity), true,),
+            DaemonEndpointState::OwnedUnhealthy
+        );
+
+        let mut incompatible = ping.clone();
+        incompatible.snapshot_schema_version += 1;
+        assert_eq!(
+            validate_ping_for_origin(&incompatible, now_ms, Some(&identity), true),
+            DaemonEndpointState::OwnedUnhealthy
+        );
+
+        let mut no_revision = ping.clone();
+        no_revision.revision = 0;
+        assert_eq!(
+            validate_ping_for_origin(&no_revision, now_ms, Some(&identity), true),
+            DaemonEndpointState::OwnedUnhealthy
+        );
+        assert_eq!(
+            validate_ping_for_origin(
+                &ping,
+                now_ms.saturating_add(ping.ttl_ms).saturating_add(1),
+                Some(&identity),
+                true,
+            ),
+            DaemonEndpointState::OwnedUnhealthy
+        );
     }
 
     #[test]
@@ -1865,6 +2126,34 @@ mod tests {
         let config = IpcConfig::from_env_map(&env);
         assert!(config.enabled);
         assert_eq!(config.socket_path, std::path::PathBuf::from("/tmp/custom.sock"));
+    }
+
+    #[test]
+    fn default_socket_hash_preserves_commas_in_tmux_socket_path() {
+        let mut first = BTreeMap::new();
+        first.insert("TMUX".to_string(), "/tmp/ilmari,custom/tmux.sock,4312,7".to_string());
+        let mut same_server = first.clone();
+        same_server.insert("TMUX".to_string(), "/tmp/ilmari,custom/tmux.sock,4312,8".to_string());
+        let mut truncated = first.clone();
+        truncated.insert("TMUX".to_string(), "/tmp/ilmari,4312,7".to_string());
+
+        assert_eq!(
+            IpcConfig::runtime_default_path(&first),
+            IpcConfig::runtime_default_path(&same_server)
+        );
+        assert_ne!(
+            IpcConfig::runtime_default_path(&first),
+            IpcConfig::runtime_default_path(&truncated)
+        );
+    }
+
+    #[test]
+    fn daemon_source_endpoint_is_distinct_from_explicit_legacy_socket() {
+        let legacy = std::path::Path::new("/tmp/ilmari/custom.sock");
+        let daemon = super::daemon_source_socket_path(legacy);
+        assert_eq!(daemon.parent(), legacy.parent());
+        assert!(daemon.file_name().unwrap().to_string_lossy().starts_with("ilmari-daemon-"));
+        assert_ne!(daemon, legacy);
     }
 
     #[cfg(all(unix, feature = "socket"))]

@@ -6,7 +6,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ilmari_bin="${ILMARI_BIN:-$repo_root/target/debug/ilmari}"
 # Keep the nested Ilmari socket below macOS's short Unix-domain path limit.
-tmp_dir="$(mktemp -d "/tmp/ilmari-daemon.XXXXXX")"
+tmp_dir="$(mktemp -d "/tmp/ilmari,daemon.XXXXXX")"
 tmux_socket="$tmp_dir/tmux.sock"
 runtime_dir="$tmp_dir/runtime"
 config_dir="$tmp_dir/config"

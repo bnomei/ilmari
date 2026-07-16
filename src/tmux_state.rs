@@ -74,6 +74,8 @@ struct PaneAttention {
     last_status: Option<SessionStatus>,
     waiting: bool,
     finished: bool,
+    pending_waiting: bool,
+    pending_finished: bool,
 }
 
 #[derive(Debug, Default)]
@@ -127,14 +129,7 @@ impl TmuxStatePublisher {
         let Ok(state) = tmux::focus_and_renderer_overrides() else {
             return;
         };
-        let mut changed = false;
-        for pane_id in state.focused_pane_ids {
-            if let Some(attention) = self.panes.get_mut(&pane_id) {
-                changed |= attention.waiting || attention.finished;
-                attention.waiting = false;
-                attention.finished = false;
-            }
-        }
+        let changed = self.resolve_known_focus(&state.focused_pane_ids);
         let badges_enabled = option_override_value(state.badges_enabled.as_deref())
             .unwrap_or(settings.badges_enabled);
         let status_enabled = option_override_value(state.status_enabled.as_deref())
@@ -217,25 +212,47 @@ impl TmuxStatePublisher {
         focused: &HashSet<String>,
         allow_new_attention: bool,
     ) {
-        for pane_id in focused {
-            if let Some(attention) = self.panes.get_mut(pane_id) {
-                attention.waiting = false;
-                attention.finished = false;
-            }
+        if allow_new_attention {
+            self.resolve_known_focus(focused);
         }
 
         for session in sessions {
             let attention = self.panes.entry(session.pane.pane_id.clone()).or_default();
             let transitioned = attention.last_status.is_some_and(|last| last != session.status);
-            if allow_new_attention && transitioned && !focused.contains(&session.pane.pane_id) {
+            if transitioned && !focused.contains(&session.pane.pane_id) {
                 match session.status {
-                    SessionStatus::WaitingInput => attention.waiting = true,
-                    SessionStatus::Finished => attention.finished = true,
+                    SessionStatus::WaitingInput if allow_new_attention => attention.waiting = true,
+                    SessionStatus::WaitingInput => attention.pending_waiting = true,
+                    SessionStatus::Finished if allow_new_attention => attention.finished = true,
+                    SessionStatus::Finished => attention.pending_finished = true,
                     _ => {}
                 }
             }
             attention.last_status = Some(session.status);
         }
+    }
+
+    fn resolve_known_focus(&mut self, focused: &HashSet<String>) -> bool {
+        let mut changed = false;
+        for (pane_id, attention) in &mut self.panes {
+            if focused.contains(pane_id) {
+                changed |= attention.waiting
+                    || attention.finished
+                    || attention.pending_waiting
+                    || attention.pending_finished;
+                attention.waiting = false;
+                attention.finished = false;
+                attention.pending_waiting = false;
+                attention.pending_finished = false;
+            } else {
+                changed |= attention.pending_waiting || attention.pending_finished;
+                attention.waiting |= attention.pending_waiting;
+                attention.finished |= attention.pending_finished;
+                attention.pending_waiting = false;
+                attention.pending_finished = false;
+            }
+        }
+        changed
     }
 
     fn render(&self, sessions: &[SessionRecord], settings: &RenderSettings) -> RenderedState {
@@ -383,31 +400,72 @@ mod tests {
     }
 
     #[test]
-    fn focus_query_failure_neither_creates_nor_clears_attention() {
-        let mut publisher = TmuxStatePublisher::default();
-        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
-        publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+    fn pending_waiting_and_finished_are_acknowledged_when_focus_recovers_on_the_pane() {
+        for status in [SessionStatus::WaitingInput, SessionStatus::Finished] {
+            let mut publisher = TmuxStatePublisher::default();
+            let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+            publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
 
-        let waiting = session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput);
-        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), false);
-        assert_eq!(
-            publisher
-                .render(std::slice::from_ref(&waiting), &RenderSettings::default())
-                .counts
-                .waiting,
-            0
-        );
+            let transitioned = session("%1", "@1", AgentKind::Codex, status);
+            publisher.update_attention(std::slice::from_ref(&transitioned), &HashSet::new(), false);
+            assert_eq!(attention_count(&publisher, &transitioned, status), 0);
+            assert!(has_pending(&publisher, "%1", status));
 
-        let running_again = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
-        publisher.update_attention(std::slice::from_ref(&running_again), &HashSet::new(), true);
-        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
-        assert_eq!(
-            publisher
-                .render(std::slice::from_ref(&waiting), &RenderSettings::default())
-                .counts
-                .waiting,
-            1
-        );
+            let focused = HashSet::from(["%1".to_string()]);
+            publisher.update_attention(std::slice::from_ref(&transitioned), &focused, true);
+            assert_eq!(attention_count(&publisher, &transitioned, status), 0);
+            assert!(!has_pending(&publisher, "%1", status));
+
+            // The acknowledged unchanged state must not recreate attention.
+            publisher.update_attention(std::slice::from_ref(&transitioned), &HashSet::new(), true);
+            assert_eq!(attention_count(&publisher, &transitioned, status), 0);
+
+            // A later legitimate transition still creates attention.
+            publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+            publisher.update_attention(std::slice::from_ref(&transitioned), &HashSet::new(), true);
+            assert_eq!(attention_count(&publisher, &transitioned, status), 1);
+        }
+    }
+
+    #[test]
+    fn pending_waiting_and_finished_become_sticky_when_focus_recovers_elsewhere() {
+        for status in [SessionStatus::WaitingInput, SessionStatus::Finished] {
+            let mut publisher = TmuxStatePublisher::default();
+            let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+            publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+
+            let transitioned = session("%1", "@1", AgentKind::Codex, status);
+            publisher.update_attention(std::slice::from_ref(&transitioned), &HashSet::new(), false);
+            assert_eq!(attention_count(&publisher, &transitioned, status), 0);
+            assert!(has_pending(&publisher, "%1", status));
+
+            publisher.update_attention(
+                std::slice::from_ref(&transitioned),
+                &HashSet::from(["%2".to_string()]),
+                true,
+            );
+            assert_eq!(attention_count(&publisher, &transitioned, status), 1);
+            assert!(!has_pending(&publisher, "%1", status));
+
+            // Neither another failed lookup nor an unchanged successful scan acknowledges it.
+            publisher.update_attention(std::slice::from_ref(&transitioned), &HashSet::new(), false);
+            assert_eq!(attention_count(&publisher, &transitioned, status), 1);
+            publisher.update_attention(
+                std::slice::from_ref(&transitioned),
+                &HashSet::from(["%2".to_string()]),
+                true,
+            );
+            assert_eq!(attention_count(&publisher, &transitioned, status), 1);
+
+            publisher.update_attention(
+                std::slice::from_ref(&transitioned),
+                &HashSet::from(["%1".to_string()]),
+                true,
+            );
+            assert_eq!(attention_count(&publisher, &transitioned, status), 0);
+            publisher.update_attention(std::slice::from_ref(&transitioned), &HashSet::new(), true);
+            assert_eq!(attention_count(&publisher, &transitioned, status), 0);
+        }
     }
 
     #[test]
@@ -473,6 +531,29 @@ mod tests {
             last_changed_at: now,
             last_seen_at: now,
             retained_until: None,
+        }
+    }
+
+    fn attention_count(
+        publisher: &TmuxStatePublisher,
+        session: &SessionRecord,
+        status: SessionStatus,
+    ) -> usize {
+        let counts =
+            publisher.render(std::slice::from_ref(session), &RenderSettings::default()).counts;
+        match status {
+            SessionStatus::WaitingInput => counts.waiting,
+            SessionStatus::Finished => counts.finished,
+            _ => unreachable!("helper only accepts attention statuses"),
+        }
+    }
+
+    fn has_pending(publisher: &TmuxStatePublisher, pane_id: &str, status: SessionStatus) -> bool {
+        let attention = publisher.panes.get(pane_id).expect("pane attention should exist");
+        match status {
+            SessionStatus::WaitingInput => attention.pending_waiting,
+            SessionStatus::Finished => attention.pending_finished,
+            _ => unreachable!("helper only accepts attention statuses"),
         }
     }
 }

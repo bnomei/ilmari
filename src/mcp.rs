@@ -453,8 +453,17 @@ pub fn publish_mcp_url_to_tmux(url: &str) {
     let _ = tmux::set_global_option("@ilmari_mcp_url", url);
 }
 
+#[cfg(feature = "mcp")]
+pub fn publish_daemon_mcp_url_to_tmux(url: &str) {
+    publish_mcp_url_to_tmux(url);
+    let _ = tmux::set_global_option("@ilmari_daemon_mcp_url", url);
+}
+
 #[cfg(not(feature = "mcp"))]
 pub fn publish_mcp_url_to_tmux(_url: &str) {}
+
+#[cfg(not(feature = "mcp"))]
+pub fn publish_daemon_mcp_url_to_tmux(_url: &str) {}
 
 #[cfg(test)]
 mod tests {

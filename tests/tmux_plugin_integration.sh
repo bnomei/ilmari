@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ilmari-tmux-plugin.XXXXXX")"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ilmari,tmux-plugin.XXXXXX")"
 tmux_socket="$tmp_dir/tmux.sock"
 test_log="$tmp_dir/ilmari.log"
 
@@ -36,6 +36,14 @@ tmux -S "$tmux_socket" new-session -d -s ilmari-test 'sleep 120'
 server_pid="$(tmux -S "$tmux_socket" display-message -p '#{pid}')"
 tmux_context="$tmux_socket,$server_pid,0"
 pane_id="$(tmux -S "$tmux_socket" display-message -p '#{pane_id}')"
+
+# A process launched by a replaced server must fail closed before it starts or
+# stops anything, even when the replacement reuses the same socket pathname.
+if PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" \
+  TMUX="$tmux_socket,$((server_pid + 1)),0" bash "$repo_root/ilmari.tmux" 2>/dev/null; then
+  fail 'TPM accepted a responding tmux server with a different originating PID'
+fi
+[[ ! -e "$test_log" ]] || fail 'generation mismatch executed an Ilmari command'
 
 tmux -S "$tmux_socket" set-option -g window-status-format 'KEEP-WINDOW'
 tmux -S "$tmux_socket" set-option -g window-status-current-format 'KEEP-CURRENT'
@@ -76,17 +84,49 @@ binding="$(read_popup_binding)"
 [[ "$binding" == *'-y 9'* ]] || fail 'popup extra y argument was not preserved'
 [[ "$binding" == *'ilmari --no-git'* ]] || fail 'popup command was not kept after popup extras'
 
-# Simulate daemon-published state, then disable daemon management and reload.
+# The stop option has a complete default contract paired with the default start
+# command; it does not need to be present in tmux configuration.
+: >"$test_log"
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon 'off'
+PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux"
+grep -F "$tmux_context|daemon stop" "$test_log" >/dev/null \
+  || fail 'default daemon stop command was not used'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon 'on'
+
+# Custom daemon start commands may contain arguments that cannot be reversed
+# reliably. The explicitly paired stop command must be used verbatim.
+: >"$test_log"
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_command \
+  'ilmari daemon start --refresh-seconds 11'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_stop_command \
+  'ilmari daemon stop --custom-stop-marker paired'
+PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux"
+
+for _ in {1..50}; do
+  grep -F "$tmux_context|daemon start --refresh-seconds 11" "$test_log" >/dev/null 2>&1 \
+    && break
+  sleep 0.02
+done
+grep -F "$tmux_context|daemon start --refresh-seconds 11" "$test_log" >/dev/null \
+  || fail 'custom daemon start command with arguments was not used verbatim'
+
+# Simulate daemon-published state alongside different popup-role legacy
+# endpoints, then disable daemon management and reload.
 for option in \
   @ilmari_window_badges \
   @ilmari_status_summary \
   @ilmari_running_count \
   @ilmari_waiting_count \
-  @ilmari_finished_count \
-  @ilmari_socket_path \
-  @ilmari_mcp_url; do
+  @ilmari_finished_count; do
   tmux -S "$tmux_socket" set-option -g "$option" 'stale'
 done
+tmux -S "$tmux_socket" set-option -g @ilmari_socket_path '/tmp/popup.sock'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_socket_path '/tmp/daemon.sock'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_owner_pid '4242'
+tmux -S "$tmux_socket" set-option -g @ilmari_mcp_url 'http://127.0.0.1:4020/mcp'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_mcp_url 'http://127.0.0.1:4010/mcp'
 tmux -S "$tmux_socket" set-option -p -t "$pane_id" @ilmari_state 'running'
 tmux -S "$tmux_socket" set-option -p -t "$pane_id" @ilmari_badge 'R'
 tmux -S "$tmux_socket" set-option -g @ilmari_badges_enabled 'off'
@@ -96,8 +136,8 @@ tmux -S "$tmux_socket" set-option -g @ilmari_daemon 'off'
 PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
   bash "$repo_root/ilmari.tmux"
 
-grep -F "$tmux_context|daemon stop" "$test_log" >/dev/null \
-  || fail 'daemon stop was not routed through the originating TMUX context'
+grep -F "$tmux_context|daemon stop --custom-stop-marker paired" "$test_log" >/dev/null \
+  || fail 'explicit daemon stop command was not routed through the originating TMUX context'
 
 for option in \
   @ilmari_window_badges \
@@ -105,15 +145,58 @@ for option in \
   @ilmari_running_count \
   @ilmari_waiting_count \
   @ilmari_finished_count \
-  @ilmari_socket_path \
-  @ilmari_mcp_url; do
+  @ilmari_daemon_socket_path \
+  @ilmari_daemon_owner_pid \
+  @ilmari_daemon_mcp_url; do
   [[ -z "$(tmux -S "$tmux_socket" show-option -gqv "$option")" ]] \
     || fail "$option was not cleared"
 done
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_socket_path)" == '/tmp/popup.sock' ]] \
+  || fail 'popup-owned legacy socket publication was removed'
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_mcp_url)" == 'http://127.0.0.1:4020/mcp' ]] \
+  || fail 'popup-owned legacy MCP publication was removed'
 [[ -z "$(tmux -S "$tmux_socket" show-option -pqv -t "$pane_id" @ilmari_state)" ]] \
   || fail '@ilmari_state was not cleared'
 [[ -z "$(tmux -S "$tmux_socket" show-option -pqv -t "$pane_id" @ilmari_badge)" ]] \
   || fail '@ilmari_badge was not cleared'
+
+# Older dead daemons have no owner or daemon-role endpoint metadata. Their
+# renderer state is daemon-exclusive and must still be cleared, while ambiguous
+# legacy socket/MCP publications remain untouched for a possible popup owner.
+for option in \
+  @ilmari_window_badges \
+  @ilmari_status_summary \
+  @ilmari_running_count \
+  @ilmari_waiting_count \
+  @ilmari_finished_count; do
+  tmux -S "$tmux_socket" set-option -g "$option" 'legacy-stale'
+done
+tmux -S "$tmux_socket" set-option -p -t "$pane_id" @ilmari_state 'waiting'
+tmux -S "$tmux_socket" set-option -p -t "$pane_id" @ilmari_badge 'W'
+tmux -S "$tmux_socket" set-option -gu @ilmari_daemon_owner_pid 2>/dev/null || true
+tmux -S "$tmux_socket" set-option -gu @ilmari_daemon_socket_path 2>/dev/null || true
+tmux -S "$tmux_socket" set-option -gu @ilmari_daemon_mcp_url 2>/dev/null || true
+
+PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux"
+
+for option in \
+  @ilmari_window_badges \
+  @ilmari_status_summary \
+  @ilmari_running_count \
+  @ilmari_waiting_count \
+  @ilmari_finished_count; do
+  [[ -z "$(tmux -S "$tmux_socket" show-option -gqv "$option")" ]] \
+    || fail "ownerless legacy $option was not cleared"
+done
+[[ -z "$(tmux -S "$tmux_socket" show-option -pqv -t "$pane_id" @ilmari_state)" ]] \
+  || fail 'ownerless legacy @ilmari_state was not cleared'
+[[ -z "$(tmux -S "$tmux_socket" show-option -pqv -t "$pane_id" @ilmari_badge)" ]] \
+  || fail 'ownerless legacy @ilmari_badge was not cleared'
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_socket_path)" == '/tmp/popup.sock' ]] \
+  || fail 'ownerless cleanup removed ambiguous legacy socket publication'
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_mcp_url)" == 'http://127.0.0.1:4020/mcp' ]] \
+  || fail 'ownerless cleanup removed ambiguous legacy MCP publication'
 
 # Renderer enable overrides are user controls, not published state.
 [[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_badges_enabled)" == 'off' ]] \
