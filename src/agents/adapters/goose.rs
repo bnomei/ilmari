@@ -1,4 +1,5 @@
-//! Scaffold for Goose CLI support.
+//! Planned Goose CLI adapter scaffold (disabled in the v1 registry).
+//!
 //! Tracking issue: https://github.com/bnomei/ilmari/issues/14
 //! Repository: https://github.com/aaif-goose/goose
 //! Docs: https://goose-docs.ai/docs/getting-started/installation/

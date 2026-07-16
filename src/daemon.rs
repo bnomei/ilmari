@@ -1,4 +1,10 @@
-//! Daemon lifecycle and command-facing status helpers.
+//! One collector daemon per tmux server: start, stop, and status surfaces.
+//!
+//! The daemon is observer-only acceleration for popups and status lines. `start`
+//! is idempotent against a healthy compatible incumbent, replaces stale ownership
+//! after a bounded wait, and refuses foreign sockets. Stop prefers a cooperative
+//! shutdown request, then clears only exact published owner tokens once the
+//! listener is gone.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -9,6 +15,7 @@ use anyhow::{bail, Result};
 use crate::app::{self, AppConfig};
 use crate::{ipc, tmux};
 
+/// Owner pid, daemon socket path, and optional MCP URL published into tmux options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DaemonPublicationTuple {
     owner_pid: u32,
@@ -16,6 +23,12 @@ struct DaemonPublicationTuple {
     mcp_url: Option<String>,
 }
 
+/// Start the per-tmux-server collector, or succeed if a healthy compatible daemon is already running.
+///
+/// # Errors
+///
+/// Returns an error when no originating tmux socket is known, a foreign service owns the
+/// daemon path, a stale daemon cannot be replaced, or the `socket` feature is missing.
 pub fn start(mut config: AppConfig) -> Result<()> {
     if tmux::origin_socket_path().is_none() {
         bail!("daemon start requires an originating tmux server socket");
@@ -71,6 +84,10 @@ fn daemon_start_paths_with(
     (desired, incumbent)
 }
 
+/// Request cooperative stop of the owned daemon and clear matching published tmux tokens.
+///
+/// Primary cleanup belongs to the daemon process. Fallback option clearing runs only after
+/// the socket listener is gone, so MCP teardown can still observe its owner token.
 pub fn stop(mut config: AppConfig) -> Result<()> {
     let published = published_daemon_tuple();
     let fallback_path = ipc::daemon_source_socket_path(&config.ipc.socket_path);
@@ -152,6 +169,7 @@ fn stop_fallback_cleanup_allowed(_stop_requested: bool, socket_is_live: bool) ->
     !socket_is_live
 }
 
+/// Print `running` or `stopped` for the resolved daemon endpoint (machine-friendly).
 pub fn daemon_status(mut config: AppConfig) -> Result<()> {
     config.ipc.socket_path =
         ipc::resolve_daemon_socket_path(&ipc::daemon_source_socket_path(&config.ipc.socket_path));
@@ -163,6 +181,9 @@ pub fn daemon_status(mut config: AppConfig) -> Result<()> {
     Ok(())
 }
 
+/// Print the daemon's compact status-line fragment when a healthy daemon has published one.
+///
+/// Silent when the daemon is down or status publication is disabled in tmux options.
 pub fn compact_status(mut config: AppConfig) -> Result<()> {
     config.ipc.socket_path =
         ipc::resolve_daemon_socket_path(&ipc::daemon_source_socket_path(&config.ipc.socket_path));

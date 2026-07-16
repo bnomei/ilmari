@@ -1,4 +1,5 @@
-//! Scaffold for Cursor CLI support.
+//! Planned Cursor CLI adapter scaffold (disabled in the v1 registry).
+//!
 //! Tracking issue: https://github.com/bnomei/ilmari/issues/11
 //! Repository: https://github.com/cursor/cursor
 //! Docs: https://cursor.com/docs/cli/overview

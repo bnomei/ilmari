@@ -81,11 +81,13 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// Load TOML defaults, remembered view state, and apply one-run CLI view overrides.
     pub fn load(view_overrides: ViewOverrides) -> Result<Self> {
         let env = env::vars().collect::<BTreeMap<_, _>>();
         Self::from_env_map(&env, view_overrides)
     }
 
+    /// Same as `load` using an explicit environment map (tests and CLI fixtures).
     pub(crate) fn from_env_map(
         env: &BTreeMap<String, String>,
         view_overrides: ViewOverrides,

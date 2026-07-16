@@ -60,16 +60,23 @@ impl Default for Palette {
 }
 
 impl Palette {
+    /// Parse the fixed 18-slot `fg,bg,black,...,bright_white` CSV override.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable message when the CSV length or a color token is invalid.
     pub fn from_csv(value: &str) -> Result<Self, String> {
         Self::parse_csv(value.trim())
     }
 
     #[cfg(feature = "tui")]
+    /// Default foreground/background style for radar chrome.
     pub fn base_style(&self) -> Style {
         Style::default().fg(self.fg).bg(self.bg)
     }
 
     #[cfg(feature = "tui")]
+    /// Map a semantic role onto the active palette slot colors.
     pub fn style_for(&self, role: SemanticRole) -> Style {
         self.base_style().fg(match role {
             SemanticRole::StatusRunning => self.ansi_color(4),

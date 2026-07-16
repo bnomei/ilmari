@@ -23,6 +23,7 @@ pub struct ProcessSnapshot {
     pub command: String,
 }
 
+/// Parse failure for a single `ps` line.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ProcessSnapshotParseError {
     #[error("missing required field `{field}`")]
@@ -34,6 +35,7 @@ pub enum ProcessSnapshotParseError {
 }
 
 impl ProcessSnapshot {
+    /// Parse one space-separated `ps` row matching `PS_FORMAT`.
     pub fn parse(line: &str) -> Result<Self, ProcessSnapshotParseError> {
         let (pid, rest) = next_field(line, "pid")?;
         let (ppid, rest) = next_field(rest, "ppid")?;
@@ -55,6 +57,7 @@ impl ProcessSnapshot {
     }
 }
 
+/// Failures executing `ps` or building a process tree from its output.
 #[derive(Debug, Error)]
 pub enum ProcessError {
     #[error("failed to execute ps: {0}")]
@@ -79,6 +82,7 @@ pub struct ProcessTree {
 }
 
 impl ProcessTree {
+    /// Index snapshots by pid and build sorted parent→children adjacency.
     pub fn from_snapshots(snapshots: Vec<ProcessSnapshot>) -> Self {
         let mut processes = HashMap::with_capacity(snapshots.len());
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -95,10 +99,15 @@ impl ProcessTree {
         Self { processes, children }
     }
 
+    /// Roll up agent and spawned usage for the session's pane pid and agent kind.
     pub fn usage_for_session(&self, session: &SessionRecord) -> Option<SessionProcessUsage> {
         self.usage_for_kind(session.pane.pane_pid, session.kind)
     }
 
+    /// Best-effort agent identity from the process tree under a tmux pane pid.
+    ///
+    /// Returns `None` when no enabled agent matches, or when more than one kind matches
+    /// (ambiguous multi-agent trees must not force a wrong classifier).
     pub fn agent_kind_for_pane(&self, pane_pid: Option<u32>) -> Option<AgentKind> {
         let pane_pid = pane_pid?;
         let mut matched_kind = None;
@@ -274,6 +283,7 @@ pub fn collect_process_snapshots() -> Result<Vec<ProcessSnapshot>, ProcessError>
     parse_process_snapshots(&String::from_utf8(output.stdout)?)
 }
 
+/// Parse multi-line `ps` stdout into snapshot rows, tagging line numbers on failure.
 pub fn parse_process_snapshots(stdout: &str) -> Result<Vec<ProcessSnapshot>, ProcessError> {
     stdout
         .lines()

@@ -1,9 +1,15 @@
 //! Terminal bell alerts when agent sessions transition to actionable states.
+//!
+//! Bells fire from the popup refresh path on status transitions into waiting or
+//! finished (and similar alertable states). The TUI can mute them; the daemon never
+//! rings. On macOS the system beep is preferred so detached or quiet terminals still
+//! hear something when ASCII BEL is suppressed.
 
 use std::io::{self, Write};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+/// ASCII BEL written to stdout when the platform-specific alert path is unavailable.
 pub const TERMINAL_BELL: u8 = 0x07;
 #[cfg(target_os = "macos")]
 const MACOS_ALERT_PROGRAM: &str = "osascript";

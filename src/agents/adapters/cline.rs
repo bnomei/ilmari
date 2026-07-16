@@ -1,4 +1,5 @@
-//! Scaffold for Cline CLI support.
+//! Planned Cline CLI adapter scaffold (disabled in the v1 registry).
+//!
 //! Tracking issue: https://github.com/bnomei/ilmari/issues/13
 //! Repository: https://github.com/cline/cline
 //! Docs: https://docs.cline.bot/usage/cli-overview

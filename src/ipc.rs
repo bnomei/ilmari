@@ -37,10 +37,14 @@ use crate::model::{
 };
 use crate::tmux::{self, PaneSnapshot};
 
+/// Wire schema version for list/detail resource documents.
 pub const SCHEMA_VERSION: u32 = 1;
 #[cfg(feature = "mcp")]
+/// MIME type advertised for MCP resources that carry JSON pane state.
 pub const RESOURCE_MIME_TYPE: &str = "application/json";
+/// Canonical URI for the aggregated pane list resource.
 pub const LIST_RESOURCE_URI: &str = "ilmari://list";
+/// Schema version for daemon-to-popup `SnapshotResponse` payloads.
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 #[cfg(test)]
@@ -65,6 +69,7 @@ pub struct IpcConfig {
 }
 
 impl IpcConfig {
+    /// Socket publishing off; path is a placeholder unused until enabled.
     pub fn disabled() -> Self {
         Self { enabled: false, socket_path: env::temp_dir().join(SOCKET_FILE_NAME) }
     }
@@ -83,6 +88,7 @@ impl IpcConfig {
         Self { enabled, socket_path }
     }
 
+    /// Default socket path under the private runtime directory for the current user.
     pub fn runtime_default_path(env: &BTreeMap<String, String>) -> PathBuf {
         default_socket_path(env)
     }
@@ -131,6 +137,7 @@ pub struct SnapshotResponse {
     pub warnings: Vec<String>,
 }
 
+/// One agent pane inside a daemon snapshot, including relative age fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotItem {
     pub pane: PaneSnapshot,
@@ -143,6 +150,7 @@ pub struct SnapshotItem {
     pub last_changed_ago_ms: u64,
 }
 
+/// Git branch and shortstat row carried on a daemon snapshot for popup reuse.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotGitSummary {
     pub workspace_path: PathBuf,
@@ -153,6 +161,7 @@ pub struct SnapshotGitSummary {
 }
 
 #[cfg(feature = "mcp")]
+/// MCP resource descriptor for the list document or one pane detail URI.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishedResource {
     pub uri: String,
@@ -179,15 +188,18 @@ pub struct PublishedStateHandle {
 }
 
 impl PublishedStateHandle {
+    /// Wrap an initial snapshot for concurrent readers and a single publisher.
     pub fn new(initial_state: PublishedState) -> Self {
         Self { state: Arc::new(RwLock::new(initial_state)) }
     }
 
     #[cfg(any(feature = "socket", feature = "mcp"))]
+    /// Clone the current snapshot for a socket or MCP request handler.
     pub fn snapshot(&self) -> Option<PublishedState> {
         self.state.read().ok().map(|state| state.clone())
     }
 
+    /// Replace the snapshot and return which resource URIs changed for subscribers.
     pub fn publish(&self, state: PublishedState) -> PublishedStateChange {
         let Ok(mut current) = self.state.write() else {
             return PublishedStateChange { changed_uris: Vec::new(), list_changed: false };
@@ -216,6 +228,7 @@ impl PublishedStateHandle {
 }
 
 impl PublishedState {
+    /// Empty published snapshot used before the first successful refresh.
     pub fn empty(refresh_interval: Duration) -> Self {
         Self::from_sessions(StateBuildOptions {
             sessions: &[],
@@ -227,6 +240,7 @@ impl PublishedState {
         })
     }
 
+    /// Materialize list/detail resources and daemon snapshot items from live sessions.
     pub fn from_sessions(options: StateBuildOptions<'_>) -> Self {
         let labels = derive_workspace_labels(
             options
@@ -302,6 +316,7 @@ impl PublishedState {
         }
     }
 
+    /// Attach workspace git rows so popup consumers can skip a local git scan.
     pub fn with_git_summaries(mut self, summaries: &[GitSummaryRow]) -> Self {
         self.git_summaries = summaries
             .iter()
@@ -316,11 +331,13 @@ impl PublishedState {
         self
     }
 
+    /// Mark the producer role as `daemon` or `app` for ownership and health checks.
     pub fn with_daemon_role(mut self, daemon: bool) -> Self {
         self.producer.role = if daemon { "daemon" } else { "app" }.to_string();
         self
     }
 
+    /// Serialize the render-neutral daemon snapshot used by the popup acceleration path.
     pub fn snapshot_response(&self) -> SnapshotResponse {
         SnapshotResponse {
             ok: true,
@@ -355,6 +372,7 @@ impl PublishedState {
     }
 
     #[cfg(feature = "mcp")]
+    /// MCP resource list: aggregate `ilmari://list` plus one detail URI per pane.
     pub fn resources(&self) -> Vec<PublishedResource> {
         let mut resources = Vec::with_capacity(self.items.len() + 1);
         let list_text = self.list_resource_text();
@@ -393,6 +411,11 @@ impl PublishedState {
     }
 
     #[cfg(any(feature = "socket", feature = "mcp", test))]
+    /// Read list or detail JSON by resource URI.
+    ///
+    /// # Errors
+    ///
+    /// Returns `not-found` for unknown URIs or pane ids no longer in the snapshot.
     pub fn read_resource_text(&self, uri: &str) -> Result<String, ResponseError> {
         if uri == LIST_RESOURCE_URI {
             return Ok(self.list_resource_text());
@@ -405,11 +428,13 @@ impl PublishedState {
         Err(ResponseError { code: "not-found", message: "No resource found for that URI" })
     }
 
+    /// JSON body of the aggregate list resource.
     pub fn list_resource_text(&self) -> String {
         encode_json(&self.list_response())
     }
 
     #[cfg(any(feature = "socket", feature = "mcp", test))]
+    /// JSON body of one pane detail resource, keyed by tmux pane id.
     pub fn detail_resource_text(&self, id: &str) -> Result<String, ResponseError> {
         self.detail_response(id).map(|response| encode_json(&response))
     }
@@ -616,6 +641,10 @@ impl ConsumerState {
     }
 }
 
+/// Process and tmux-server identity embedded in every published snapshot and ping.
+///
+/// Clients use `role`, pid, and socket generation fields to accept only a compatible
+/// Ilmari daemon for the same originating tmux server.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Producer {
     pub name: String,
@@ -906,6 +935,7 @@ pub(crate) struct ResponseError {
     pub message: &'static str,
 }
 
+/// Failures binding or securing the local published-state Unix socket.
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum IpcError {
@@ -925,6 +955,7 @@ pub enum IpcError {
     InsecureSocketDir { path: PathBuf, reason: &'static str },
 }
 
+/// Failures fetching or validating a daemon snapshot for popup acceleration.
 #[derive(Debug, Error)]
 pub enum SnapshotClientError {
     #[error("failed to connect to daemon socket {path}: {source}")]
@@ -965,6 +996,10 @@ pub struct IpcServer {
 
 #[cfg(all(unix, feature = "socket"))]
 impl IpcServer {
+    /// Bind the configured path and serve line-oriented requests on a background thread.
+    ///
+    /// Returns `Ok(None)` when IPC is disabled. Drop removes the socket file only when
+    /// the bound identity still matches, so a replaced listener is not unlinked.
     pub fn start(
         config: &IpcConfig,
         state: PublishedStateHandle,
@@ -997,10 +1032,12 @@ impl IpcServer {
         }))
     }
 
+    /// Filesystem path of the bound Unix socket.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// True after a client requested cooperative process shutdown over the socket.
     pub fn shutdown_requested(&self) -> bool {
         self.stop_requested.load(AtomicOrdering::Relaxed)
     }
@@ -1019,11 +1056,13 @@ impl Drop for IpcServer {
     }
 }
 
+/// Stub when Unix sockets or the `socket` feature are unavailable.
 #[cfg(not(all(unix, feature = "socket")))]
 pub struct IpcServer;
 
 #[cfg(not(all(unix, feature = "socket")))]
 impl IpcServer {
+    /// Returns `Ok(None)` when disabled; errors with `NotCompiled` if enabled.
     pub fn start(
         config: &IpcConfig,
         _state: PublishedStateHandle,
@@ -1466,6 +1505,7 @@ pub fn daemon_source_socket_path(configured: &Path) -> PathBuf {
     configured.parent().unwrap_or_else(|| Path::new(".")).join(daemon_name)
 }
 
+/// True when a connect succeeds; does not validate Ilmari protocol compatibility.
 pub fn daemon_socket_is_live(path: &Path) -> bool {
     #[cfg(all(unix, feature = "socket"))]
     {
@@ -1490,6 +1530,10 @@ pub fn request_daemon_stop(path: &Path) -> bool {
 }
 
 impl SnapshotResponse {
+    /// Convert a daemon snapshot into runtime sessions, git rows, and warnings for the popup.
+    ///
+    /// Age fields are reconstructed relative to `now` from the snapshot's wall-clock stamp
+    /// so retention and inactivity labels stay coherent after IPC transfer.
     pub fn into_runtime(
         self,
         now: Instant,

@@ -1,4 +1,9 @@
 //! Provider-neutral tmux badge and compact status publication.
+//!
+//! The daemon writes pane-local attention badges and a global status summary so
+//! status-lines and scripts stay agent-agnostic. Waiting and finished attention
+//! latch until the pane is focused (or the session leaves that state), so a brief
+//! glance at the badge is enough after a popup is closed.
 
 use std::collections::{HashMap, HashSet};
 
@@ -6,6 +11,7 @@ use crate::config::RendererConfig;
 use crate::model::{SessionRecord, SessionStatus};
 use crate::tmux;
 
+/// Resolved badge and compact-status templates after TOML style/symbol merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSettings {
     pub badges_enabled: bool,
@@ -38,6 +44,7 @@ impl Default for RenderSettings {
 }
 
 impl RenderSettings {
+    /// Build pane badge and global status templates from the two renderer config blocks.
     pub fn from_config(badges: &RendererConfig, status: &RendererConfig) -> Self {
         Self {
             badges_enabled: badges.enabled,
@@ -62,6 +69,7 @@ impl RenderSettings {
     }
 }
 
+/// Aggregated counts used by the global compact status fragment.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StatusCounts {
     pub running: usize,
@@ -69,6 +77,7 @@ pub struct StatusCounts {
     pub finished: usize,
 }
 
+/// Per-pane attention latch for waiting/finished until focus acknowledges them.
 #[derive(Debug, Clone, Copy, Default)]
 struct PaneAttention {
     last_status: Option<SessionStatus>,
@@ -78,6 +87,7 @@ struct PaneAttention {
     pending_finished: bool,
 }
 
+/// Incremental publisher of pane badges and the `@ilmari_status_summary` option.
 #[derive(Debug, Default)]
 pub struct TmuxStatePublisher {
     panes: HashMap<String, PaneAttention>,
@@ -89,6 +99,10 @@ pub struct TmuxStatePublisher {
 }
 
 impl TmuxStatePublisher {
+    /// Diff live sessions against prior attention state and rewrite tmux options as needed.
+    ///
+    /// Side effects: pane-local badge options and the global status summary, gated by
+    /// `RenderSettings` enable flags. Stale badges for dead panes are cleared.
     pub fn publish(
         &mut self,
         sessions: &[SessionRecord],
@@ -124,7 +138,10 @@ impl TmuxStatePublisher {
         self.publish_rendered(&rendered, &live_pane_ids, settings);
     }
 
-    /// Acknowledge transient focus changes between full collection refreshes.
+    /// Clear latched waiting/finished attention when a pane is focused between full refreshes.
+    ///
+    /// Also reapplies live `@ilmari_*_enabled` overrides so status-line toggles take effect
+    /// without waiting for the next pane scan.
     pub fn acknowledge_focus(&mut self, settings: &RenderSettings) {
         let Ok(state) = tmux::focus_and_renderer_overrides() else {
             return;

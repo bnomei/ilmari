@@ -1,4 +1,6 @@
-//! Kiro CLI support.
+//! Kiro CLI adapter with title and output-tail identity fallbacks.
+//!
+//! Command match is `kiro-cli`; wrapped launches are recovered via title and output heuristics.
 //! Repository: https://github.com/kirodotdev/Kiro
 //! Docs: https://kiro.dev/docs/cli/
 

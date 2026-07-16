@@ -40,6 +40,7 @@ pub enum AgentSupport {
 }
 
 impl AgentKind {
+    /// Every known agent identity, including planned (disabled) kinds.
     pub const ALL_KINDS: [Self; 16] = [
         Self::Codex,
         Self::Amp,
@@ -59,6 +60,7 @@ impl AgentKind {
         Self::OpenHandsCli,
     ];
 
+    /// Enabled for v1 detection, or planned with a tracking GitHub issue number.
     pub const fn support(self) -> AgentSupport {
         match self {
             Self::Codex
@@ -80,10 +82,12 @@ impl AgentKind {
         }
     }
 
+    /// Whether this kind participates in detection and classification today.
     pub const fn is_enabled(self) -> bool {
         matches!(self.support(), AgentSupport::Enabled)
     }
 
+    /// Iterator over kinds active in the v1 adapter registry.
     pub fn enabled_kinds() -> impl Iterator<Item = Self> {
         Self::ALL_KINDS.into_iter().filter(|kind| kind.is_enabled())
     }
@@ -93,6 +97,7 @@ impl AgentKind {
         Self::ALL_KINDS.into_iter().filter(|kind| !kind.is_enabled())
     }
 
+    /// Human-facing radar label (stable for fixtures and status fragments).
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
@@ -127,6 +132,7 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
+    /// Wire and display slug for this lifecycle state.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -137,6 +143,7 @@ impl SessionStatus {
         }
     }
 
+    /// Whether vanished panes in this status remain visible for the retention window.
     pub fn uses_retention(self) -> bool {
         matches!(self, Self::Finished)
     }
@@ -165,10 +172,12 @@ pub struct ResourceUsage {
 }
 
 impl ResourceUsage {
+    /// Zero sample used when a process tree is empty or usage is released.
     pub const fn zero() -> Self {
         Self { cpu_tenths_percent: 0, memory_kib: 0 }
     }
 
+    /// Component-wise saturating sum for rolling agent and spawned totals.
     pub fn saturating_add(self, other: Self) -> Self {
         Self {
             cpu_tenths_percent: self.cpu_tenths_percent.saturating_add(other.cpu_tenths_percent),
@@ -177,6 +186,7 @@ impl ResourceUsage {
     }
 }
 
+/// One descendant process under an agent binary, shown when the stats subtask list is expanded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtaskProcess {
     pub pid: u32,
@@ -193,6 +203,7 @@ pub struct SessionProcessUsage {
     pub subtasks: Vec<SubtaskProcess>,
 }
 
+/// Palette role for an adapter-extracted model or mode label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentDetailTone {
@@ -202,6 +213,7 @@ pub enum AgentDetailTone {
     AmpRush,
 }
 
+/// Optional model/mode label extracted from pane output for the detail column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDetail {
     pub label: String,
@@ -260,6 +272,7 @@ pub struct AppModel {
 }
 
 impl AppModel {
+    /// Empty radar model shown before the first successful refresh completes.
     pub fn placeholder() -> Self {
         Self {
             title: "Agents".to_string(),

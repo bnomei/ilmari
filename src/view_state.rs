@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// On-disk schema version for `view.json`; unsupported versions are ignored in place.
 pub const VIEW_STATE_VERSION: u32 = 1;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
@@ -26,6 +27,7 @@ pub struct ViewState {
     pub stats: bool,
 }
 
+/// Result of a non-destructive load: either a valid state or a warning with no mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewStateLoad {
     pub state: Option<ViewState>,
@@ -49,10 +51,12 @@ pub struct ViewStateStore {
 }
 
 impl ViewStateStore {
+    /// No-op store used when state home cannot be resolved or persistence is unwanted.
     pub fn disabled() -> Self {
         Self { path: None }
     }
 
+    /// Resolve the XDG state path from the given environment map.
     pub fn from_env_map(env: &BTreeMap<String, String>) -> Self {
         Self { path: state_path_from_env(env) }
     }
@@ -201,6 +205,7 @@ fn sync_directory(path: &Path) {
     }
 }
 
+/// Failures creating, replacing, or clearing the remembered view-state file.
 #[derive(Debug, Error)]
 pub enum ViewStateError {
     #[error("remembered view-state path has no parent directory: {0}")]

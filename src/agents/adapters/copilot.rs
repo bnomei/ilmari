@@ -1,4 +1,6 @@
-//! GitHub Copilot CLI support.
+//! GitHub Copilot CLI adapter with custom waiting-prompt classification.
+//!
+//! Detects `copilot` command lines and recovers wrapped runs via title and output signals.
 //! Repository: https://github.com/github/copilot-cli
 //! Docs: https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-copilot-cli
 

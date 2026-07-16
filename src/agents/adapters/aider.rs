@@ -1,4 +1,6 @@
-//! Scaffold for Aider support.
+//! Planned Aider adapter scaffold (disabled in the v1 registry).
+//!
+//! Detection stubs match `aider` so enablement is a registry flip once classification is ready.
 //! Tracking issue: https://github.com/bnomei/ilmari/issues/12
 //! Repository: https://github.com/Aider-AI/aider
 //! Docs: https://aider.chat/docs/install.html

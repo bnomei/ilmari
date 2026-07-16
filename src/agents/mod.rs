@@ -23,6 +23,7 @@ use adapters::{
     GooseCliAdapter, GrokAdapter, KiroCliAdapter, OpenCodeAdapter, OpenHandsCliAdapter, PiAdapter,
 };
 
+/// How long a finished session remains visible after its pane disappears from tmux.
 pub const DEFAULT_RETENTION: Duration = Duration::from_secs(30);
 const STATUS_SIGNAL_WINDOW_BYTES: usize = 240;
 const AMP_STATUS_SIGNAL_WINDOW_LINES: usize = 12;
@@ -32,11 +33,15 @@ const OUTPUT_EXCERPT_MAX_CHARS: usize = 80;
 
 /// Per-agent contract for pane detection, status classification, and output extraction.
 pub trait AgentAdapter {
+    /// Stable agent identity this adapter owns.
     fn kind(&self) -> AgentKind;
+    /// True when pane command or title alone identifies this agent.
     fn detect(&self, pane: &PaneSnapshot) -> bool;
+    /// Optional second-pass identity from captured terminal output (wrapped launches).
     fn detect_output(&self, _pane: &PaneSnapshot, _output_tail: &str) -> bool {
         false
     }
+    /// Map pane liveness and output signals into a lifecycle status for this refresh.
     fn classify(
         &self,
         pane: &PaneSnapshot,
@@ -44,11 +49,13 @@ pub trait AgentAdapter {
         output_fingerprint: Option<u64>,
         previous: Option<&SessionRecord>,
     ) -> SessionStatus;
+    /// Model or mode label for the detail column, reusing the previous value when unchanged.
     fn extract_detail(
         &self,
         output_tail: Option<&str>,
         previous: Option<&SessionRecord>,
     ) -> Option<Arc<AgentDetail>>;
+    /// Short recent-output snippet for the radar row, reusing the previous value when unchanged.
     fn extract_output_excerpt(
         &self,
         output_tail: Option<&str>,
@@ -63,6 +70,7 @@ pub struct AdapterRegistry {
 }
 
 impl AdapterRegistry {
+    /// Production registry containing only `AgentKind::is_enabled` adapters.
     pub fn v1() -> Self {
         Self {
             adapters: all_adapters()
@@ -114,6 +122,10 @@ impl AdapterRegistry {
         self.select_adapter(pane, None, previous, None).map(AgentAdapter::kind)
     }
 
+    /// Whether `capture-pane` should run for this pane on the current refresh.
+    ///
+    /// Skips dead panes and pure shell panes with no agent identity signal so the
+    /// radar stays cheap when most tmux panes are idle shells.
     pub fn needs_output_tail(
         &self,
         pane: &PaneSnapshot,
@@ -190,18 +202,22 @@ impl Default for SessionTracker {
 }
 
 impl SessionTracker {
+    /// Tracker with the v1 adapter registry and `DEFAULT_RETENTION`.
     pub fn new() -> Self {
         Self::with_retention(DEFAULT_RETENTION)
     }
 
+    /// Tracker with a custom retention window for vanished finished panes.
     pub fn with_retention(retention: Duration) -> Self {
         Self { registry: AdapterRegistry::v1(), retention, records: HashMap::new() }
     }
 
+    /// Adapters used for detection and classification on each refresh.
     pub fn registry(&self) -> &AdapterRegistry {
         &self.registry
     }
 
+    /// Last classified sessions keyed by tmux pane id.
     pub fn records(&self) -> &HashMap<String, SessionRecord> {
         &self.records
     }
@@ -216,6 +232,10 @@ impl SessionTracker {
         self.refresh_with_process_kinds(panes, output_tails, &HashMap::new(), &HashSet::new(), now)
     }
 
+    /// Classify live panes, apply capture-failure holds, and retain vanished finished sessions.
+    ///
+    /// `process_kinds` is an optional identity hint from the process tree. Panes listed in
+    /// `capture_failures` keep prior status instead of collapsing to unknown.
     pub fn refresh_with_process_kinds(
         &mut self,
         panes: &[PaneSnapshot],

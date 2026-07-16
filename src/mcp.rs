@@ -66,6 +66,7 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
+    /// MCP publishing off; port retains the built-in default for later enablement.
     pub fn disabled() -> Self {
         Self { enabled: false, port: DEFAULT_MCP_PORT }
     }
@@ -84,11 +85,13 @@ impl McpConfig {
     }
 
     #[cfg(any(feature = "mcp", test))]
+    /// Localhost bind address; port `0` lets the OS assign an ephemeral free port.
     pub fn loopback_addr(&self) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.port)
     }
 }
 
+/// Failures starting the loopback MCP HTTP server.
 #[cfg(feature = "mcp")]
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -102,6 +105,7 @@ pub enum McpError {
     StartupExited,
 }
 
+/// Failures starting the loopback MCP HTTP server.
 #[cfg(not(feature = "mcp"))]
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -120,6 +124,10 @@ pub struct McpServer {
 
 #[cfg(feature = "mcp")]
 impl McpServer {
+    /// Spawn the loopback HTTP server when enabled; returns `Ok(None)` when disabled.
+    ///
+    /// Port `0` binds an ephemeral free port. The returned server's `url` reflects the
+    /// actual bound address after startup.
     pub fn start(
         config: &McpConfig,
         state: PublishedStateHandle,
@@ -212,10 +220,12 @@ impl McpServer {
         }))
     }
 
+    /// Fan resource-change notifications to subscribed MCP clients.
     pub fn publish_change(&self, change: PublishedStateChange) {
         let _ = self.events.send(change);
     }
 
+    /// Bound loopback base URL including the `/mcp` path segment.
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -231,11 +241,13 @@ impl Drop for McpServer {
     }
 }
 
+/// Stub when the `mcp` feature is not compiled in.
 #[cfg(not(feature = "mcp"))]
 pub struct McpServer;
 
 #[cfg(not(feature = "mcp"))]
 impl McpServer {
+    /// Returns `Ok(None)` when disabled; errors with `NotCompiled` if enabled.
     pub fn start(
         config: &McpConfig,
         _state: PublishedStateHandle,
@@ -448,19 +460,23 @@ fn parse_port(value: &str) -> Option<u16> {
     value.trim().parse::<u16>().ok()
 }
 
+/// Publish a popup-owned MCP discovery URL into tmux user options.
 #[cfg(feature = "mcp")]
 pub fn publish_mcp_url_to_tmux(url: &str) {
     let _ = tmux::publish_popup_alias("@ilmari_mcp_url", "@ilmari_daemon_legacy_mcp_url", url);
 }
 
+/// Publish the daemon MCP endpoint without stealing a popup-owned legacy alias.
 #[cfg(feature = "mcp")]
 pub fn publish_daemon_mcp_url_to_tmux(url: &str, daemon_socket_path: &std::path::Path) {
     let _ = tmux::publish_daemon_mcp_url(url, std::process::id(), daemon_socket_path);
 }
 
+/// No-op when MCP support was not compiled in.
 #[cfg(not(feature = "mcp"))]
 pub fn publish_mcp_url_to_tmux(_url: &str) {}
 
+/// No-op when MCP support was not compiled in.
 #[cfg(not(feature = "mcp"))]
 pub fn publish_daemon_mcp_url_to_tmux(_url: &str, _daemon_socket_path: &std::path::Path) {}
 

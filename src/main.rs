@@ -1,4 +1,7 @@
 //! Ilmari binary entry: dispatches CLI commands into the runtime or help output.
+//!
+//! Observer-only tmux radar for coding-agent panes. Feature gates (`tui`, `socket`,
+//! `mcp`) control optional UI and publishing surfaces compiled into this binary.
 
 mod agents;
 mod app;

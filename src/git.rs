@@ -56,14 +56,21 @@ impl Default for GitSummaryCache {
 }
 
 impl GitSummaryCache {
+    /// Cache using `DEFAULT_GIT_REFRESH` between shortstat samples.
     pub fn new() -> Self {
         Self::with_refresh_interval(DEFAULT_GIT_REFRESH)
     }
 
+    /// Cache with a custom reuse window for repository summary rows.
     pub fn with_refresh_interval(refresh_interval: Duration) -> Self {
         Self { refresh_interval, repo_roots: HashMap::new(), summaries: HashMap::new() }
     }
 
+    /// Summarize unique repository roots under the given workspace paths.
+    ///
+    /// Non-git paths are skipped. Git command failures become warnings and do not
+    /// drop other healthy workspaces. When `force_refresh` is false, cached rows
+    /// younger than the refresh interval are reused.
     pub fn summary_rows_for_workspaces<'a, I>(
         &mut self,
         workspace_paths: I,
@@ -250,6 +257,9 @@ fn repo_branch_name(repo_root: &Path) -> Result<String, GitError> {
     Ok(format!("detached@{short_head}"))
 }
 
+/// Parse `git diff --shortstat` text into insertion and deletion totals.
+///
+/// Empty output means a clean worktree (`0/0`), not a parse failure.
 pub fn parse_shortstat(output: &str) -> Result<ShortStat, GitError> {
     let trimmed = output.trim();
     if trimmed.is_empty() {

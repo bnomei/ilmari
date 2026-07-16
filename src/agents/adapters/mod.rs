@@ -1,4 +1,7 @@
 //! Per-agent `AgentAdapter` implementations registered by `AdapterRegistry`.
+//!
+//! Enabled adapters participate in detection and classification. Planned scaffolds
+//! remain in the tree for issue-tracked agents but are filtered out of `AdapterRegistry::v1`.
 
 mod aider;
 mod amp;

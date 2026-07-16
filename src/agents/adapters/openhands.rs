@@ -1,4 +1,5 @@
-//! Scaffold for OpenHands CLI support.
+//! Planned OpenHands CLI adapter scaffold (disabled in the v1 registry).
+//!
 //! Tracking issue: https://github.com/bnomei/ilmari/issues/16
 //! Repository: https://github.com/OpenHands/OpenHands
 //! Docs: https://docs.openhands.dev/openhands/usage/cli/terminal

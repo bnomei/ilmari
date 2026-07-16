@@ -59,6 +59,7 @@ pub struct PaneSnapshot {
 }
 
 impl PaneSnapshot {
+    /// Parse one tab-separated `list-panes -aF` row using `LIST_PANES_FORMAT`.
     pub fn parse(line: &str) -> Result<Self, PaneSnapshotParseError> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() != PANE_SNAPSHOT_FIELD_COUNT {
@@ -83,6 +84,7 @@ impl PaneSnapshot {
     }
 }
 
+/// Parse failure for one malformed `list-panes` line.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PaneSnapshotParseError {
     #[error("expected {expected} tab-separated fields, got {actual}")]
@@ -141,6 +143,7 @@ enum TmuxCommandPart {
 }
 
 impl TmuxCommand {
+    /// Single tmux command as discrete argv parts (no shell joining).
     pub fn new(args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self { parts: args.into_iter().map(|arg| TmuxCommandPart::Argument(arg.into())).collect() }
     }
@@ -268,6 +271,7 @@ pub enum TmuxError {
     CommandFailed { command: String, exit_code: Option<i32>, stderr: String },
 }
 
+/// Per-pane failure while running `capture-pane` for classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputTailCaptureFailure {
     pub pane_id: String,
@@ -302,6 +306,7 @@ pub fn collect_pane_snapshots() -> Result<PaneSnapshotCollection, TmuxError> {
     Ok(parse_pane_snapshots(&stdout))
 }
 
+/// Parse multi-line `list-panes` stdout, retaining healthy rows when some lines fail.
 pub fn parse_pane_snapshots(stdout: &str) -> PaneSnapshotCollection {
     let mut collection = PaneSnapshotCollection::default();
     for (index, line) in stdout.lines().filter(|line| !line.trim().is_empty()).enumerate() {
@@ -315,10 +320,12 @@ pub fn parse_pane_snapshots(stdout: &str) -> PaneSnapshotCollection {
     collection
 }
 
+/// Build `capture-pane -p -J` for one pane id and history start offset.
 pub fn capture_output_tail_command(target: &str, start: &str) -> TmuxCommand {
     TmuxCommand::new(["capture-pane", "-p", "-J", "-t", target, "-S", start])
 }
 
+/// Run `capture-pane` and return joined pane text for adapter classification.
 pub fn capture_output_tail(target: &str, start: &str) -> Result<String, TmuxError> {
     run_tmux_command(&capture_output_tail_command(target, start))
 }
@@ -370,6 +377,7 @@ fn capture_output_tails_with_process_kinds_using(
     capture
 }
 
+/// Sequence that focuses session, window, then pane for radar activation.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub fn jump_command(target: &PaneSnapshot) -> TmuxCommand {
     TmuxCommand::sequence([
@@ -379,6 +387,7 @@ pub fn jump_command(target: &PaneSnapshot) -> TmuxCommand {
     ])
 }
 
+/// Switch the attached client to the selected agent pane (observer jump only).
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub fn jump_to_pane(target: &PaneSnapshot) -> Result<(), TmuxError> {
     run_tmux_command(&jump_command(target))?;
@@ -679,6 +688,7 @@ pub struct FocusRendererState {
     pub status_enabled: Option<String>,
 }
 
+/// Sample attached-client focus and runtime badge/status enable overrides together.
 pub fn focus_and_renderer_overrides() -> Result<FocusRendererState, TmuxError> {
     let output = run_tmux_command(&TmuxCommand::sequence([
         TmuxCommand::new(["list-clients", "-F", "focus:#{pane_id}"]),

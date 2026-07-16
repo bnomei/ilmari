@@ -1,4 +1,6 @@
-//! OpenAI Codex CLI adapter.
+//! OpenAI Codex CLI adapter: detects `codex` panes and extracts model detail.
+//!
+//! Uses the shared supported-session classifier and output-excerpt path.
 //! Repository: https://github.com/openai/codex
 //! Docs: https://developers.openai.com/codex/cli
 

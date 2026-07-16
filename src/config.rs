@@ -14,8 +14,11 @@ use thiserror::Error;
 use crate::colors::Palette;
 use crate::view_state::ViewState;
 
+/// Built-in main refresh cadence (seconds) before TOML or CLI overrides.
 pub const DEFAULT_REFRESH_SECONDS: u64 = 5;
+/// Built-in process-tree sampling cadence (seconds) for CPU/memory stats.
 pub const DEFAULT_PROCESS_REFRESH_SECONDS: u64 = 15;
+/// Default loopback MCP listen port when MCP is enabled without an explicit port.
 pub const DEFAULT_MCP_PORT: u16 = 62_778;
 
 /// Effective application configuration after built-in defaults and TOML are merged.
@@ -32,6 +35,7 @@ pub struct Config {
     pub status: RendererConfig,
 }
 
+/// Refresh cadences for tmux scanning and process-tree hydration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub refresh_seconds: u64,
@@ -48,30 +52,35 @@ impl RuntimeConfig {
     }
 }
 
+/// Whether expensive git shortstat and capture-pane scanners run at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScannerConfig {
     pub git: bool,
     pub output_tail: bool,
 }
 
+/// Interactive radar features: alternate-screen TUI and terminal bell alerts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiConfig {
     pub enabled: bool,
     pub bell: bool,
 }
 
+/// Local Unix-socket publishing of the versioned pane snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketConfig {
     pub enabled: bool,
     pub path: Option<PathBuf>,
 }
 
+/// Loopback MCP resource server bind settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpConfig {
     pub enabled: bool,
     pub port: u16,
 }
 
+/// Default column visibility and whether the popup should remember toggles on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewConfig {
     pub app: bool,
@@ -84,6 +93,7 @@ pub struct ViewConfig {
 }
 
 impl ViewConfig {
+    /// Project the six rememberable view booleans without the `remember` policy flag.
     pub fn values(&self) -> ViewState {
         ViewState {
             app: self.app,
@@ -135,6 +145,10 @@ pub struct ViewPins {
     pub stats: bool,
 }
 
+/// View booleans after CLI, TOML, remembered state, and defaults are merged.
+///
+/// `pinned` marks fields that came from CLI or explicit TOML so responsive width
+/// defaults must not override them mid-session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedViews {
     pub values: ViewState,
@@ -400,6 +414,7 @@ fn nonempty_path(value: Option<&str>) -> Option<PathBuf> {
     value.filter(|value| !value.trim().is_empty()).map(PathBuf::from)
 }
 
+/// Failures loading or parsing `config.toml`.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to read Ilmari config at {path}: {source}")]
