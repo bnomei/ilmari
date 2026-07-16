@@ -32,6 +32,23 @@ printf '%s|%s\n' "${TMUX:-}" "$*" >>"$ILMARI_TEST_LOG"
 FAKE_ILMARI
 chmod +x "$tmp_dir/bin/ilmari"
 
+mkdir -p "$tmp_dir/replacement-bin"
+real_tmux="$(command -v tmux)"
+cat >"$tmp_dir/replacement-bin/tmux" <<'FAKE_TMUX'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${3:-}" == 'display-message' && "${4:-}" == '-p' \
+  && "${5:-}" == *'#{socket_path}'* ]]; then
+  exec "$REAL_TMUX" "$@"
+fi
+if [[ "${3:-}" == 'if-shell' ]]; then
+  printf '%s\n' '__ILMARI_TMUX_GENERATION_REJECTED__'
+  exit 0
+fi
+exit 97
+FAKE_TMUX
+chmod +x "$tmp_dir/replacement-bin/tmux"
+
 tmux -S "$tmux_socket" new-session -d -s ilmari-test 'sleep 120'
 server_pid="$(tmux -S "$tmux_socket" display-message -p '#{pid}')"
 tmux_context="$tmux_socket,$server_pid,0"
@@ -44,6 +61,16 @@ if PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" \
   fail 'TPM accepted a responding tmux server with a different originating PID'
 fi
 [[ ! -e "$test_log" ]] || fail 'generation mismatch executed an Ilmari command'
+
+# Deterministically replace the responding generation after the startup probe:
+# the guarded action is rejected by the server-side branch, and no configured
+# command or binding may be accepted from the stale plugin process.
+if PATH="$tmp_dir/replacement-bin:$tmp_dir/bin:$PATH" REAL_TMUX="$real_tmux" \
+  ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux" 2>/dev/null; then
+  fail 'TPM accepted an action after replacement between startup probe and action'
+fi
+[[ ! -e "$test_log" ]] || fail 'post-probe replacement executed an Ilmari command'
 
 tmux -S "$tmux_socket" set-option -g window-status-format 'KEEP-WINDOW'
 tmux -S "$tmux_socket" set-option -g window-status-current-format 'KEEP-CURRENT'
@@ -111,6 +138,43 @@ for _ in {1..50}; do
 done
 grep -F "$tmux_context|daemon start --refresh-seconds 11" "$test_log" >/dev/null \
   || fail 'custom daemon start command with arguments was not used verbatim'
+
+# Replacement during the paired stop command must invalidate the old cleanup
+# tuple before the single destructive tmux phase is accepted.
+cat >"$tmp_dir/bin/replace-ilmari-daemon" <<'REPLACE_DAEMON'
+#!/usr/bin/env bash
+set -euo pipefail
+without_client="${TMUX%,*}"
+socket="${without_client%,*}"
+tmux -S "$socket" set-option -g @ilmari_daemon_owner_pid '4343'
+tmux -S "$socket" set-option -g @ilmari_daemon_socket_path '/tmp/replacement.sock'
+tmux -S "$socket" set-option -g @ilmari_daemon_mcp_url 'http://127.0.0.1:4030/mcp'
+tmux -S "$socket" set-option -g @ilmari_window_badges 'replacement-render'
+tmux -S "$socket" set-option -g @ilmari_status_summary 'replacement-status'
+tmux -S "$socket" set-option -p @ilmari_state 'replacement-running'
+tmux -S "$socket" set-option -p @ilmari_badge 'N'
+REPLACE_DAEMON
+chmod +x "$tmp_dir/bin/replace-ilmari-daemon"
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_owner_pid '4242'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_socket_path '/tmp/daemon.sock'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_mcp_url 'http://127.0.0.1:4010/mcp'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_stop_command 'replace-ilmari-daemon'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon 'off'
+PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux"
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_daemon_owner_pid)" == '4343' ]] \
+  || fail 'interleaved replacement owner was cleared'
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_daemon_socket_path)" == '/tmp/replacement.sock' ]] \
+  || fail 'interleaved replacement endpoint was cleared'
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_window_badges)" == 'replacement-render' ]] \
+  || fail 'interleaved replacement render state was cleared'
+[[ "$(tmux -S "$tmux_socket" show-option -pqv -t "$pane_id" @ilmari_state)" == 'replacement-running' ]] \
+  || fail 'interleaved replacement pane state was cleared'
+
+# Restore the old tuple to cover successful owner cleanup below.
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_stop_command \
+  'ilmari daemon stop --custom-stop-marker paired'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon 'on'
 
 # Simulate daemon-published state alongside different popup-role legacy
 # endpoints, then disable daemon management and reload.

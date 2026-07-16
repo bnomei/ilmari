@@ -619,8 +619,12 @@ impl App {
         };
         let (ipc_server, ipc_warning) =
             start_ipc_server(&ipc_config, published_state.clone(), daemon_mode);
-        let (mcp_server, mcp_warning) =
-            start_mcp_server(&mcp_config, published_state.clone(), daemon_mode);
+        let (mcp_server, mcp_warning) = start_mcp_server(
+            &mcp_config,
+            published_state.clone(),
+            daemon_mode,
+            &daemon_socket_path,
+        );
         let headless_warning = (!tui_enabled && !ipc_config.enabled && !mcp_config.enabled)
             .then(|| "headless: no socket or MCP endpoint enabled".to_string());
 
@@ -1732,11 +1736,12 @@ fn start_mcp_server(
     config: &McpConfig,
     state: PublishedStateHandle,
     daemon_mode: bool,
+    daemon_socket_path: &Path,
 ) -> (Option<McpServer>, Option<String>) {
     match McpServer::start(config, state) {
         Ok(Some(server)) => {
             if daemon_mode {
-                mcp::publish_daemon_mcp_url_to_tmux(server.url());
+                mcp::publish_daemon_mcp_url_to_tmux(server.url(), daemon_socket_path);
             } else {
                 mcp::publish_mcp_url_to_tmux(server.url());
             }

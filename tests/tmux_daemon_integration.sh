@@ -40,7 +40,11 @@ run_ilmari() {
     "$ilmari_bin" "$@"
 }
 
-run_ilmari daemon start >"$tmp_dir/daemon.log" 2>&1 &
+# A popup that publishes first owns the compatibility URL. Daemon startup must
+# publish only its dedicated URL and leave that live popup discoverable.
+popup_mcp_url='http://127.0.0.1:64020/mcp'
+tmux -S "$tmux_socket" set-option -g @ilmari_mcp_url "$popup_mcp_url"
+run_ilmari daemon start --mcp --mcp-port 0 >"$tmp_dir/daemon.log" 2>&1 &
 daemon_pid="$!"
 for _ in {1..100}; do
   [[ "$(run_ilmari daemon status)" == 'running' ]] && break
@@ -57,6 +61,13 @@ kill -0 "$daemon_pid" 2>/dev/null || fail 'singleton start replaced or stopped t
 
 published_socket="$(tmux -S "$tmux_socket" show-option -gqv @ilmari_socket_path)"
 [[ "$published_socket" == "$runtime_dir"/* ]] || fail 'socket was not scoped to test runtime'
+daemon_mcp_url="$(tmux -S "$tmux_socket" show-option -gqv @ilmari_daemon_mcp_url)"
+[[ "$daemon_mcp_url" == http://127.0.0.1:*/mcp ]] \
+  || fail 'daemon-specific MCP URL was not published'
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_mcp_url)" == "$popup_mcp_url" ]] \
+  || fail 'daemon startup overwrote popup-first legacy MCP URL'
+[[ -z "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_daemon_legacy_mcp_url)" ]] \
+  || fail 'daemon claimed popup-owned legacy MCP URL'
 
 run_ilmari daemon stop
 for _ in {1..100}; do
@@ -70,5 +81,9 @@ daemon_pid=''
   || fail 'badge fragment was not cleaned'
 [[ -z "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_status_summary)" ]] \
   || fail 'status fragment was not cleaned'
+[[ "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_mcp_url)" == "$popup_mcp_url" ]] \
+  || fail 'daemon cleanup removed popup-owned legacy MCP URL'
+[[ -z "$(tmux -S "$tmux_socket" show-option -gqv @ilmari_daemon_mcp_url)" ]] \
+  || fail 'daemon-specific MCP URL was not cleaned'
 
 printf '%s\n' 'tmux daemon integration: ok'

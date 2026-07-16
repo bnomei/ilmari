@@ -1205,9 +1205,12 @@ fn handle_stream(
 
     let response = match read_result {
         Ok(0) => encode_error("empty-request", "Expected ping, list, ls, or detail <pane-id>"),
-        Ok(_) if request.trim() == "stop" => {
+        Ok(_) if stop_request_matches(request.trim(), std::process::id()) => {
             stop_requested.store(true, AtomicOrdering::Relaxed);
             "{\"ok\":true,\"type\":\"stop\"}".to_string()
+        }
+        Ok(_) if request.trim().starts_with("stop ") => {
+            encode_error("owner-changed", "Daemon owner changed before stop was accepted")
         }
         Ok(_) => match state.snapshot() {
             Some(state) => encode_request(request.trim(), &state),
@@ -1218,6 +1221,12 @@ fn handle_stream(
 
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.write_all(b"\n");
+}
+
+#[cfg(any(feature = "socket", test))]
+fn stop_request_matches(request: &str, server_pid: u32) -> bool {
+    request == "stop"
+        || request.strip_prefix("stop ").and_then(|pid| pid.parse::<u32>().ok()) == Some(server_pid)
 }
 
 #[cfg(any(feature = "socket", test))]
@@ -1471,10 +1480,10 @@ pub fn daemon_socket_is_live(path: &Path) -> bool {
 
 /// Ask an owned daemon to stop, even when its snapshot heartbeat is stale or incompatible.
 pub fn request_daemon_stop(path: &Path) -> bool {
-    if !daemon_is_owned(path) {
+    let Some(owner_pid) = daemon_owner_pid(path) else {
         return false;
-    }
-    socket_request(path, "stop")
+    };
+    socket_request(path, &format!("stop {owner_pid}"))
         .ok()
         .and_then(|response| serde_json::from_str::<serde_json::Value>(response.trim()).ok())
         .is_some_and(|value| value["ok"] == true && value["type"] == "stop")
@@ -1767,30 +1776,30 @@ fn last_segments(components: &[String], depth: usize) -> String {
 /// Publish the explicit legacy app/socket endpoint without claiming daemon discovery.
 pub fn publish_socket_path_to_tmux(path: &Path) {
     let socket_path = path.to_string_lossy();
-    let _ = tmux::set_global_option("@ilmari_socket_path", socket_path.as_ref());
+    let _ = tmux::publish_popup_alias(
+        "@ilmari_socket_path",
+        "@ilmari_daemon_legacy_socket_path",
+        socket_path.as_ref(),
+    );
 }
 
 /// Publish the daemon snapshot-source endpoint separately from legacy app sockets.
 pub fn publish_daemon_socket_path_to_tmux(path: &Path) {
-    let socket_path = path.to_string_lossy();
-    let _ = tmux::set_global_option("@ilmari_daemon_socket_path", socket_path.as_ref());
-    let _ = tmux::set_global_option("@ilmari_daemon_owner_pid", &std::process::id().to_string());
-    // MCP startup follows IPC startup. Drop only stale daemon-role metadata;
-    // the public compatibility URL may currently belong to a popup.
-    let _ = tmux::unset_global_option("@ilmari_daemon_mcp_url");
-    let legacy_listener_is_live = tmux::global_option("@ilmari_socket_path")
+    let observed_stale_legacy = tmux::global_option("@ilmari_socket_path")
         .ok()
         .filter(|published| !published.is_empty())
-        .is_some_and(|published| daemon_socket_is_live(Path::new(&published)));
-    if !legacy_listener_is_live {
-        let _ = tmux::set_global_option("@ilmari_socket_path", socket_path.as_ref());
-    }
+        .filter(|published| !daemon_socket_is_live(Path::new(published)));
+    let _ = tmux::publish_daemon_socket_path(
+        path,
+        std::process::id(),
+        observed_stale_legacy.as_deref(),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_request, socket_enabled_from_var, validate_ping_for_origin,
+        encode_request, socket_enabled_from_var, stop_request_matches, validate_ping_for_origin,
         validate_snapshot_for_origin, DaemonEndpointState, IpcConfig, PingResponse, PublishedState,
         PublishedStateHandle, SnapshotClientError, StateBuildOptions, LIST_RESOURCE_URI,
     };
@@ -1807,6 +1816,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime};
+
+    #[test]
+    fn conditional_stop_rejects_a_replacement_owner_at_the_action_boundary() {
+        assert!(stop_request_matches("stop 4242", 4242));
+        assert!(!stop_request_matches("stop 4242", 4343));
+        assert!(stop_request_matches("stop", 4343), "legacy clients remain compatible");
+    }
 
     #[test]
     fn snapshot_is_versioned_deserializable_and_contains_render_neutral_facts() {

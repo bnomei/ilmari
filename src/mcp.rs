@@ -450,20 +450,19 @@ fn parse_port(value: &str) -> Option<u16> {
 
 #[cfg(feature = "mcp")]
 pub fn publish_mcp_url_to_tmux(url: &str) {
-    let _ = tmux::set_global_option("@ilmari_mcp_url", url);
+    let _ = tmux::publish_popup_alias("@ilmari_mcp_url", "@ilmari_daemon_legacy_mcp_url", url);
 }
 
 #[cfg(feature = "mcp")]
-pub fn publish_daemon_mcp_url_to_tmux(url: &str) {
-    publish_mcp_url_to_tmux(url);
-    let _ = tmux::set_global_option("@ilmari_daemon_mcp_url", url);
+pub fn publish_daemon_mcp_url_to_tmux(url: &str, daemon_socket_path: &std::path::Path) {
+    let _ = tmux::publish_daemon_mcp_url(url, std::process::id(), daemon_socket_path);
 }
 
 #[cfg(not(feature = "mcp"))]
 pub fn publish_mcp_url_to_tmux(_url: &str) {}
 
 #[cfg(not(feature = "mcp"))]
-pub fn publish_daemon_mcp_url_to_tmux(_url: &str) {}
+pub fn publish_daemon_mcp_url_to_tmux(_url: &str, _daemon_socket_path: &std::path::Path) {}
 
 #[cfg(test)]
 mod tests {
