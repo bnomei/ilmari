@@ -12,6 +12,7 @@ use super::super::{
     reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Amp CLI adapter (`amp`).
 pub(in crate::agents) struct AmpAdapter;
 
 impl AgentAdapter for AmpAdapter {

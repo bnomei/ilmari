@@ -14,6 +14,7 @@ use super::super::{
     reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Claude Code adapter (`claude`) with wrapped-launch fallbacks.
 pub(in crate::agents) struct ClaudeCodeAdapter;
 
 impl AgentAdapter for ClaudeCodeAdapter {

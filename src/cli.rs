@@ -14,10 +14,15 @@ use crate::config::ViewOverrides;
 
 /// Parsed top-level command after argv handling.
 pub enum CliCommand {
+    /// Interactive radar or headless one-shot refresh loop.
     Run(AppConfig),
+    /// Start (or adopt) the per-tmux-server collector daemon.
     DaemonStart(AppConfig),
+    /// Cooperative stop of the owned daemon.
     DaemonStop(AppConfig),
+    /// Print `running` / `stopped` for the daemon endpoint.
     DaemonStatus(AppConfig),
+    /// Print the compact status-line fragment when a healthy daemon published one.
     Status(AppConfig),
     Help,
     Version,
@@ -132,6 +137,7 @@ where
     parse_run_args(args, base_config, CliCommand::Run)
 }
 
+/// Parse run-style flags, load config, apply overlays, and wrap as the given command.
 fn parse_run_args<I, S, F>(
     args: I,
     base_config: F,

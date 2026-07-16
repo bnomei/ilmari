@@ -78,6 +78,9 @@ pub struct StatusCounts {
 }
 
 /// Per-pane attention latch for waiting/finished until focus acknowledges them.
+///
+/// `pending_*` holds transitions observed while focus probes are unavailable so a
+/// brief scan glitch does not drop the badge when focus state returns.
 #[derive(Debug, Clone, Copy, Default)]
 struct PaneAttention {
     last_status: Option<SessionStatus>,
@@ -223,6 +226,10 @@ impl TmuxStatePublisher {
         self.previously_published = live_pane_ids.clone();
     }
 
+    /// Latch waiting/finished on status transitions for unfocused panes.
+    ///
+    /// When `allow_new_attention` is false (focus probe failed), transitions go to
+    /// pending bits instead of live badges so focus recovery can promote them.
     fn update_attention(
         &mut self,
         sessions: &[SessionRecord],
@@ -249,6 +256,7 @@ impl TmuxStatePublisher {
         }
     }
 
+    /// Clear latched attention for focused panes; promote pending bits for others.
     fn resolve_known_focus(&mut self, focused: &HashSet<String>) -> bool {
         let mut changed = false;
         for (pane_id, attention) in &mut self.panes {
@@ -272,6 +280,7 @@ impl TmuxStatePublisher {
         changed
     }
 
+    /// Build pane badge strings and global status counts from latched attention.
     fn render(&self, sessions: &[SessionRecord], settings: &RenderSettings) -> RenderedState {
         let mut counts = StatusCounts::default();
         let mut windows: HashMap<&str, Vec<String>> = HashMap::new();

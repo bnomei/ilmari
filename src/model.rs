@@ -92,6 +92,7 @@ impl AgentKind {
         Self::ALL_KINDS.into_iter().filter(|kind| kind.is_enabled())
     }
 
+    /// Iterator over planned (disabled) kinds for registry and fixture tests.
     #[cfg(test)]
     pub fn planned_kinds() -> impl Iterator<Item = Self> {
         Self::ALL_KINDS.into_iter().filter(|kind| !kind.is_enabled())
@@ -124,10 +125,15 @@ impl AgentKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionStatus {
+    /// Agent process is live and producing or actively working.
     Running,
+    /// Agent is idle and appears to need human input.
     WaitingInput,
+    /// Work completed; the pane may still exist as a shell after exit.
     Finished,
+    /// Pane disappeared from tmux or was marked dead.
     Terminated,
+    /// Identity known or suspected, but status signals are inconclusive.
     Unknown,
 }
 
@@ -150,17 +156,30 @@ impl SessionStatus {
 }
 
 /// One tracked agent session keyed by tmux pane id across refresh cycles.
+///
+/// `SessionTracker` owns creation and updates. Fields other than `pane` are
+/// classifier or hydration outputs and may lag one refresh when capture fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
+    /// Latest tmux metadata for this pane id (path, command, title, liveness).
     pub pane: PaneSnapshot,
+    /// Adapter that currently owns detection and classification for this pane.
     pub kind: AgentKind,
+    /// Lifecycle state from the last successful classification (or capture hold).
     pub status: SessionStatus,
+    /// Optional model/mode label for the radar detail column.
     pub detail: Option<Arc<AgentDetail>>,
+    /// Recent non-noise output snippet shown in the radar output column.
     pub output_excerpt: Option<Arc<str>>,
+    /// Optional CPU/memory rollup from process-tree hydration (stats column).
     pub process_usage: Option<Arc<SessionProcessUsage>>,
+    /// Hash of the status-signal window used to detect output motion between refreshes.
     pub output_fingerprint: Option<u64>,
+    /// When `kind` or `status` last changed; drives inactive-since labels and sort order.
     pub last_changed_at: Instant,
+    /// Last refresh that still observed this pane id in `list-panes`.
     pub last_seen_at: Instant,
+    /// Deadline after which a finished pane drops from the radar if still missing.
     pub retained_until: Option<Instant>,
 }
 
@@ -190,7 +209,9 @@ impl ResourceUsage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtaskProcess {
     pub pid: u32,
+    /// Depth under the matched agent binary (1 = direct child).
     pub depth: usize,
+    /// Short command label suitable for the indented stats subtask rows.
     pub command_label: String,
     pub usage: ResourceUsage,
 }
@@ -198,8 +219,11 @@ pub struct SubtaskProcess {
 /// Rolled-up process usage for the agent binary and its descendant subtasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionProcessUsage {
+    /// Usage of the matched agent executable itself.
     pub agent: ResourceUsage,
+    /// Sum of descendant subtask usage (excludes the agent binary).
     pub spawned: ResourceUsage,
+    /// Ordered descendant list for optional expansion under the stats column.
     pub subtasks: Vec<SubtaskProcess>,
 }
 
@@ -207,9 +231,13 @@ pub struct SessionProcessUsage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentDetailTone {
+    /// Default muted detail color for ordinary model names.
     Neutral,
+    /// Amp deep mode accent.
     AmpDeep,
+    /// Amp smart mode accent.
     AmpSmart,
+    /// Amp rush mode accent.
     AmpRush,
 }
 
@@ -223,7 +251,9 @@ pub struct AgentDetail {
 /// Workspace bucket grouping pane rows that share a derived path label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGroup {
+    /// Disambiguated path label shared by the panes in this group.
     pub label: String,
+    /// Optional git shortstat for the shared repository root.
     pub git_summary: Option<GitSummaryRow>,
     pub rows: Vec<PaneRow>,
 }
@@ -231,15 +261,21 @@ pub struct WorkspaceGroup {
 /// One render-ready pane row with selection, jump-match, and visibility flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneRow {
+    /// Tmux pane id (e.g. `%3`); also the jump target token.
     pub pane_id: String,
+    /// Wall-clock inactive-since text for non-running rows; empty while running.
     pub inactive_since_label: String,
     pub output_excerpt: Option<Arc<str>>,
+    /// Agent display name for the app column.
     pub client_label: &'static str,
     pub detail: Option<Arc<AgentDetail>>,
     pub process_usage: Option<Arc<SessionProcessUsage>>,
+    /// Whether the stats subtask list is expanded under this row.
     pub subtasks_expanded: bool,
     pub status: SessionStatus,
+    /// Stable status slug mirrored from `SessionStatus::as_str`.
     pub status_label: &'static str,
+    /// Highlighted by the numeric pane-jump filter.
     pub is_jump_match: bool,
     pub is_selected: bool,
 }
@@ -247,7 +283,9 @@ pub struct PaneRow {
 /// Cached git branch and unstaged diff stats for one repository root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitSummaryRow {
+    /// Absolute repository root path used as the cache key.
     pub workspace_path: PathBuf,
+    /// Radar-facing label, often shared with the workspace group header.
     pub workspace_label: String,
     pub branch_name: String,
     pub insertions: u32,
@@ -255,9 +293,12 @@ pub struct GitSummaryRow {
 }
 
 /// Denormalized TUI and IPC-facing snapshot built from current `SessionRecord` rows.
+///
+/// Rebuilt on every refresh; column flags mirror the interactive view toggles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppModel {
     pub title: String,
+    /// Footer/status text for warnings and optional git summary snippets.
     pub status_line: String,
     pub show_app: bool,
     pub show_git: bool,
@@ -268,6 +309,7 @@ pub struct AppModel {
     pub workspace_groups: Vec<WorkspaceGroup>,
     pub refresh_interval: Duration,
     pub last_refresh: Instant,
+    /// Wall clock of the last refresh for inactive-since labels.
     pub last_refresh_wallclock: SystemTime,
 }
 

@@ -120,6 +120,7 @@ impl GitSummaryCache {
         GitSummaryReport { rows, warnings }
     }
 
+    /// Map a pane cwd to its git root, reusing cached resolutions within the interval.
     fn resolve_repo_root(
         &mut self,
         workspace_path: &Path,
@@ -143,6 +144,7 @@ impl GitSummaryCache {
         Ok(value)
     }
 
+    /// Sample branch name and unstaged shortstat for one repository root.
     fn summary_row_for_repo(
         &mut self,
         repo_root: &Path,

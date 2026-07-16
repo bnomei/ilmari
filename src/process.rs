@@ -129,6 +129,7 @@ impl ProcessTree {
         matched_kind
     }
 
+    /// Locate the agent binary under the pane and roll agent plus descendant usage.
     fn usage_for_kind(
         &self,
         pane_pid: Option<u32>,
@@ -145,6 +146,7 @@ impl ProcessTree {
         Some(SessionProcessUsage { agent: self.resource_usage(agent_pid)?, spawned, subtasks })
     }
 
+    /// Breadth-first search from the pane pid for the first process matching `kind`.
     fn resolve_agent_pid(&self, pane_pid: u32, kind: AgentKind) -> Option<u32> {
         if self.process_matches_kind(pane_pid, kind) {
             return Some(pane_pid);
@@ -180,6 +182,7 @@ impl ProcessTree {
         pids
     }
 
+    /// Whether the process command line matches the enabled agent executable heuristics.
     fn process_matches_kind(&self, pid: u32, kind: AgentKind) -> bool {
         let Some(process) = self.processes.get(&pid) else {
             return false;

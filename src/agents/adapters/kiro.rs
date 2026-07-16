@@ -15,6 +15,7 @@ use super::super::{
     reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Kiro CLI adapter (`kiro-cli`) with title/output identity fallbacks.
 pub(in crate::agents) struct KiroCliAdapter;
 
 impl AgentAdapter for KiroCliAdapter {

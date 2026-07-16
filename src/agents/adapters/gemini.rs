@@ -13,6 +13,7 @@ use super::super::{
     reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Gemini CLI adapter (`gemini`) with title/output identity fallbacks.
 pub(in crate::agents) struct GeminiAdapter;
 
 impl AgentAdapter for GeminiAdapter {

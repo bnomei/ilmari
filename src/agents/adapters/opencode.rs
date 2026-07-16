@@ -13,6 +13,7 @@ use super::super::{
     reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled OpenCode adapter (`opencode`).
 pub(in crate::agents) struct OpenCodeAdapter;
 
 impl AgentAdapter for OpenCodeAdapter {

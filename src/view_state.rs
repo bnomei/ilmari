@@ -171,6 +171,7 @@ fn nonempty_path(value: Option<&str>) -> Option<PathBuf> {
     value.filter(|value| !value.trim().is_empty()).map(PathBuf::from)
 }
 
+/// Create a same-directory private temp file used for atomic view.json replacement.
 fn create_temporary(parent: &Path, destination: &Path) -> Result<(PathBuf, File), ViewStateError> {
     let file_name = destination.file_name().and_then(|name| name.to_str()).unwrap_or("view.json");
     for _ in 0..32 {

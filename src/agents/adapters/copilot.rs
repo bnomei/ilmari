@@ -15,6 +15,7 @@ use super::super::{
     pane_title_contains, reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled GitHub Copilot CLI adapter (`copilot`) with custom waiting prompts.
 pub(in crate::agents) struct GitHubCopilotCliAdapter;
 
 impl AgentAdapter for GitHubCopilotCliAdapter {

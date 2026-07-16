@@ -14,6 +14,7 @@ use super::super::{
     extract_codex_output_excerpt, reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Codex CLI adapter (`codex`).
 pub(in crate::agents) struct CodexAdapter;
 
 impl AgentAdapter for CodexAdapter {

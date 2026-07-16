@@ -12,6 +12,7 @@ use super::super::{
     reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Grok CLI adapter (`grok`) with custom status ladder.
 pub(in crate::agents) struct GrokAdapter;
 
 impl AgentAdapter for GrokAdapter {

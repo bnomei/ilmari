@@ -259,8 +259,10 @@ impl McpServer {
         }
     }
 
+    /// No-op when the MCP feature is not compiled in.
     pub fn publish_change(&self, _change: PublishedStateChange) {}
 
+    /// Empty URL stub when the MCP feature is not compiled in.
     pub fn url(&self) -> &str {
         ""
     }

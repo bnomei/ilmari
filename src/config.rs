@@ -43,10 +43,12 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// Main radar refresh cadence as a `Duration`.
     pub fn refresh_interval(&self) -> Duration {
         Duration::from_secs(self.refresh_seconds)
     }
 
+    /// Process-tree sampling cadence as a `Duration` (CPU/memory stats).
     pub fn process_refresh_interval(&self) -> Duration {
         Duration::from_secs(self.process_refresh_seconds)
     }
@@ -368,6 +370,9 @@ fn state_format(symbol: &str, style: &str) -> StateFormat {
     StateFormat { symbol: symbol.to_string(), style: style.to_string() }
 }
 
+/// Resolve one view boolean and whether it is pinned against responsive defaults.
+///
+/// Priority: CLI → explicit TOML → remembered state → built-in default.
 fn resolve_view(
     cli: Option<bool>,
     configured: Option<bool>,

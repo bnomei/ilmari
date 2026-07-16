@@ -11,6 +11,7 @@ use crate::tmux::PaneSnapshot;
 
 use super::super::{classify_supported_session, command_matches, AgentAdapter};
 
+/// Planned Cursor CLI adapter scaffold; filtered out of `AdapterRegistry::v1`.
 pub(in crate::agents) struct CursorCliAdapter;
 
 impl AgentAdapter for CursorCliAdapter {

@@ -12,6 +12,7 @@ use super::super::{
     pane_title_contains, reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Antigravity CLI adapter (`agy`) with custom status ladder.
 pub(in crate::agents) struct AntigravityAdapter;
 
 impl AgentAdapter for AntigravityAdapter {

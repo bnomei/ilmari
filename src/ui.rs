@@ -86,6 +86,7 @@ impl Widget for FooterView<'_> {
     }
 }
 
+/// Workspace headers plus pane rows (and expanded subtasks) for the main radar area.
 fn workspace_lines(
     model: &AppModel,
     palette: &Palette,
@@ -255,6 +256,7 @@ fn push_raw_spaces(spans: &mut Vec<Span<'static>>, current_width: &mut usize, co
     spans.push(Span::raw(" ".repeat(count)));
 }
 
+/// One pane row: optional time, status glyph, pane id, agent, detail, stats, excerpt.
 fn workspace_row_line(
     row: &PaneRow,
     palette: &Palette,
@@ -467,6 +469,7 @@ fn selected_row_style(palette: &Palette) -> Style {
     palette.base_style().add_modifier(Modifier::BOLD | Modifier::REVERSED)
 }
 
+/// Keyboard shortcut footer; switches to a compact key list under the width breakpoint.
 fn render_footer(area: Rect, buf: &mut Buffer, palette: &Palette) {
     Block::default().style(palette.base_style()).render(area, buf);
 

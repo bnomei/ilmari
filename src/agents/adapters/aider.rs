@@ -12,6 +12,7 @@ use crate::tmux::PaneSnapshot;
 
 use super::super::{classify_supported_session, command_matches, AgentAdapter};
 
+/// Planned Aider adapter scaffold; filtered out of `AdapterRegistry::v1`.
 pub(in crate::agents) struct AiderAdapter;
 
 impl AgentAdapter for AiderAdapter {

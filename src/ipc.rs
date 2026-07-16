@@ -439,6 +439,7 @@ impl PublishedState {
         self.detail_response(id).map(|response| encode_json(&response))
     }
 
+    /// Map resource URIs to JSON bodies for change detection between publishes.
     fn resource_content_by_uri(&self) -> BTreeMap<String, String> {
         let mut resources = BTreeMap::new();
         resources.insert(LIST_RESOURCE_URI.to_string(), self.list_resource_text());
@@ -493,6 +494,7 @@ impl PublishedState {
     }
 }
 
+/// Internal list/detail payload for one pane inside a `PublishedState` revision.
 #[derive(Debug, Clone)]
 struct PublishedItem {
     id: String,
@@ -510,6 +512,7 @@ struct PublishedItem {
 }
 
 impl PublishedItem {
+    /// Project a live `SessionRecord` into the consumer-facing published item shape.
     fn from_session(
         session: &SessionRecord,
         labels: &HashMap<String, String>,
@@ -1074,16 +1077,19 @@ impl IpcServer {
         }
     }
 
+    /// Empty path stub when the socket feature is unavailable.
     pub fn path(&self) -> &Path {
         Path::new("")
     }
 
+    /// Always false in the non-socket stub build.
     pub fn shutdown_requested(&self) -> bool {
         false
     }
 }
 
 #[cfg(all(unix, feature = "socket"))]
+/// Bind the Unix socket, removing a stale dead path but refusing a live peer.
 fn bind_listener(path: &Path) -> Result<UnixListener, IpcError> {
     prepare_socket_directory(path)?;
     match UnixListener::bind(path) {
@@ -1104,6 +1110,7 @@ fn bind_listener(path: &Path) -> Result<UnixListener, IpcError> {
 }
 
 #[cfg(all(unix, feature = "socket"))]
+/// Ensure socket parent directories exist and are private (`0o700`, user-owned).
 fn prepare_socket_directory(path: &Path) -> Result<(), IpcError> {
     let Some(parent) = path.parent() else {
         return Ok(());
@@ -1337,6 +1344,7 @@ pub fn request_snapshot(path: &Path) -> Result<SnapshotResponse, SnapshotClientE
     validate_snapshot(response, now_ms)
 }
 
+/// Accept only fresh daemon snapshots that match the originating tmux generation.
 fn validate_snapshot(
     response: SnapshotResponse,
     now_ms: u64,
@@ -1349,6 +1357,7 @@ fn validate_snapshot(
     )
 }
 
+/// Snapshot health gate: role, schema, origin generation, non-zero revision, and TTL.
 fn validate_snapshot_for_origin(
     response: SnapshotResponse,
     now_ms: u64,
@@ -1394,6 +1403,7 @@ fn producer_has_scope(producer: &Producer, origin: Option<&tmux::TmuxServerIdent
         && producer.tmux_socket_path.as_deref() == Some(expected_path.as_ref())
 }
 
+/// True when producer socket path, server pid, and optional device/inode match origin.
 fn producer_generation_matches(
     producer: &Producer,
     origin: Option<&tmux::TmuxServerIdentity>,
@@ -1713,6 +1723,7 @@ fn resource_uri_from_pane(pane: &PaneSnapshot) -> String {
     )
 }
 
+/// Parse `ilmari://{session}/{window}/{pane}` into a `%`-prefixed pane id.
 #[cfg(any(feature = "socket", feature = "mcp", test))]
 pub(crate) fn resource_uri_to_pane_id(uri: &str) -> Option<String> {
     let path = uri.trim().strip_prefix("ilmari://")?;

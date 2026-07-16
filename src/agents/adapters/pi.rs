@@ -11,6 +11,7 @@ use super::super::{
     pane_title_contains, reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Pi adapter for `pi` and `pi-agent` executables.
 pub(in crate::agents) struct PiAdapter;
 
 impl AgentAdapter for PiAdapter {

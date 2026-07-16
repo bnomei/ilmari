@@ -140,6 +140,11 @@ impl AdapterRegistry {
                         || is_claude_output_confirmation_candidate(pane))))
     }
 
+    /// Pick the adapter that should own this pane for the current refresh.
+    ///
+    /// Priority: process-tree identity hint, sticky previous kind while the pane
+    /// still looks like that agent (including shell after exit and Claude spinner
+    /// titles), then first detect/detect_output match among enabled adapters.
     fn select_adapter<'a>(
         &'a self,
         pane: &PaneSnapshot,
@@ -280,6 +285,11 @@ impl SessionTracker {
         records
     }
 
+    /// Build or update one `SessionRecord` when an adapter claims the pane.
+    ///
+    /// Capture failures hold prior status and fingerprint so a flaky `capture-pane`
+    /// does not invent status transitions. Process usage is preserved from the
+    /// previous record until the runtime rehydrates it.
     fn classify_pane(
         &self,
         pane: &PaneSnapshot,
@@ -331,6 +341,9 @@ impl SessionTracker {
         })
     }
 
+    /// Convert a vanished pane into a short-lived terminated record, or drop it.
+    ///
+    /// Already-terminated rows are discarded so retention does not loop forever.
     fn retain_missing_record(
         &self,
         previous: &SessionRecord,
@@ -358,6 +371,7 @@ impl SessionTracker {
     }
 }
 
+/// Shared lifecycle classifier for adapters that use the generic prompt heuristics.
 fn classify_supported_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -375,6 +389,7 @@ fn classify_supported_session(
     )
 }
 
+/// Antigravity-specific classifier using that agent's footer/prompt tail patterns.
 fn classify_antigravity_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -392,6 +407,7 @@ fn classify_antigravity_session(
     )
 }
 
+/// Grok-specific classifier: active waiting footers stay Running, not WaitingInput.
 fn classify_grok_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -440,6 +456,7 @@ fn classify_grok_session(
     SessionStatus::Unknown
 }
 
+/// Copilot CLI classifier with its own waiting-prompt and noise heuristics.
 fn classify_copilot_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -492,6 +509,7 @@ fn classify_copilot_session(
     SessionStatus::Unknown
 }
 
+/// Kiro CLI classifier: active tool lines stay Running; prompt patterns wait.
 fn classify_kiro_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -540,6 +558,8 @@ fn classify_kiro_session(
     SessionStatus::Unknown
 }
 
+/// Core status ladder shared by most adapters: dead → finished shell → tail hold →
+/// motion → agent-specific tail → stable waiting → detect waiting → unknown.
 fn classify_supported_session_with_tail_classifier<F>(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -584,6 +604,7 @@ where
     SessionStatus::Unknown
 }
 
+/// Pi classifier with an idle-prompt check before the generic tail heuristics.
 fn classify_pi_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -628,6 +649,11 @@ fn classify_pi_session(
     SessionStatus::Unknown
 }
 
+/// Compute the finished-session retention deadline, or `None` to drop the row now.
+///
+/// Outer `None` means the pane should leave the tracker; inner `None` means the
+/// status does not use retention. Expired deadlines drop finished rows after the
+/// configured window even if classification still reports Finished.
 fn retention_deadline(
     previous: Option<&SessionRecord>,
     status: SessionStatus,
@@ -648,6 +674,7 @@ fn retention_deadline(
     }
 }
 
+/// When capture is skipped/missing, keep waiting/finished rather than inventing Running.
 fn retained_status_without_output_tail(
     output_tail: Option<&str>,
     previous: Option<&SessionRecord>,
@@ -661,6 +688,7 @@ fn retained_status_without_output_tail(
         .filter(|status| matches!(status, SessionStatus::WaitingInput | SessionStatus::Finished))
 }
 
+/// True when `pane_current_command` looks like an interactive shell, not an agent binary.
 fn is_shell_command(command: &str) -> bool {
     let normalized = normalized_command_name(command);
     matches!(
@@ -683,6 +711,7 @@ fn is_shell_command(command: &str) -> bool {
     )
 }
 
+/// Node/Python/runtime wrappers that may hide the real agent executable name.
 fn is_runtime_wrapped_agent_candidate(command: &str) -> bool {
     command_equals_any(command, &["node", "bun", "deno"])
 }
@@ -817,6 +846,7 @@ fn looks_like_auggie_output(output_tail: &str) -> bool {
         || lower.contains("tip: use 'auggie session continue'")
 }
 
+/// Generic waiting/finished prompt patterns shared across many agent CLIs.
 fn classify_output_tail(output_tail: &str) -> Option<SessionStatus> {
     let recent_lines = recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW);
     if looks_like_waiting_prompt(&recent_lines, output_tail) {
@@ -1439,6 +1469,7 @@ fn strip_grok_right_aligned_timestamps(output_tail: &str) -> String {
         .join("\n")
 }
 
+/// Walk recent non-empty lines, skip noise, and clamp to the radar excerpt width.
 fn extract_output_excerpt_from_tail<F>(output_tail: &str, mut is_noise: F) -> Option<String>
 where
     F: FnMut(&str, &str) -> bool,
@@ -1596,6 +1627,7 @@ fn retained_output_excerpt(previous: &SessionRecord) -> Option<Arc<str>> {
     previous.output_excerpt.clone()
 }
 
+/// Reuse the previous detail `Arc` when the extracted label/tone is unchanged.
 fn reuse_detail_arc(
     extracted: Option<AgentDetail>,
     previous: Option<&SessionRecord>,
@@ -1610,6 +1642,7 @@ fn reuse_detail_arc(
     }
 }
 
+/// Reuse the previous excerpt `Arc` when the extracted text is unchanged.
 fn reuse_output_excerpt_arc(
     extracted: Option<String>,
     previous: Option<&SessionRecord>,
@@ -1628,6 +1661,7 @@ fn reuse_output_excerpt_arc(
     }
 }
 
+/// Fingerprint the status-signal window for motion detection; Amp uses a tighter window.
 fn output_fingerprint_for_kind(kind: AgentKind, output_tail: &str) -> Option<u64> {
     match kind {
         AgentKind::Amp => amp_output_fingerprint(output_tail),
@@ -2087,6 +2121,7 @@ fn lower_is_auggie_footer(line: &str) -> bool {
     lower.contains("[insert]") && lower.contains('?') && lower.contains('[') && lower.contains(']')
 }
 
+/// True when both fingerprints exist and differ — used as a Running signal.
 fn output_has_recent_motion(
     output_fingerprint: Option<u64>,
     previous: Option<&SessionRecord>,
@@ -2097,6 +2132,7 @@ fn output_has_recent_motion(
     }
 }
 
+/// True when both fingerprints exist and match — used as a WaitingInput fallback.
 fn output_is_stable(output_fingerprint: Option<u64>, previous: Option<&SessionRecord>) -> bool {
     match (output_fingerprint, previous.and_then(|record| record.output_fingerprint)) {
         (Some(current), Some(previous)) => current == previous,

@@ -181,6 +181,10 @@ fn run_tui(config: AppConfig) -> Result<()> {
     result
 }
 
+/// Headless refresh loop for daemon mode or non-TUI builds.
+///
+/// Daemon mode publishes badges/status, watches cooperative shutdown and tmux
+/// liveness, and refuses to continue if another healthy daemon already owns the socket.
 fn run_headless(mut config: AppConfig, daemon_mode: bool) -> Result<()> {
     config.tui_enabled = false;
     config.bell_enabled = false;
@@ -290,6 +294,11 @@ fn run_app(terminal: &mut DefaultTerminal, config: AppConfig) -> Result<()> {
     Ok(())
 }
 
+/// Interactive or headless radar runtime: scan, classify, hydrate, publish, render.
+///
+/// Collectors are function pointers so tests inject fixtures without spawning tmux.
+/// Published state is always revised on refresh; the Unix socket and MCP servers are
+/// optional fans of the same snapshot.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 struct App {
     model: AppModel,
@@ -297,6 +306,7 @@ struct App {
     git_summaries: Vec<GitSummaryRow>,
     palette: Palette,
     should_quit: bool,
+    /// When true, activating a pane exits the popup (tmux popup workflow).
     quit_on_activate: bool,
     display_offset: UtcOffset,
     collect_pane_snapshots: PaneSnapshotCollector,
@@ -309,6 +319,7 @@ struct App {
     sessions: Vec<SessionRecord>,
     selected_pane_id: Option<String>,
     expanded_pane_ids: HashSet<String>,
+    /// Accumulated digits for numeric pane-jump filtering.
     pane_jump_digits: Option<String>,
     show_app: bool,
     show_git: bool,
@@ -317,6 +328,7 @@ struct App {
     show_time: bool,
     show_output: bool,
     show_stats: bool,
+    /// CLI/TOML pins that block responsive width defaults for these columns.
     show_app_pinned: bool,
     show_detail_pinned: bool,
     show_stats_pinned: bool,
@@ -334,6 +346,7 @@ struct App {
     ipc_warning: Option<String>,
     mcp_warning: Option<String>,
     hydrated: bool,
+    /// True after at least one successful pane scan; protects selection on later failures.
     has_good_rows: bool,
     render_settings: RenderSettings,
     tmux_publisher: TmuxStatePublisher,
@@ -343,6 +356,7 @@ struct App {
     alert_baseline: HashMap<String, SessionStatus>,
 }
 
+/// One process-tree sample with memoized per-session usage rollups.
 struct CachedProcessTree {
     tree: ProcessTree,
     refreshed_at: Instant,
@@ -355,6 +369,7 @@ struct ProcessUsageKey {
     kind: AgentKind,
 }
 
+/// Time-bounded cache around `ps` so stats hydration does not run every radar tick.
 struct ProcessUsageCache {
     refresh_interval: Duration,
     cached_tree: Option<CachedProcessTree>,
@@ -391,6 +406,7 @@ impl ProcessUsageCache {
         Self { refresh_interval, cached_tree: None, collect_tree }
     }
 
+    /// Attach process usage to sessions when stats are visible, else clear it.
     fn hydrate(
         &mut self,
         sessions: &mut [SessionRecord],
@@ -701,6 +717,7 @@ impl App {
     }
 
     #[cfg(feature = "tui")]
+    /// Handle one key press; returns whether the TUI should redraw.
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         match self.handle_pane_jump_key(code, modifiers) {
             PaneJumpKeyResult::Consumed { redraw } => redraw,
@@ -821,6 +838,10 @@ impl App {
         self.update_selected_pane(Some(ordered[next].to_string()))
     }
 
+    /// One radar refresh: optional daemon snapshot, else direct tmux scan and classify.
+    ///
+    /// Side effects: updates sessions/model, rings bells on alert transitions, revises
+    /// published state, and optionally writes pane badges when `publish_tmux_state`.
     fn refresh(&mut self, force_git_refresh: bool) {
         let refreshed_at = Instant::now();
         let refreshed_at_wallclock = SystemTime::now();
@@ -977,6 +998,7 @@ impl App {
         }
     }
 
+    /// Store status/git inputs, rebuild the denormalized model, and publish IPC/MCP.
     fn sync_model(
         &mut self,
         status_line: String,
@@ -990,6 +1012,7 @@ impl App {
         self.publish_ipc(refreshed_at, refreshed_at_wallclock);
     }
 
+    /// Bump revision and fan the snapshot to the socket handle and optional MCP server.
     fn publish_ipc(&mut self, refreshed_at: Instant, refreshed_at_wallclock: SystemTime) {
         self.published_revision = self.published_revision.saturating_add(1);
         let state = PublishedState::from_sessions(StateBuildOptions {
@@ -1008,6 +1031,7 @@ impl App {
         }
     }
 
+    /// Group sessions into workspace rows and reapply selection/jump/expand state.
     fn rebuild_model(&mut self, refreshed_at: Instant, refreshed_at_wallclock: SystemTime) {
         let refresh_interval = self.model.refresh_interval;
         self.model = build_model_with_preferences(
@@ -1113,6 +1137,7 @@ impl App {
         self.hydrated = true;
     }
 
+    /// Jump tmux focus to the selected pane; may quit when `quit_on_activate`.
     fn activate_selected(&mut self) -> bool {
         let Some(session) = self.selected_session() else {
             return false;
@@ -1244,6 +1269,7 @@ impl App {
         true
     }
 
+    /// Collapse optional columns on narrow terminals unless the field is pinned.
     fn apply_responsive_view_defaults(&mut self, _available_width: usize) {
         let mut changed = false;
 
@@ -1327,6 +1353,7 @@ enum PaneJumpKeyResult {
     Consumed { redraw: bool },
 }
 
+/// Inputs that turn session records into a denormalized `AppModel` for one frame.
 struct BuildModelOptions<'a> {
     selected_pane_id: Option<&'a str>,
     expanded_pane_ids: &'a HashSet<String>,
@@ -1344,6 +1371,7 @@ struct BuildModelOptions<'a> {
     display_offset: UtcOffset,
 }
 
+/// Build the denormalized radar model, applying selection, jump matches, and column flags.
 fn build_model_with_preferences(
     sessions: &[SessionRecord],
     git_summaries: &[GitSummaryRow],
@@ -1489,6 +1517,7 @@ fn relabel_git_summaries(mut git_summaries: Vec<GitSummaryRow>) -> Vec<GitSummar
     git_summaries
 }
 
+/// Sort panes within a workspace: waiting first, then running, finished, other.
 fn compare_sessions_for_workspace(left: &SessionRecord, right: &SessionRecord) -> Ordering {
     session_sort_bucket(left.status)
         .cmp(&session_sort_bucket(right.status))
@@ -1630,6 +1659,7 @@ fn normalize_expanded_pane_ids(
     });
 }
 
+/// Disambiguate workspace path labels by growing shared path suffixes until unique.
 fn derive_path_labels<'a>(paths: impl IntoIterator<Item = &'a Path>) -> HashMap<PathBuf, String> {
     let mut unique_paths = Vec::new();
     let mut seen_paths = HashSet::new();
@@ -1730,6 +1760,7 @@ fn start_ipc_server(
     }
 }
 
+/// Popup/headless clients may consume a daemon snapshot; the daemon itself never does.
 fn should_probe_daemon(daemon_mode: bool, _has_local_ipc_server: bool) -> bool {
     !daemon_mode
 }
@@ -1758,6 +1789,7 @@ fn current_statuses(sessions: &[SessionRecord]) -> HashMap<String, SessionStatus
     sessions.iter().map(|session| (session.pane.pane_id.clone(), session.status)).collect()
 }
 
+/// Count status transitions that should ring the terminal bell this refresh.
 fn count_alert_transitions(
     previous_statuses: &HashMap<String, SessionStatus>,
     current_sessions: &[SessionRecord],
@@ -1772,6 +1804,7 @@ fn count_alert_transitions(
         .count()
 }
 
+/// Alertable transitions into waiting/finished (including reappear after retention).
 fn should_alert_transition(previous: SessionStatus, current: SessionStatus) -> bool {
     matches!(
         (previous, current),

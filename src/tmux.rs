@@ -35,6 +35,9 @@ const TPM_ORIGIN_SOCKET_INODE_ENV: &str = "ILMARI_TMUX_ORIGIN_SOCKET_INODE";
 static ORIGIN_SERVER_IDENTITY: OnceLock<Option<TmuxServerIdentity>> = OnceLock::new();
 
 /// Immutable identity of the tmux server generation that originated this process.
+///
+/// Device/inode pair (when available) distinguishes socket path reuse after a server
+/// restart so daemons refuse foreign generations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TmuxServerIdentity {
     pub socket_path: PathBuf,
@@ -44,17 +47,23 @@ pub struct TmuxServerIdentity {
 }
 
 /// Parsed tmux pane row from `list-panes -aF` with stable session, window, and pane ids.
+///
+/// Pane ids (`%N`) are the stable session keys used by the tracker and jump targets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub pane_id: String,
+    /// Foreground process group leader when tmux reports one; used for `ps` hydration.
     pub pane_pid: Option<u32>,
     pub session_id: String,
     pub session_name: String,
     pub window_id: String,
     pub window_name: String,
     pub pane_dead: bool,
+    /// Working directory used for workspace grouping and git root resolution.
     pub pane_current_path: PathBuf,
+    /// Command name shown by tmux; primary adapter detect signal.
     pub pane_current_command: String,
+    /// Pane title; secondary identity for wrapped launches and spinners.
     pub pane_title: String,
 }
 
@@ -344,6 +353,7 @@ pub fn capture_output_tails_with_process_kinds(
     )
 }
 
+/// Selective `capture-pane` pass gated by `AdapterRegistry::needs_output_tail`.
 fn capture_output_tails_with_process_kinds_using(
     panes: &[PaneSnapshot],
     tracker: &SessionTracker,

@@ -12,6 +12,7 @@ use super::super::{
     reuse_output_excerpt_arc, AgentAdapter,
 };
 
+/// Enabled Auggie adapter (`auggie`) for node-wrapped process trees.
 pub(in crate::agents) struct AuggieAdapter;
 
 impl AgentAdapter for AuggieAdapter {

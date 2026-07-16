@@ -11,6 +11,7 @@ use crate::tmux::PaneSnapshot;
 
 use super::super::{classify_supported_session, command_matches, AgentAdapter};
 
+/// Planned Goose CLI adapter scaffold; filtered out of `AdapterRegistry::v1`.
 pub(in crate::agents) struct GooseCliAdapter;
 
 impl AgentAdapter for GooseCliAdapter {

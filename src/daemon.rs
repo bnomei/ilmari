@@ -71,6 +71,7 @@ pub fn start(mut config: AppConfig) -> Result<()> {
     app::run_daemon(config)
 }
 
+/// Desired bind path and the incumbent path that may currently own the socket.
 fn daemon_start_paths(configured: &Path) -> (PathBuf, PathBuf) {
     daemon_start_paths_with(configured, ipc::resolve_daemon_socket_path)
 }
@@ -145,6 +146,10 @@ fn daemon_publication_tuple_from_values(
     })
 }
 
+/// Choose exact owner/socket/MCP values safe to clear after a stop request.
+///
+/// Prefers the live endpoint identity when it matches published tmux tokens so a
+/// foreign daemon is never cleared by accident.
 fn cleanup_tuple_for_stop(
     live_owner_pid: Option<u32>,
     live_socket_path: &Path,

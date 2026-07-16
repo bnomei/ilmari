@@ -22,6 +22,9 @@ enum Color {
 }
 
 /// Named styling intent resolved through the active 18-slot palette.
+///
+/// Roles keep the radar independent of raw ANSI indexes so palette CSV overrides
+/// retarget status, agent labels, and git accents without touching layout code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub enum SemanticRole {
@@ -30,6 +33,7 @@ pub enum SemanticRole {
     StatusFinished,
     StatusTerminated,
     StatusUnknown,
+    /// Agent name in the app column.
     AppLabel,
     AgentDetailNeutral,
     AgentDetailAmpDeep,
