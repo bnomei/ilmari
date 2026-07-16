@@ -306,11 +306,13 @@ set -ag status-right ' #{E:@ilmari_status_summary}'
 ```
 
 `@ilmari_window_badges` can render more than one badge when a window contains
-multiple agent panes. `@ilmari_status_summary` contains only nonzero counts, in
-waiting-input, unacknowledged-finished, then running priority. The underlying
-counts are also available as `@ilmari_waiting_count`, `@ilmari_finished_count`,
-and `@ilmari_running_count`. Pane-local `@ilmari_state` and `@ilmari_badge`
-options are available to advanced custom formats.
+multiple agent panes. It preserves the enclosing tmux style for each badge, so
+selected-window backgrounds remain continuous. `@ilmari_status_summary` uses
+the same default state glyphs with only nonzero counts, in waiting-input,
+unacknowledged-finished, then running priority. The underlying counts are also
+available as `@ilmari_waiting_count`, `@ilmari_finished_count`, and
+`@ilmari_running_count`. Pane-local `@ilmari_state` and `@ilmari_badge` options
+are available to advanced custom formats.
 
 Window badges include each agent's name only while the popup app column is
 enabled. Set `view.app = true`, or toggle `a` in the popup; remembered changes
@@ -404,15 +406,15 @@ enabled = true
 separator = " "
 
 [status.running]
-symbol = "R"
+symbol = "●"
 style = "fg=blue"
 
 [status.waiting_input]
-symbol = "I"
+symbol = "?"
 style = "fg=yellow"
 
 [status.finished]
-symbol = "F"
+symbol = "✓"
 style = "fg=green"
 ```
 

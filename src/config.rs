@@ -373,9 +373,9 @@ impl RendererConfig {
         Self {
             enabled: true,
             separator: " ".to_string(),
-            running: state_format("R", "fg=blue"),
-            waiting_input: state_format("I", "fg=yellow"),
-            finished: state_format("F", "fg=green"),
+            running: state_format("●", "fg=blue"),
+            waiting_input: state_format("?", "fg=yellow"),
+            finished: state_format("✓", "fg=green"),
         }
     }
 }
@@ -631,6 +631,12 @@ mod tests {
         assert!(loaded.values.view.remember);
         assert!(loaded.values.badges.enabled);
         assert!(loaded.values.status.enabled);
+        assert_eq!(loaded.values.status.running.symbol, loaded.values.badges.running.symbol);
+        assert_eq!(
+            loaded.values.status.waiting_input.symbol,
+            loaded.values.badges.waiting_input.symbol
+        );
+        assert_eq!(loaded.values.status.finished.symbol, loaded.values.badges.finished.symbol);
         assert_eq!(loaded.explicit_views(), ViewOverrides::default());
     }
 

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept selected-window backgrounds continuous across multiple tmux agent badges and aligned the default global summary glyphs with badge glyphs.
 - Made tmux window badges follow the effective popup app-column setting, rendering state symbols without agent names whenever that column is hidden.
 
 ## 0.8.0 - 2026-07-16

@@ -35,16 +35,12 @@ impl Default for RenderSettings {
             status_enabled: true,
             show_agent_names: false,
             badge_running: StateFormat { symbol: "●".to_string(), style: "fg=blue".to_string() },
-            badge_waiting: StateFormat {
-                symbol: "◆".to_string(), style: "fg=yellow".to_string()
-            },
+            badge_waiting: StateFormat { symbol: "?".to_string(), style: "fg=yellow".to_string() },
             badge_finished: StateFormat {
                 symbol: "✓".to_string(), style: "fg=green".to_string()
             },
             status_running: StateFormat { symbol: "●".to_string(), style: "fg=blue".to_string() },
-            status_waiting: StateFormat {
-                symbol: "◆".to_string(), style: "fg=yellow".to_string()
-            },
+            status_waiting: StateFormat { symbol: "?".to_string(), style: "fg=yellow".to_string() },
             status_finished: StateFormat {
                 symbol: "✓".to_string(), style: "fg=green".to_string()
             },
@@ -372,11 +368,14 @@ fn render_count(format: &StateFormat, count: usize) -> String {
 
 fn styled(style: &str, symbol: &str, suffix: &str) -> String {
     let style = style.trim();
-    let prefix = if style.is_empty() { String::new() } else { format!("#[{style}]") };
-    if suffix.is_empty() {
-        format!("{prefix}{symbol}#[default]")
+    let content = if suffix.is_empty() { symbol.to_string() } else { format!("{symbol} {suffix}") };
+    if style.is_empty() {
+        content
     } else {
-        format!("{prefix}{symbol} {suffix}#[default]")
+        // `default` normally resets to the status line's default style, which can
+        // drop an enclosing selected-window background before a later badge.
+        // Scope the reset to the style active at this insertion point instead.
+        format!("#[push-default]#[{style}]{content}#[default]#[pop-default]")
     }
 }
 
@@ -545,8 +544,24 @@ mod tests {
         assert!(rendered.window_fragment.contains("Codex"));
         assert!(rendered.window_fragment.contains("Claude Code"));
         assert!(
-            rendered.status_summary.find("◆").unwrap() < rendered.status_summary.find("●").unwrap()
+            rendered.status_summary.find("?").unwrap() < rendered.status_summary.find("●").unwrap()
         );
+        assert!(rendered
+            .window_fragment
+            .contains("#[push-default]#[fg=yellow]? Codex#[default]#[pop-default]"));
+        assert!(rendered
+            .window_fragment
+            .contains("#[push-default]#[fg=blue]● Claude Code#[default]#[pop-default]"));
+        assert_eq!(
+            rendered.status_summary,
+            "#[push-default]#[fg=yellow]? 1#[default]#[pop-default] #[push-default]#[fg=blue]● 1#[default]#[pop-default]"
+        );
+    }
+
+    #[test]
+    fn unstyled_fragments_preserve_the_enclosing_tmux_style() {
+        assert_eq!(super::styled("", "?", "Codex"), "? Codex");
+        assert_eq!(super::styled("", "?", ""), "?");
     }
 
     #[test]
@@ -564,7 +579,7 @@ mod tests {
         publisher.update_attention(&changed, &HashSet::new(), true);
 
         let hidden = publisher.render(&changed, &RenderSettings::default());
-        assert!(hidden.window_fragment.contains("◆"));
+        assert!(hidden.window_fragment.contains("?"));
         assert!(hidden.window_fragment.contains("●"));
         assert!(!hidden.window_fragment.contains("Codex"));
         assert!(!hidden.window_fragment.contains("Claude Code"));
