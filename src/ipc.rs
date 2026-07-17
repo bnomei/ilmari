@@ -45,7 +45,7 @@ pub const RESOURCE_MIME_TYPE: &str = "application/json";
 /// Canonical URI for the aggregated pane list resource.
 pub const LIST_RESOURCE_URI: &str = "ilmari://list";
 /// Schema version for daemon-to-popup `SnapshotResponse` payloads.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 #[cfg(test)]
 const DEFAULT_SOCKET_ENV: &str = "ILMARI_SOCKET";
@@ -142,6 +142,11 @@ pub struct SnapshotResponse {
 pub struct SnapshotItem {
     pub pane: PaneSnapshot,
     pub status: SessionStatus,
+    /// Sticky attention fact from the daemon's shared tmux-state latch.
+    /// Defaults only while decoding pre-v2 payloads, which the response schema
+    /// gate then rejects before the popup can present the value.
+    #[serde(default)]
+    pub attention: bool,
     pub agent_kind: AgentKind,
     pub agent_detail: Option<AgentDetail>,
     pub excerpt: Option<String>,
@@ -282,6 +287,7 @@ impl PublishedState {
             .map(|session| SnapshotItem {
                 pane: session.pane.clone(),
                 status: session.status,
+                attention: session.attention,
                 agent_kind: session.kind,
                 agent_detail: session.detail.as_deref().cloned(),
                 excerpt: session.output_excerpt.as_deref().map(ToOwned::to_owned),
@@ -1560,6 +1566,7 @@ impl SnapshotResponse {
                 pane: item.pane,
                 kind: item.agent_kind,
                 status: item.status,
+                attention: item.attention,
                 detail: item.agent_detail.map(Arc::new),
                 output_excerpt: item.excerpt.map(Arc::from),
                 process_usage: item.process.map(Arc::new),
@@ -1884,6 +1891,7 @@ mod tests {
         let now = Instant::now();
         let mut record = session("%12", SessionStatus::Running, now);
         record.kind = AgentKind::ClaudeCode;
+        record.attention = true;
         record.detail = Some(Arc::new(AgentDetail {
             label: "Sonnet 4.6 high".to_string(),
             tone: AgentDetailTone::Neutral,
@@ -1923,6 +1931,7 @@ mod tests {
         assert_eq!(snapshot.revision, 9);
         assert_eq!(snapshot.items[0].pane.pane_id, "%12");
         assert_eq!(snapshot.items[0].agent_kind, AgentKind::ClaudeCode);
+        assert!(snapshot.items[0].attention);
         assert_eq!(snapshot.items[0].process.as_ref().unwrap().subtasks[0].pid, 77);
         assert_eq!(snapshot.git_summaries[0].branch_name, "main");
         assert_eq!(snapshot.warnings, ["one warning"]);
@@ -1951,7 +1960,7 @@ mod tests {
             Err(SnapshotClientError::Stale)
         ));
         let mut incompatible = snapshot;
-        incompatible.schema_version += 1;
+        incompatible.schema_version = super::SNAPSHOT_SCHEMA_VERSION - 1;
         assert!(matches!(
             validate_snapshot_for_origin(incompatible, now_ms, Some(&identity), true),
             Err(SnapshotClientError::Incompatible(_))
@@ -2379,6 +2388,7 @@ mod tests {
             .expect("pane snapshot should parse"),
             kind: AgentKind::Codex,
             status,
+            attention: false,
             detail: None,
             output_excerpt: None,
             process_usage: None,

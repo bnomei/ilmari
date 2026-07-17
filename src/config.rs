@@ -94,6 +94,7 @@ pub struct McpConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewConfig {
     pub app: bool,
+    pub attention: bool,
     pub git: bool,
     pub detail: bool,
     pub time: bool,
@@ -103,10 +104,11 @@ pub struct ViewConfig {
 }
 
 impl ViewConfig {
-    /// Project the six rememberable view booleans without the `remember` policy flag.
+    /// Project the seven rememberable view booleans without the `remember` policy flag.
     pub fn values(&self) -> ViewState {
         ViewState {
             app: self.app,
+            attention: self.attention,
             git: self.git,
             detail: self.detail,
             time: self.time,
@@ -190,6 +192,7 @@ pub struct RendererConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewOverrides {
     pub app: Option<bool>,
+    pub attention: Option<bool>,
     pub git: Option<bool>,
     pub detail: Option<bool>,
     pub time: Option<bool>,
@@ -201,6 +204,7 @@ pub struct ViewOverrides {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewPins {
     pub app: bool,
+    pub attention: bool,
     pub git: bool,
     pub detail: bool,
     pub time: bool,
@@ -285,6 +289,12 @@ impl LoadedConfig {
             remembered.map(|state| state.app),
             defaults.app,
         );
+        let (attention, attention_pinned) = resolve_view(
+            cli.attention,
+            self.explicit_views.attention,
+            remembered.map(|state| state.attention),
+            defaults.attention,
+        );
         let (git, git_pinned) = resolve_view(
             cli.git,
             self.explicit_views.git,
@@ -317,9 +327,10 @@ impl LoadedConfig {
         );
 
         ResolvedViews {
-            values: ViewState { app, git, detail, time, output, stats },
+            values: ViewState { app, attention, git, detail, time, output, stats },
             pinned: ViewPins {
                 app: app_pinned,
+                attention: attention_pinned,
                 git: git_pinned,
                 detail: detail_pinned,
                 time: time_pinned,
@@ -328,6 +339,7 @@ impl LoadedConfig {
             },
             explicit: ViewPins {
                 app: cli.app.is_some() || self.explicit_views.app.is_some(),
+                attention: cli.attention.is_some() || self.explicit_views.attention.is_some(),
                 git: cli.git.is_some() || self.explicit_views.git.is_some(),
                 detail: cli.detail.is_some() || self.explicit_views.detail.is_some(),
                 time: cli.time.is_some() || self.explicit_views.time.is_some(),
@@ -425,6 +437,7 @@ impl Default for ViewConfig {
     fn default() -> Self {
         Self {
             app: false,
+            attention: true,
             git: true,
             detail: false,
             time: true,
@@ -596,6 +609,7 @@ struct RawMcpConfig {
 #[serde(default, deny_unknown_fields)]
 struct RawViewConfig {
     app: Option<bool>,
+    attention: Option<bool>,
     git: Option<bool>,
     detail: Option<bool>,
     time: Option<bool>,
@@ -608,6 +622,7 @@ impl RawViewConfig {
     fn overrides(&self) -> ViewOverrides {
         ViewOverrides {
             app: self.app,
+            attention: self.attention,
             git: self.git,
             detail: self.detail,
             time: self.time,
@@ -619,6 +634,7 @@ impl RawViewConfig {
     fn merge(self, defaults: ViewConfig) -> ViewConfig {
         ViewConfig {
             app: self.app.unwrap_or(defaults.app),
+            attention: self.attention.unwrap_or(defaults.attention),
             git: self.git.unwrap_or(defaults.git),
             detail: self.detail.unwrap_or(defaults.detail),
             time: self.time.unwrap_or(defaults.time),
@@ -794,6 +810,7 @@ mod tests {
         assert!(loaded.values.scanner.git);
         assert!(loaded.values.scanner.output_tail);
         assert!(loaded.values.view.remember);
+        assert!(loaded.values.view.attention);
         assert!(loaded.values.badges.enabled);
         assert!(loaded.values.status.enabled);
         assert_eq!(loaded.values.status.running.symbol, loaded.values.badges.running.symbol);
@@ -851,6 +868,7 @@ port = 0
 
 [view]
 app = true
+attention = false
 git = false
 detail = true
 time = false
@@ -890,6 +908,7 @@ style = "fg=cyan"
             config.view,
             ViewConfig {
                 app: true,
+                attention: false,
                 git: false,
                 detail: true,
                 time: false,
@@ -1007,10 +1026,12 @@ color = "palette:yellow"
 
     #[test]
     fn view_precedence_and_pinning_are_field_aware() {
-        let path = write_config("precedence", "[view]\napp = true\ntime = false\n");
+        let path =
+            write_config("precedence", "[view]\napp = true\nattention = false\ntime = false\n");
         let loaded = LoadedConfig::load_from_path(path).expect("valid config");
         let remembered = ViewState {
             app: false,
+            attention: true,
             git: false,
             detail: true,
             time: true,
@@ -1018,7 +1039,12 @@ color = "palette:yellow"
             stats: true,
         };
         let resolved = loaded.resolve_views(
-            ViewOverrides { app: Some(false), git: Some(true), ..ViewOverrides::default() },
+            ViewOverrides {
+                app: Some(false),
+                attention: Some(true),
+                git: Some(true),
+                ..ViewOverrides::default()
+            },
             Some(&remembered),
         );
 
@@ -1026,6 +1052,7 @@ color = "palette:yellow"
             resolved.values,
             ViewState {
                 app: false,
+                attention: true,
                 git: true,
                 detail: true,
                 time: false,
@@ -1035,12 +1062,21 @@ color = "palette:yellow"
         );
         assert_eq!(
             resolved.pinned,
-            ViewPins { app: true, git: true, detail: true, time: true, output: true, stats: true }
+            ViewPins {
+                app: true,
+                attention: true,
+                git: true,
+                detail: true,
+                time: true,
+                output: true,
+                stats: true
+            }
         );
         assert_eq!(
             resolved.explicit,
             ViewPins {
                 app: true,
+                attention: true,
                 git: true,
                 detail: false,
                 time: true,
@@ -1056,6 +1092,7 @@ color = "palette:yellow"
         let loaded = LoadedConfig::load_from_path(path).expect("valid config");
         let remembered = ViewState {
             app: false,
+            attention: true,
             git: false,
             detail: true,
             time: false,

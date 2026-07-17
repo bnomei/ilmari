@@ -170,15 +170,14 @@ pub struct TmuxStatePublisher {
 }
 
 impl TmuxStatePublisher {
-    /// Diff live sessions against prior attention state and rewrite tmux options as needed.
+    /// Advance the shared sticky-attention latch from one direct pane scan.
     ///
-    /// Side effects: pane-local badge options and the global status summary, gated by
-    /// `RenderSettings` enable flags. Stale badges for dead panes are cleared.
-    pub fn publish(
+    /// Popup snapshots and tmux badges both project this exact latch; lifecycle
+    /// states alone are never treated as attention.
+    pub fn refresh_attention(
         &mut self,
         sessions: &[SessionRecord],
         live_panes: &[tmux::PaneSnapshot],
-        settings: &RenderSettings,
     ) {
         let live_pane_ids =
             live_panes.iter().map(|pane| pane.pane_id.clone()).collect::<HashSet<_>>();
@@ -204,6 +203,24 @@ impl TmuxStatePublisher {
             Ok(focused) => self.update_attention(&live_sessions, &focused, true),
             Err(_) => self.update_attention(&live_sessions, &HashSet::new(), false),
         }
+    }
+
+    /// Copy the authoritative latch into runtime records for popup/IPC presentation.
+    pub fn project_attention(&self, sessions: &mut [SessionRecord]) {
+        for session in sessions {
+            let attention = self.panes.get(&session.pane.pane_id).copied().unwrap_or_default();
+            session.attention = attention.waiting || attention.finished;
+        }
+    }
+
+    /// Render and publish tmux options from the latch advanced by [`Self::refresh_attention`].
+    pub fn publish_rendered_state(
+        &mut self,
+        live_panes: &[tmux::PaneSnapshot],
+        settings: &RenderSettings,
+    ) {
+        let live_pane_ids =
+            live_panes.iter().map(|pane| pane.pane_id.clone()).collect::<HashSet<_>>();
         let render_sessions = self.sessions_for_render();
         let rendered = self.render(&render_sessions, settings);
         self.publish_rendered(&rendered, &live_pane_ids, settings);
@@ -213,9 +230,9 @@ impl TmuxStatePublisher {
     ///
     /// Also reapplies live `@ilmari_*_enabled` overrides so status-line toggles take effect
     /// without waiting for the next pane scan.
-    pub fn acknowledge_focus(&mut self, settings: &RenderSettings) {
+    pub fn acknowledge_focus(&mut self, settings: &RenderSettings) -> bool {
         let Ok(state) = tmux::focus_and_renderer_overrides() else {
-            return;
+            return false;
         };
         let changed = self.resolve_known_focus(&state.focused_pane_ids);
         let badges_enabled = option_override_value(state.badges_enabled.as_deref())
@@ -225,12 +242,13 @@ impl TmuxStatePublisher {
         let rendering_changed = self.badges_enabled != Some(badges_enabled)
             || self.status_enabled != Some(status_enabled);
         if !changed && !rendering_changed {
-            return;
+            return false;
         }
         let sessions = self.sessions_for_render();
         let rendered = self.render(&sessions, settings);
         let live_pane_ids = self.previously_published.clone();
         self.publish_rendered(&rendered, &live_pane_ids, settings);
+        changed
     }
 
     fn sessions_for_render(&self) -> Vec<SessionRecord> {
@@ -585,6 +603,21 @@ mod tests {
                 .attention,
             0
         );
+    }
+
+    #[test]
+    fn shared_projection_never_infers_attention_from_waiting_or_finished_status() {
+        let mut publisher = TmuxStatePublisher::default();
+        let mut waiting = session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput);
+        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        publisher.project_attention(std::slice::from_mut(&mut waiting));
+        assert!(!waiting.attention, "initial waiting state is not an attention transition");
+
+        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        publisher.project_attention(std::slice::from_mut(&mut waiting));
+        assert!(waiting.attention, "an unfocused transition projects the shared latch");
     }
 
     #[test]
@@ -943,6 +976,7 @@ mod tests {
             .unwrap(),
             kind,
             status,
+            attention: false,
             detail: None,
             output_excerpt: None,
             process_usage: None,

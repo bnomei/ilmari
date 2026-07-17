@@ -733,6 +733,7 @@ mod tests {
             .expect("pane snapshot should parse"),
             kind,
             status: SessionStatus::Running,
+            attention: false,
             detail: None,
             output_excerpt: None,
             process_usage: None,

@@ -234,7 +234,12 @@ fn run_headless(mut config: AppConfig, daemon_mode: bool) -> Result<()> {
             app.refresh(false);
         }
         if daemon_mode && last_focus_probe.elapsed() >= Duration::from_millis(100) {
-            app.tmux_publisher.acknowledge_focus(&app.render_settings);
+            if app.tmux_publisher.acknowledge_focus(&app.render_settings) {
+                app.tmux_publisher.project_attention(&mut app.sessions);
+                let now = Instant::now();
+                app.rebuild_model(now, SystemTime::now());
+                app.publish_ipc(now, SystemTime::now());
+            }
             last_focus_probe = Instant::now();
         }
         if daemon_mode && last_tmux_probe.elapsed() >= Duration::from_secs(1) {
@@ -335,6 +340,7 @@ struct App {
     /// Accumulated digits for numeric pane-jump filtering.
     pane_jump_digits: Option<String>,
     show_app: bool,
+    show_attention: bool,
     show_git: bool,
     git_scanner_enabled: bool,
     show_detail: bool,
@@ -343,6 +349,7 @@ struct App {
     show_stats: bool,
     /// CLI/TOML pins that block responsive width defaults for these columns.
     show_app_pinned: bool,
+    show_attention_pinned: bool,
     /// CLI/TOML sources that take precedence over later remembered app-column changes.
     show_app_explicit: bool,
     show_detail_pinned: bool,
@@ -552,6 +559,7 @@ impl App {
             config.daemon_mode,
         );
         app.show_app = views.values.app;
+        app.show_attention = views.values.attention;
         app.show_git = config.show_git && views.values.git;
         app.git_scanner_enabled = config.git_scanner_enabled;
         app.show_detail = views.values.detail;
@@ -559,6 +567,7 @@ impl App {
         app.show_output = views.values.output;
         app.show_stats = views.values.stats;
         app.show_app_pinned = views.pinned.app;
+        app.show_attention_pinned = views.pinned.attention;
         app.show_app_explicit = views.explicit.app;
         app.show_detail_pinned = views.pinned.detail;
         app.show_stats_pinned = views.pinned.stats;
@@ -684,6 +693,7 @@ impl App {
             expanded_pane_ids: HashSet::new(),
             pane_jump_digits: None,
             show_app: false,
+            show_attention: true,
             show_git,
             git_scanner_enabled: true,
             show_detail: false,
@@ -691,6 +701,7 @@ impl App {
             show_output: true,
             show_stats: false,
             show_app_pinned: false,
+            show_attention_pinned: false,
             show_app_explicit: false,
             show_detail_pinned: false,
             show_stats_pinned: false,
@@ -776,6 +787,11 @@ impl App {
                         if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                     {
                         self.toggle_show_detail()
+                    }
+                    (KeyCode::Char('n'), mods)
+                        if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        self.toggle_show_attention()
                     }
                     (KeyCode::Char('t'), mods)
                         if !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -971,6 +987,8 @@ impl App {
                 ) {
                     runtime_warnings.push(format!("ps: {error}"));
                 }
+                self.tmux_publisher.refresh_attention(&self.sessions, &panes);
+                self.tmux_publisher.project_attention(&mut self.sessions);
                 let runtime_warning = if runtime_warnings.is_empty() {
                     None
                 } else {
@@ -996,7 +1014,7 @@ impl App {
                 self.sync_model(status_line, git_summaries, refreshed_at, refreshed_at_wallclock);
                 if self.publish_tmux_state {
                     self.sync_badge_agent_names_from_view_state();
-                    self.tmux_publisher.publish(&self.sessions, &panes, &self.render_settings);
+                    self.tmux_publisher.publish_rendered_state(&panes, &self.render_settings);
                 }
                 self.has_good_rows = true;
             }
@@ -1063,6 +1081,7 @@ impl App {
                 pane_jump_digits: self.pane_jump_digits.as_deref(),
                 status_line: self.status_line.as_str(),
                 show_app: self.show_app,
+                show_attention: self.show_attention,
                 show_git: self.show_git,
                 show_detail: self.show_detail,
                 show_time: self.show_time,
@@ -1094,6 +1113,7 @@ impl App {
 
     fn refresh_view_preferences(&mut self) {
         self.model.show_app = self.show_app;
+        self.model.show_attention = self.show_attention;
         self.model.show_git = self.show_git;
         self.model.show_detail = self.show_detail;
         self.model.show_time = self.show_time;
@@ -1104,6 +1124,7 @@ impl App {
     fn current_view_state(&self) -> ViewState {
         ViewState {
             app: self.show_app,
+            attention: self.show_attention,
             git: self.show_git,
             detail: self.show_detail,
             time: self.show_time,
@@ -1131,12 +1152,14 @@ impl App {
         }
         let reset = self.reset_views.clone();
         self.show_app = reset.values.app;
+        self.show_attention = reset.values.attention;
         self.show_git = self.git_scanner_enabled && reset.values.git;
         self.show_detail = reset.values.detail;
         self.show_time = reset.values.time;
         self.show_output = reset.values.output;
         self.show_stats = reset.values.stats;
         self.show_app_pinned = reset.pinned.app;
+        self.show_attention_pinned = reset.pinned.attention;
         self.show_app_explicit = reset.explicit.app;
         self.show_detail_pinned = reset.pinned.detail;
         self.show_stats_pinned = reset.pinned.stats;
@@ -1221,6 +1244,14 @@ impl App {
         self.show_app = !self.show_app;
         self.show_app_pinned = true;
         self.render_settings.show_agent_names = self.show_app;
+        self.refresh_view_preferences();
+        self.persist_views();
+        true
+    }
+
+    fn toggle_show_attention(&mut self) -> bool {
+        self.show_attention = !self.show_attention;
+        self.show_attention_pinned = true;
         self.refresh_view_preferences();
         self.persist_views();
         true
@@ -1400,6 +1431,7 @@ struct BuildModelOptions<'a> {
     pane_jump_digits: Option<&'a str>,
     status_line: &'a str,
     show_app: bool,
+    show_attention: bool,
     show_git: bool,
     show_detail: bool,
     show_time: bool,
@@ -1466,6 +1498,7 @@ fn build_model_with_preferences(
                     process_usage: session.process_usage.clone(),
                     subtasks_expanded: options.expanded_pane_ids.contains(&session.pane.pane_id),
                     status: session.status,
+                    attention: session.attention,
                     status_label: session.status.as_str(),
                     is_jump_match: options
                         .pane_jump_digits
@@ -1485,6 +1518,7 @@ fn build_model_with_preferences(
         title: "Agents".to_string(),
         status_line: options.status_line.to_string(),
         show_app: options.show_app,
+        show_attention: options.show_attention,
         show_git: options.show_git,
         show_detail: options.show_detail,
         show_time: options.show_time,
@@ -1520,6 +1554,7 @@ fn build_model(
             pane_jump_digits,
             status_line: status_line.as_str(),
             show_app: false,
+            show_attention: true,
             show_git: true,
             show_detail: false,
             show_time: true,
@@ -2129,6 +2164,7 @@ mod tests {
                 .expect("pane snapshot should parse"),
                 kind: crate::model::AgentKind::Codex,
                 status: SessionStatus::Running,
+                attention: false,
                 detail: Some(
                     AgentDetail {
                         label: "gpt-5.4 xhigh fast".to_string(),
@@ -2162,6 +2198,7 @@ mod tests {
                 .expect("pane snapshot should parse"),
                 kind: crate::model::AgentKind::Amp,
                 status: SessionStatus::WaitingInput,
+                attention: false,
                 detail: Some(
                     AgentDetail { label: "smart".to_string(), tone: AgentDetailTone::AmpSmart }
                         .into(),
@@ -2335,6 +2372,7 @@ mod tests {
             .expect("pane snapshot should parse"),
             kind: crate::model::AgentKind::Codex,
             status: SessionStatus::Running,
+            attention: false,
             detail: None,
             output_excerpt: None,
             process_usage: Some(
@@ -2850,6 +2888,28 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn direct_scan_projects_the_shared_latch_without_treating_lifecycle_as_attention() {
+        let mut app = App::default();
+        app.show_git = false;
+        app.output_tail_capture_enabled = false;
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+
+        app.refresh(false);
+
+        assert!(
+            app.sessions.iter().all(|session| !session.attention),
+            "a direct scan must not infer attention from a lifecycle status"
+        );
+        assert!(app
+            .model
+            .workspace_groups
+            .iter()
+            .flat_map(|group| &group.rows)
+            .all(|row| !row.attention));
+    }
+
+    #[test]
     fn output_visibility_toggles_with_o_and_defaults_to_enabled() {
         let mut app = App::default();
 
@@ -2863,12 +2923,25 @@ mod tests {
     }
 
     #[test]
+    fn attention_visibility_defaults_visible_and_manual_toggle_pins_at_any_width() {
+        let mut app = App::default();
+        assert!(app.model.show_attention);
+
+        app.handle_key_event(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert!(!app.model.show_attention);
+        app.handle_key_event(KeyCode::Char('n'), KeyModifiers::NONE);
+        app.apply_responsive_view_defaults(1);
+        assert!(app.model.show_attention);
+    }
+
+    #[test]
     fn responsive_defaults_keep_extra_columns_hidden_when_width_is_wide() {
         let mut app = App::default();
 
         app.apply_responsive_view_defaults(81);
 
         assert!(!app.model.show_app);
+        assert!(app.model.show_attention);
         assert!(!app.model.show_detail);
         assert!(app.model.show_time);
         assert!(app.model.show_output);
@@ -2883,6 +2956,7 @@ mod tests {
         app.apply_responsive_view_defaults(80);
 
         assert!(!app.model.show_app);
+        assert!(app.model.show_attention);
         assert!(!app.model.show_detail);
         assert!(app.model.show_time);
         assert!(app.model.show_output);
@@ -2935,6 +3009,9 @@ mod tests {
         app.handle_key_event(KeyCode::Char('a'), KeyModifiers::NONE);
         assert_eq!(app.view_state_store.load().state.map(|state| state.app), Some(true));
 
+        app.handle_key_event(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(app.view_state_store.load().state.map(|state| state.attention), Some(false));
+
         app.handle_key_event(KeyCode::Char('R'), KeyModifiers::NONE);
         assert!(!path.exists());
         assert!(!app.model.show_app);
@@ -2960,6 +3037,7 @@ mod tests {
         app.view_state_store
             .save(crate::view_state::ViewState {
                 app: true,
+                attention: true,
                 git: true,
                 detail: false,
                 time: true,
@@ -3176,6 +3254,7 @@ mod tests {
             .expect("pane snapshot should parse"),
             kind: crate::model::AgentKind::Codex,
             status,
+            attention: false,
             detail: None,
             output_excerpt: None,
             process_usage: None,

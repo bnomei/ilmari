@@ -118,11 +118,12 @@ fn workspace_lines(
 
         lines.extend(workspace_header_lines(group, palette, model.show_git, available_width));
         for row in &group.rows {
-            lines.push(workspace_row_line(
+            lines.push(workspace_row_line_with_attention(
                 row,
                 palette,
                 states,
                 model.show_app,
+                model.show_attention,
                 model.show_detail,
                 model.show_time,
                 model.show_output,
@@ -133,6 +134,7 @@ fn workspace_lines(
                     row,
                     palette,
                     model.show_app,
+                    model.show_attention,
                     model.show_detail,
                     model.show_time,
                     model.show_output,
@@ -265,13 +267,14 @@ fn push_raw_spaces(spans: &mut Vec<Span<'static>>, current_width: &mut usize, co
     spans.push(Span::raw(" ".repeat(count)));
 }
 
-/// One pane row: optional time, status glyph, pane id, agent, detail, stats, excerpt.
+/// One pane row: optional time, attention, status glyph, pane id, agent, detail, stats, excerpt.
 #[allow(clippy::too_many_arguments)]
-fn workspace_row_line(
+fn workspace_row_line_with_attention(
     row: &PaneRow,
     palette: &Palette,
     states: &StatePresentations,
     show_app: bool,
+    show_attention: bool,
     show_detail: bool,
     show_time: bool,
     show_output: bool,
@@ -293,6 +296,15 @@ fn workspace_row_line(
             &mut current_width,
             time_label,
             palette.style_for(SemanticRole::MutedText),
+        );
+        push_raw_spaces(&mut spans, &mut current_width, 1);
+    }
+    if show_attention {
+        push_inline_span(
+            &mut spans,
+            &mut current_width,
+            if row.attention { states.attention.icon.clone() } else { " ".to_string() },
+            palette.style_for_color(&states.attention.color),
         );
         push_raw_spaces(&mut spans, &mut current_width, 1);
     }
@@ -380,6 +392,31 @@ fn workspace_row_line(
     Line::from(spans)
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn workspace_row_line(
+    row: &PaneRow,
+    palette: &Palette,
+    states: &StatePresentations,
+    show_app: bool,
+    show_detail: bool,
+    show_time: bool,
+    show_output: bool,
+    show_stats: bool,
+) -> Line<'static> {
+    workspace_row_line_with_attention(
+        row,
+        palette,
+        states,
+        show_app,
+        false,
+        show_detail,
+        show_time,
+        show_output,
+        show_stats,
+    )
+}
+
 fn pane_label_style(row: &PaneRow, palette: &Palette) -> Style {
     let style = palette.style_for(SemanticRole::HeadingAccent);
     if row.is_jump_match {
@@ -389,10 +426,12 @@ fn pane_label_style(row: &PaneRow, palette: &Palette) -> Style {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn subtask_lines(
     row: &PaneRow,
     palette: &Palette,
     show_app: bool,
+    show_attention: bool,
     show_detail: bool,
     show_time: bool,
     show_output: bool,
@@ -414,7 +453,11 @@ fn subtask_lines(
             );
             let mut spans = Vec::new();
             let mut current_width = 0;
-            push_raw_spaces(&mut spans, &mut current_width, prefix_cluster_width(show_time));
+            push_raw_spaces(
+                &mut spans,
+                &mut current_width,
+                prefix_cluster_width(show_time, show_attention),
+            );
             if show_app {
                 push_cell(
                     &mut spans,
@@ -462,9 +505,10 @@ fn subtask_lines(
         .collect()
 }
 
-fn prefix_cluster_width(show_time: bool) -> usize {
+fn prefix_cluster_width(show_time: bool, show_attention: bool) -> usize {
     let time_width = if show_time { TIME_COL_WIDTH + 1 } else { 0 };
-    time_width + STATUS_COL_WIDTH + 1 + PANE_INLINE_WIDTH
+    let attention_width = if show_attention { STATUS_COL_WIDTH + 1 } else { 0 };
+    time_width + attention_width + STATUS_COL_WIDTH + 1 + PANE_INLINE_WIDTH
 }
 
 fn selected_row_style() -> Style {
@@ -519,6 +563,7 @@ fn footer_line(key_style: Style, sep_style: Style) -> Line<'static> {
     push_item(&mut spans, "Bell", "b");
     push_item(&mut spans, "Git", "g");
     push_item(&mut spans, "Model", "m");
+    push_item(&mut spans, "Attention", "n");
     push_item(&mut spans, "Time", "t");
     push_item(&mut spans, "Output", "o");
     push_item(&mut spans, "Stats", "s");
@@ -542,7 +587,7 @@ fn compact_footer_line(key_style: Style, sep_style: Style) -> Line<'static> {
         spans.push(Span::styled(key, key_style));
     };
 
-    for key in ["j", "k", "%", "a", "b", "g", "m", "t", "o", "s", "R", "=", "q"] {
+    for key in ["j", "k", "%", "a", "b", "g", "m", "n", "t", "o", "s", "R", "=", "q"] {
         push_key(&mut spans, key);
     }
 
@@ -615,7 +660,8 @@ fn format_memory_kib(memory_kib: u64) -> String {
 mod tests {
     use super::{
         compact_footer_line, footer_line, format_usage_chip, workspace_header_line,
-        workspace_header_lines, workspace_row_line, FOOTER_BRAND, FOOTER_COMPACT_BREAKPOINT,
+        workspace_header_lines, workspace_row_line, workspace_row_line_with_attention,
+        FOOTER_BRAND, FOOTER_COMPACT_BREAKPOINT,
     };
     use crate::colors::{ColorSpec, Palette, SemanticRole};
     use crate::config::{LoadedConfig, StatePresentation, StatePresentations};
@@ -662,6 +708,7 @@ mod tests {
             ),
             subtasks_expanded: false,
             status: SessionStatus::WaitingInput,
+            attention: false,
             status_label: "waiting-input",
             is_jump_match: false,
             is_selected: false,
@@ -737,6 +784,70 @@ mod tests {
     }
 
     #[test]
+    fn attention_cell_uses_the_shared_icon_and_color_before_the_lifecycle_cell() {
+        let row = PaneRow {
+            pane_id: "%7".to_string(),
+            inactive_since_label: String::new(),
+            output_excerpt: None,
+            client_label: "Codex",
+            detail: None,
+            process_usage: None,
+            subtasks_expanded: false,
+            status: SessionStatus::WaitingInput,
+            attention: true,
+            status_label: "waiting-input",
+            is_jump_match: false,
+            is_selected: false,
+        };
+        let states = StatePresentations {
+            attention: StatePresentation {
+                icon: "!".to_string(),
+                color: ColorSpec::parse("palette:yellow").expect("valid color"),
+            },
+            ..StatePresentations::default()
+        };
+
+        let line = workspace_row_line_with_attention(
+            &row,
+            &Palette::default(),
+            &states,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+        );
+        let attention = line
+            .spans
+            .iter()
+            .position(|span| span.content.as_ref() == "!")
+            .expect("attention cell");
+        let lifecycle = line
+            .spans
+            .iter()
+            .position(|span| span.content.as_ref() == "●")
+            .expect("lifecycle cell");
+        assert!(attention < lifecycle);
+        assert_eq!(line.spans[attention].style.fg, Some(Color::Indexed(3)));
+
+        let normal = PaneRow { attention: false, ..row };
+        let line = workspace_row_line_with_attention(
+            &normal,
+            &Palette::default(),
+            &states,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(line.spans.iter().any(|span| span.content.as_ref() == " "));
+        assert!(!line.spans.iter().any(|span| span.content.as_ref() == "!"));
+    }
+
+    #[test]
     fn shared_state_presentation_controls_popup_icon_and_color() {
         let row = PaneRow {
             pane_id: "%7".to_string(),
@@ -747,6 +858,7 @@ mod tests {
             process_usage: None,
             subtasks_expanded: false,
             status: SessionStatus::Running,
+            attention: false,
             status_label: "running",
             is_jump_match: false,
             is_selected: true,
@@ -811,6 +923,7 @@ color = "palette:yellow"
             process_usage: None,
             subtasks_expanded: false,
             status: SessionStatus::Running,
+            attention: false,
             status_label: "running",
             is_jump_match: false,
             is_selected: false,
@@ -877,6 +990,7 @@ color = "palette:yellow"
             ),
             subtasks_expanded: false,
             status: SessionStatus::WaitingInput,
+            attention: false,
             status_label: "waiting-input",
             is_jump_match: true,
             is_selected: true,
@@ -912,6 +1026,7 @@ color = "palette:yellow"
             process_usage: None,
             subtasks_expanded: false,
             status: SessionStatus::WaitingInput,
+            attention: false,
             status_label: "waiting-input",
             is_jump_match: false,
             is_selected: false,
@@ -961,6 +1076,7 @@ color = "palette:yellow"
             process_usage: None,
             subtasks_expanded: false,
             status: SessionStatus::Running,
+            attention: false,
             status_label: "running",
             is_jump_match: false,
             is_selected: false,
@@ -997,6 +1113,7 @@ color = "palette:yellow"
             process_usage: None,
             subtasks_expanded: false,
             status: SessionStatus::Running,
+            attention: false,
             status_label: "running",
             is_jump_match: false,
             is_selected: false,
@@ -1039,6 +1156,7 @@ color = "palette:yellow"
             ),
             subtasks_expanded: false,
             status: SessionStatus::Running,
+            attention: false,
             status_label: "running",
             is_jump_match: false,
             is_selected: false,
@@ -1088,6 +1206,7 @@ color = "palette:yellow"
             process_usage: None,
             subtasks_expanded: false,
             status: SessionStatus::WaitingInput,
+            attention: false,
             status_label: "waiting-input",
             is_jump_match: true,
             is_selected: false,
@@ -1214,7 +1333,7 @@ color = "palette:yellow"
 
         assert_eq!(
             text,
-            "Move:j/k | Pane:% | App:a | Bell:b | Git:g | Model:m | Time:t | Output:o | Stats:s | Reset:R | Subs:= | Jump:Enter | Quit:q/Esc"
+            "Move:j/k | Pane:% | App:a | Bell:b | Git:g | Model:m | Attention:n | Time:t | Output:o | Stats:s | Reset:R | Subs:= | Jump:Enter | Quit:q/Esc"
         );
         assert_eq!(line.spans[0].style.fg, Some(Color::Indexed(8)));
         assert_eq!(line.spans[2].style.fg, Some(Color::Indexed(12)));
@@ -1229,7 +1348,7 @@ color = "palette:yellow"
         let line = compact_footer_line(key_style, sep_style);
         let text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
 
-        assert_eq!(text, "j k % a b g m t o s R = q");
+        assert_eq!(text, "j k % a b g m n t o s R = q");
         assert_eq!(line.spans[0].style.fg, Some(Color::Indexed(12)));
     }
 
@@ -1241,6 +1360,7 @@ color = "palette:yellow"
                 title: "ilmari".to_string(),
                 status_line: String::new(),
                 show_app: false,
+                show_attention: false,
                 show_git: true,
                 show_detail: true,
                 show_time: true,
@@ -1290,6 +1410,7 @@ color = "palette:yellow"
                         ),
                         subtasks_expanded: true,
                         status: SessionStatus::Running,
+                        attention: false,
                         status_label: "running",
                         is_jump_match: false,
                         is_selected: true,
@@ -1321,6 +1442,7 @@ color = "palette:yellow"
                 title: "ilmari".to_string(),
                 status_line: String::new(),
                 show_app: false,
+                show_attention: false,
                 show_git: true,
                 show_detail: false,
                 show_time: true,
@@ -1359,6 +1481,7 @@ color = "palette:yellow"
                         ),
                         subtasks_expanded: true,
                         status: SessionStatus::Running,
+                        attention: false,
                         status_label: "running",
                         is_jump_match: false,
                         is_selected: false,
@@ -1386,6 +1509,7 @@ color = "palette:yellow"
             title: "ilmari".to_string(),
             status_line: String::new(),
             show_app: false,
+            show_attention: false,
             show_git: true,
             show_detail: true,
             show_time: true,
@@ -1410,6 +1534,7 @@ color = "palette:yellow"
                         process_usage: None,
                         subtasks_expanded: false,
                         status: SessionStatus::Running,
+                        attention: false,
                         status_label: "running",
                         is_jump_match: false,
                         is_selected: true,
@@ -1423,6 +1548,7 @@ color = "palette:yellow"
                         process_usage: None,
                         subtasks_expanded: false,
                         status: SessionStatus::Running,
+                        attention: false,
                         status_label: "running",
                         is_jump_match: false,
                         is_selected: false,
@@ -1436,6 +1562,7 @@ color = "palette:yellow"
                         process_usage: None,
                         subtasks_expanded: false,
                         status: SessionStatus::Running,
+                        attention: false,
                         status_label: "running",
                         is_jump_match: false,
                         is_selected: false,
@@ -1449,6 +1576,7 @@ color = "palette:yellow"
                         process_usage: None,
                         subtasks_expanded: false,
                         status: SessionStatus::Running,
+                        attention: false,
                         status_label: "running",
                         is_jump_match: false,
                         is_selected: false,
@@ -1476,7 +1604,7 @@ color = "palette:yellow"
             .map(|x| buffer.cell((x, 5)).expect("main cell").symbol())
             .collect::<String>();
 
-        assert!(footer_row.starts_with("j k % a b g m t o s R = q"));
+        assert!(footer_row.starts_with("j k % a b g m n t o s R = q"));
         assert!(footer_row.trim_end().ends_with("🅸 🅻 🅼 🅰 🆁 🅸"));
         assert!(last_main_row.contains("%10"));
         assert_eq!(buffer.cell((0, 6)).expect("row above footer").symbol(), " ");
@@ -1488,6 +1616,7 @@ color = "palette:yellow"
             title: "ilmari".to_string(),
             status_line: String::new(),
             show_app: false,
+            show_attention: false,
             show_git: true,
             show_detail: false,
             show_time: true,
@@ -1511,6 +1640,7 @@ color = "palette:yellow"
                     process_usage: None,
                     subtasks_expanded: false,
                     status: SessionStatus::Running,
+                    attention: false,
                     status_label: "running",
                     is_jump_match: false,
                     is_selected: true,
@@ -1565,6 +1695,7 @@ color = "palette:yellow"
             ),
             subtasks_expanded: false,
             status: SessionStatus::Running,
+            attention: false,
             status_label: "running",
             is_jump_match: false,
             is_selected: false,

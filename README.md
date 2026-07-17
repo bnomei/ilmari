@@ -231,6 +231,7 @@ target/release/ilmari --help
 | `q`, `Esc`, `Ctrl-C` | Quit. |
 | `a` | Toggle the agent/app column. |
 | `m` | Toggle the model/detail column. |
+| `n` | Toggle the sticky attention column. |
 | `t` | Toggle inactive time. |
 | `o` | Toggle recent output excerpts. |
 | `g` | Toggle git summaries. |
@@ -249,6 +250,7 @@ follow. The most recent waiting pane is selected automatically when possible.
 | --- | --- |
 | Workspace | Derived from each pane's current path. |
 | Status | `running`, `waiting-input`, `finished`, `terminated`, or `unknown`. |
+| Attention | The shared attention icon (default `?`) only for an unacknowledged sticky attention latch; blank otherwise. |
 | Pane id | Stable tmux pane id such as `%12`. |
 | Agent | Detected agent kind, such as `Codex` or `Claude Code`. |
 | Detail | Agent-specific model or mode label when the adapter can extract one. |
@@ -383,6 +385,7 @@ port = 62778
 
 [view]
 app = false
+attention = true
 git = true
 detail = false
 time = true
@@ -486,8 +489,8 @@ supplies fallbacks.
 
 ### Remembered views
 
-With `view.remember = true` (the default), toggling app, git, detail, time,
-output, or stats writes only those six booleans to a versioned JSON file at
+With `view.remember = true` (the default), toggling app, attention, git, detail,
+time, output, or stats writes only those seven booleans to a versioned JSON file at
 `$XDG_STATE_HOME/ilmari/view.json`, falling back to
 `~/.local/state/ilmari/view.json`. The replacement is atomic and private on
 Unix. Pane output text, bell state, selection, subprocess expansion, and agent

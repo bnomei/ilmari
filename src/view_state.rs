@@ -1,6 +1,6 @@
 //! Durable, versioned popup view preferences.
 //!
-//! Only the six view booleans are persisted. Reads are deliberately non-destructive:
+//! Only the seven view booleans are persisted. Reads are deliberately non-destructive:
 //! malformed or incompatible documents return a warning and remain on disk.
 
 use std::collections::BTreeMap;
@@ -20,6 +20,7 @@ static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewState {
     pub app: bool,
+    pub attention: bool,
     pub git: bool,
     pub detail: bool,
     pub time: bool,
@@ -242,6 +243,8 @@ pub enum ViewStateError {
 struct ViewStateDocument {
     version: u32,
     app: bool,
+    #[serde(default = "default_attention_visible")]
+    attention: bool,
     git: bool,
     detail: bool,
     time: bool,
@@ -254,6 +257,7 @@ impl From<ViewState> for ViewStateDocument {
         Self {
             version: VIEW_STATE_VERSION,
             app: state.app,
+            attention: state.attention,
             git: state.git,
             detail: state.detail,
             time: state.time,
@@ -267,6 +271,7 @@ impl From<ViewStateDocument> for ViewState {
     fn from(document: ViewStateDocument) -> Self {
         Self {
             app: document.app,
+            attention: document.attention,
             git: document.git,
             detail: document.detail,
             time: document.time,
@@ -274,6 +279,10 @@ impl From<ViewStateDocument> for ViewState {
             stats: document.stats,
         }
     }
+}
+
+const fn default_attention_visible() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -293,7 +302,15 @@ mod tests {
     }
 
     fn state() -> ViewState {
-        ViewState { app: true, git: false, detail: true, time: false, output: true, stats: false }
+        ViewState {
+            app: true,
+            attention: true,
+            git: false,
+            detail: true,
+            time: false,
+            output: true,
+            stats: false,
+        }
     }
 
     #[test]
@@ -318,7 +335,7 @@ mod tests {
         assert_eq!(store.load().state, Some(state()));
         let source = fs::read_to_string(store.path().expect("store path")).expect("state source");
         let json: serde_json::Value = serde_json::from_str(&source).expect("valid JSON");
-        assert_eq!(json.as_object().expect("object").len(), 7);
+        assert_eq!(json.as_object().expect("object").len(), 8);
         assert_eq!(json["version"], VIEW_STATE_VERSION);
         assert!(json.get("bell").is_none());
         assert!(json.get("selected_pane").is_none());
@@ -330,6 +347,20 @@ mod tests {
         store.clear().expect("clear state");
         store.clear().expect("repeated clear");
         assert!(!store.path().expect("store path").exists());
+    }
+
+    #[test]
+    fn v1_state_without_attention_keeps_existing_choices_and_defaults_attention_visible() {
+        let store = test_store("v1-without-attention");
+        let path = store.path().expect("path");
+        fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        fs::write(
+            path,
+            br#"{"version":1,"app":true,"git":false,"detail":true,"time":false,"output":true,"stats":false}"#,
+        )
+        .expect("write historical v1 state");
+
+        assert_eq!(store.load().state, Some(state()));
     }
 
     #[test]

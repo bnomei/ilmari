@@ -167,6 +167,9 @@ pub struct SessionRecord {
     pub kind: AgentKind,
     /// Lifecycle state from the last successful classification (or capture hold).
     pub status: SessionStatus,
+    /// Sticky, unacknowledged attention projected by the shared tmux-state latch.
+    /// This is intentionally independent of the lifecycle state.
+    pub attention: bool,
     /// Optional model/mode label for the radar detail column.
     pub detail: Option<Arc<AgentDetail>>,
     /// Recent non-noise output snippet shown in the radar output column.
@@ -273,6 +276,8 @@ pub struct PaneRow {
     /// Whether the stats subtask list is expanded under this row.
     pub subtasks_expanded: bool,
     pub status: SessionStatus,
+    /// Explicit sticky attention fact rendered in its own popup column.
+    pub attention: bool,
     /// Stable status slug mirrored from `SessionStatus::as_str`.
     pub status_label: &'static str,
     /// Highlighted by the numeric pane-jump filter.
@@ -301,6 +306,7 @@ pub struct AppModel {
     /// Footer/status text for warnings and optional git summary snippets.
     pub status_line: String,
     pub show_app: bool,
+    pub show_attention: bool,
     pub show_git: bool,
     pub show_detail: bool,
     pub show_time: bool,
@@ -320,6 +326,7 @@ impl AppModel {
             title: "Agents".to_string(),
             status_line: "Waiting for tmux agent sessions.".to_string(),
             show_app: false,
+            show_attention: true,
             show_git: true,
             show_detail: false,
             show_time: true,
