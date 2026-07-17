@@ -24,10 +24,14 @@ use crate::agents::SessionTracker;
 use crate::model::AgentKind;
 
 /// Tab-separated `list-panes -aF` format consumed by `PaneSnapshot::parse`.
-pub const LIST_PANES_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_dead}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}";
+///
+/// The trailing `#{@ilmari_attention}` carries the daemon's durable sticky-attention bit so a
+/// popup that falls back to a direct scan can rehydrate the latch without re-inferring it.
+pub const LIST_PANES_FORMAT: &str = "#{pane_id}\t#{pane_pid}\t#{session_id}\t#{session_name}\t#{window_id}\t#{window_name}\t#{pane_dead}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_title}\t#{@ilmari_attention}";
 /// Default `capture-pane -S` window for output-tail classification.
 pub const DEFAULT_CAPTURE_START: &str = "-80";
-const PANE_SNAPSHOT_FIELD_COUNT: usize = 10;
+const PANE_SNAPSHOT_FIELD_COUNT: usize = 11;
+const PANE_SNAPSHOT_LEGACY_FIELD_COUNT: usize = 10;
 const GENERATION_ACCEPTED_MARKER: &str = "__ILMARI_TMUX_GENERATION_ACCEPTED__";
 const GENERATION_REJECTED_MARKER: &str = "__ILMARI_TMUX_GENERATION_REJECTED__";
 const TPM_ORIGIN_SOCKET_DEVICE_ENV: &str = "ILMARI_TMUX_ORIGIN_SOCKET_DEVICE";
@@ -65,13 +69,21 @@ pub struct PaneSnapshot {
     pub pane_current_command: String,
     /// Pane title; secondary identity for wrapped launches and spinners.
     pub pane_title: String,
+    /// Durable sticky-attention bit published as pane-local `@ilmari_attention` (`0`/`1`).
+    #[serde(default)]
+    pub ilmari_attention: bool,
 }
 
 impl PaneSnapshot {
     /// Parse one tab-separated `list-panes -aF` row using `LIST_PANES_FORMAT`.
+    ///
+    /// Rows with only the legacy ten fields (no attention column) parse with
+    /// `ilmari_attention = false` so unit fixtures remain source-compatible.
     pub fn parse(line: &str) -> Result<Self, PaneSnapshotParseError> {
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != PANE_SNAPSHOT_FIELD_COUNT {
+        if fields.len() != PANE_SNAPSHOT_FIELD_COUNT
+            && fields.len() != PANE_SNAPSHOT_LEGACY_FIELD_COUNT
+        {
             return Err(PaneSnapshotParseError::InvalidFieldCount {
                 expected: PANE_SNAPSHOT_FIELD_COUNT,
                 actual: fields.len(),
@@ -89,6 +101,12 @@ impl PaneSnapshot {
             pane_current_path: PathBuf::from(fields[7]),
             pane_current_command: fields[8].to_string(),
             pane_title: fields[9].to_string(),
+            ilmari_attention: fields
+                .get(10)
+                .copied()
+                .map(parse_attention_flag)
+                .transpose()?
+                .unwrap_or(false),
         })
     }
 }
@@ -136,6 +154,19 @@ fn parse_bool_flag(value: &str, field: &'static str) -> Result<bool, PaneSnapsho
         "1" | "true" => Ok(true),
         "0" | "false" => Ok(false),
         _ => Err(PaneSnapshotParseError::InvalidBooleanFlag { field, value: value.to_string() }),
+    }
+}
+
+/// Unset or empty `@ilmari_attention` is off. Reject other values so a tab embedded in the
+/// preceding free-form title field cannot masquerade as a valid attention column.
+fn parse_attention_flag(value: &str) -> Result<bool, PaneSnapshotParseError> {
+    match value.trim() {
+        "" | "0" | "false" | "off" | "no" => Ok(false),
+        "1" | "true" | "on" | "yes" => Ok(true),
+        value => Err(PaneSnapshotParseError::InvalidBooleanFlag {
+            field: "ilmari_attention",
+            value: value.to_string(),
+        }),
     }
 }
 
@@ -219,8 +250,20 @@ fn quote_tmux_argument(value: &str) -> String {
     quoted
 }
 
-fn quote_tmux_format_literal(value: &str) -> String {
+/// Escape a dynamic value so it cannot alter tmux format grammar when embedded as a literal.
+///
+/// Used for comparison operands, badge symbols/separators, and other user-controlled text that
+/// must expand as plain content rather than format operators.
+pub(crate) fn quote_tmux_format_literal(value: &str) -> String {
     value.replace('#', "##").replace(',', "#,").replace('}', "#}")
+}
+
+/// Escape dynamic text for the true-branch of a `#{?cond,true,false}` expansion.
+///
+/// Style sequences such as `#[fg=red,bold]` remain valid because `#,` is a literal comma both in
+/// format branches and inside style attribute lists.
+pub(crate) fn escape_tmux_format_embedded(value: &str) -> String {
+    value.replace(',', "#,")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -783,7 +826,7 @@ pub fn clear_published_state(
 }
 
 fn pane_cleanup_commands(panes: &[PaneSnapshot]) -> Vec<TmuxCommand> {
-    let mut cleanup = Vec::with_capacity(panes.len() * 2);
+    let mut cleanup = Vec::with_capacity(panes.len() * 3);
     for pane in panes {
         cleanup.push(TmuxCommand::new([
             "set-option",
@@ -798,6 +841,13 @@ fn pane_cleanup_commands(panes: &[PaneSnapshot]) -> Vec<TmuxCommand> {
             "-t",
             pane.pane_id.as_str(),
             "@ilmari_badge",
+        ]));
+        cleanup.push(TmuxCommand::new([
+            "set-option",
+            "-pqu",
+            "-t",
+            pane.pane_id.as_str(),
+            "@ilmari_attention",
         ]));
     }
     cleanup
@@ -1274,8 +1324,32 @@ mod tests {
     fn pane_cleanup_unsets_are_quiet_when_a_scanned_pane_disappears() {
         let pane = PaneSnapshot::parse("%404\t1\t$1\ts\t@1\tw\t0\t/tmp\tsh\tgone").unwrap();
         let commands = super::pane_cleanup_commands(&[pane]);
-        assert_eq!(commands.len(), 2);
+        assert_eq!(commands.len(), 3);
         assert!(commands.iter().all(|command| command.args()[1] == "-pqu"));
+        let options = commands.iter().map(|command| command.args()[4].clone()).collect::<Vec<_>>();
+        assert_eq!(options, vec!["@ilmari_state", "@ilmari_badge", "@ilmari_attention"]);
+    }
+
+    #[test]
+    fn pane_snapshot_parser_reads_durable_attention_flag() {
+        let off =
+            PaneSnapshot::parse("%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent\t0")
+                .expect("attention off row");
+        assert!(!off.ilmari_attention);
+
+        let on = PaneSnapshot::parse("%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent\t1")
+            .expect("attention on row");
+        assert!(on.ilmari_attention);
+
+        let unset =
+            PaneSnapshot::parse("%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent\t")
+                .expect("empty attention is off");
+        assert!(!unset.ilmari_attention);
+
+        let legacy =
+            PaneSnapshot::parse("%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/api\tcodex\tagent")
+                .expect("legacy ten-field rows still parse");
+        assert!(!legacy.ilmari_attention);
     }
 
     #[test]
@@ -1311,12 +1385,14 @@ mod tests {
 
     #[test]
     fn parse_pane_snapshots_tolerates_embedded_tab_in_a_field() {
+        // An embedded tab must not be mistaken for the optional attention column.
         let collection = parse_pane_snapshots(
-            "%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/foo\tbar\tcodex\tmytitle\n%9\t202\t$2\tops\t@3\tlogs\t1\t/tmp/blog\tamp\treview\n",
+            "%1\t101\t$1\twork\t@1\teditor\t0\t/tmp/foo\tbar\tcodex\tmytitle\n%9\t202\t$2\tops\t@3\tlogs\t1\t/tmp/blog\tamp\treview\t0\n",
         );
 
         assert_eq!(collection.snapshots.len(), 1);
         assert_eq!(collection.snapshots[0].pane_id, "%9");
+        assert!(!collection.snapshots[0].ilmari_attention);
         assert_eq!(collection.warnings.len(), 1);
         assert!(collection.warnings[0].contains("line 1"));
     }

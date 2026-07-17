@@ -128,6 +128,7 @@ fn workspace_lines(
                 model.show_time,
                 model.show_output,
                 model.show_stats,
+                available_width,
             ));
             if row.subtasks_expanded {
                 lines.extend(subtask_lines(
@@ -279,6 +280,7 @@ fn workspace_row_line_with_attention(
     show_time: bool,
     show_output: bool,
     show_stats: bool,
+    available_width: usize,
 ) -> Line<'static> {
     let presentation = states.for_status(row.status);
     let status_style = palette.style_for_color(&presentation.color);
@@ -382,10 +384,19 @@ fn workspace_row_line_with_attention(
     }
 
     if row.is_selected {
-        let selected_style = selected_row_style();
+        let selected_style = selected_row_style(palette);
         for span in &mut spans {
             span.style = span.style.patch(selected_style);
         }
+        // Paragraph styling fills only unoccupied cells. Add an explicit selected span so the
+        // focused-row highlight reaches the right edge of the available viewport.
+        let trailing_width = available_width.saturating_sub(current_width);
+        push_inline_span(
+            &mut spans,
+            &mut current_width,
+            " ".repeat(trailing_width),
+            selected_style,
+        );
         return Line::from(spans).style(selected_style);
     }
 
@@ -414,6 +425,7 @@ fn workspace_row_line(
         show_time,
         show_output,
         show_stats,
+        0,
     )
 }
 
@@ -511,8 +523,16 @@ fn prefix_cluster_width(show_time: bool, show_attention: bool) -> usize {
     time_width + attention_width + STATUS_COL_WIDTH + 1 + PANE_INLINE_WIDTH
 }
 
-fn selected_row_style() -> Style {
-    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+fn selected_row_style(palette: &Palette) -> Style {
+    // Do not use reverse-video here: reversing a semantic foreground turns a yellow
+    // waiting/attention glyph into a yellow block. Keep the focused-row highlight
+    // neutral (rather than reusing the blue workspace-heading accent) while each span
+    // retains its own foreground color.
+    let highlight = palette
+        .style_for(SemanticRole::MutedText)
+        .fg
+        .expect("muted text always has a foreground color");
+    Style::default().bg(highlight).add_modifier(Modifier::BOLD)
 }
 
 /// Keyboard shortcut footer; switches to a compact key list under the width breakpoint.
@@ -817,6 +837,7 @@ mod tests {
             false,
             false,
             false,
+            0,
         );
         let attention = line
             .spans
@@ -842,6 +863,7 @@ mod tests {
             false,
             false,
             false,
+            0,
         );
         assert!(line.spans.iter().any(|span| span.content.as_ref() == " "));
         assert!(!line.spans.iter().any(|span| span.content.as_ref() == "!"));
@@ -870,24 +892,20 @@ mod tests {
             },
             ..StatePresentations::default()
         };
+        let palette = Palette::default();
 
-        let line = workspace_row_line(
-            &row,
-            &Palette::default(),
-            &states,
-            false,
-            false,
-            false,
-            false,
-            false,
-        );
+        let line = workspace_row_line(&row, &palette, &states, false, false, false, false, false);
         let status_span = line
             .spans
             .iter()
             .find(|span| span.content.as_ref() == "R")
             .expect("configured state icon");
         assert_eq!(status_span.style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
-        assert!(status_span.style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(
+            status_span.style.bg,
+            palette.style_for(SemanticRole::MutedText).fg,
+            "selection changes the background, not the configured state foreground"
+        );
     }
 
     #[test]
@@ -960,7 +978,7 @@ color = "palette:yellow"
     }
 
     #[test]
-    fn selected_workspace_row_uses_uniform_selection_style_for_all_spans() {
+    fn selected_workspace_row_uses_one_highlight_background_and_keeps_glyph_colors() {
         let row = PaneRow {
             pane_id: "%7".to_string(),
             inactive_since_label: "14:27".to_string(),
@@ -1006,13 +1024,61 @@ color = "palette:yellow"
             true,
             true,
         );
+        let highlight = palette
+            .style_for(SemanticRole::MutedText)
+            .fg
+            .expect("muted text has a foreground color");
         assert!(line.style.add_modifier.contains(Modifier::BOLD));
-        assert!(line.style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(line.style.bg, Some(highlight));
+        assert!(!line.style.add_modifier.contains(Modifier::REVERSED));
         assert!(line.spans.iter().all(|span| span.style.add_modifier.contains(Modifier::BOLD)));
-        assert!(line.spans.iter().all(|span| span.style.add_modifier.contains(Modifier::REVERSED)));
+        assert!(line.spans.iter().all(|span| span.style.bg == Some(highlight)));
         let status_span =
             line.spans.iter().find(|span| span.content.as_ref() == "●").expect("status span");
         assert_eq!(status_span.style.fg, Some(Color::Indexed(3)));
+        assert_eq!(status_span.style.bg, Some(highlight));
+    }
+
+    #[test]
+    fn selected_workspace_row_fills_the_available_viewport_width() {
+        let row = PaneRow {
+            pane_id: "%7".to_string(),
+            inactive_since_label: String::new(),
+            output_excerpt: None,
+            client_label: "Codex",
+            detail: None,
+            process_usage: None,
+            subtasks_expanded: false,
+            status: SessionStatus::WaitingInput,
+            attention: true,
+            status_label: "waiting-input",
+            is_jump_match: false,
+            is_selected: true,
+        };
+        let palette = Palette::default();
+        let line = workspace_row_line_with_attention(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            40,
+        );
+        let text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+        let highlight = palette
+            .style_for(SemanticRole::MutedText)
+            .fg
+            .expect("muted text has a foreground color");
+
+        assert_eq!(text.chars().count(), 40);
+        assert!(line.spans.iter().all(|span| span.style.bg == Some(highlight)));
+        let attention =
+            line.spans.iter().find(|span| span.content.as_ref() == "?").expect("attention glyph");
+        assert_eq!(attention.style.fg, Some(Color::Indexed(3)));
     }
 
     #[test]

@@ -393,8 +393,14 @@ impl LoadedConfig {
         values.mcp.enabled = raw.mcp.enabled.unwrap_or(raw.mcp.port.is_some());
         values.mcp.port = raw.mcp.port.unwrap_or(DEFAULT_MCP_PORT);
         values.view = raw.view.merge(ViewConfig::default());
-        values.badges = raw.badges.merge(RendererConfig::badges_default());
-        values.status = raw.status.merge(RendererConfig::status_default());
+        values.badges =
+            raw.badges.merge(RendererConfig::badges_default(), RendererSection::Badges).map_err(
+                |(field, message)| ConfigError::Invalid { path: path.clone(), field, message },
+            )?;
+        values.status =
+            raw.status.merge(RendererConfig::status_default(), RendererSection::Status).map_err(
+                |(field, message)| ConfigError::Invalid { path: path.clone(), field, message },
+            )?;
         values.states = raw
             .states
             .map(|states| states.merge(StatePresentations::default()))
@@ -655,6 +661,33 @@ struct RawRendererConfig {
     finished: RawStateFormat,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RendererSection {
+    Badges,
+    Status,
+}
+
+impl RendererSection {
+    fn separator_field(self) -> &'static str {
+        match self {
+            Self::Badges => "badges.separator",
+            Self::Status => "status.separator",
+        }
+    }
+
+    fn symbol_field(self, state: &'static str) -> &'static str {
+        match (self, state) {
+            (Self::Badges, "running") => "badges.running.symbol",
+            (Self::Badges, "waiting_input") => "badges.waiting_input.symbol",
+            (Self::Badges, "finished") => "badges.finished.symbol",
+            (Self::Status, "running") => "status.running.symbol",
+            (Self::Status, "waiting_input") => "status.waiting_input.symbol",
+            (Self::Status, "finished") => "status.finished.symbol",
+            _ => "symbol",
+        }
+    }
+}
+
 impl RawRendererConfig {
     fn has_state_format_overrides(&self) -> bool {
         self.running.is_configured()
@@ -662,14 +695,29 @@ impl RawRendererConfig {
             || self.finished.is_configured()
     }
 
-    fn merge(self, defaults: RendererConfig) -> RendererConfig {
-        RendererConfig {
+    fn merge(
+        self,
+        defaults: RendererConfig,
+        section: RendererSection,
+    ) -> Result<RendererConfig, (&'static str, String)> {
+        // Styles remain trusted raw tmux style input for legacy compatibility. Symbols and
+        // separators are validated so they cannot introduce format syntax into published fragments.
+        let separator = match self.separator {
+            Some(separator) => validate_tmux_format_plain_text(separator)
+                .map_err(|message| (section.separator_field(), message))?,
+            None => defaults.separator,
+        };
+        Ok(RendererConfig {
             enabled: self.enabled.unwrap_or(defaults.enabled),
-            separator: self.separator.unwrap_or(defaults.separator),
-            running: self.running.merge(defaults.running),
-            waiting_input: self.waiting_input.merge(defaults.waiting_input),
-            finished: self.finished.merge(defaults.finished),
-        }
+            separator,
+            running: self.running.merge(defaults.running, section, "running")?,
+            waiting_input: self.waiting_input.merge(
+                defaults.waiting_input,
+                section,
+                "waiting_input",
+            )?,
+            finished: self.finished.merge(defaults.finished, section, "finished")?,
+        })
     }
 }
 
@@ -685,11 +733,19 @@ impl RawStateFormat {
         self.symbol.is_some() || self.style.is_some()
     }
 
-    fn merge(self, defaults: StateFormat) -> StateFormat {
-        StateFormat {
-            symbol: self.symbol.unwrap_or(defaults.symbol),
-            style: self.style.unwrap_or(defaults.style),
-        }
+    fn merge(
+        self,
+        defaults: StateFormat,
+        section: RendererSection,
+        state: &'static str,
+    ) -> Result<StateFormat, (&'static str, String)> {
+        let symbol = match self.symbol {
+            Some(symbol) => validate_tmux_format_plain_text(symbol)
+                .map_err(|message| (section.symbol_field(state), message))?,
+            None => defaults.symbol,
+        };
+        // Legacy styles are trusted tmux style input and are not re-validated here.
+        Ok(StateFormat { symbol, style: self.style.unwrap_or(defaults.style) })
     }
 }
 
@@ -753,14 +809,22 @@ fn validate_state_icon(icon: String) -> Result<String, String> {
             "icon must be exactly one Unicode scalar with terminal display width one".to_string()
         );
     }
-    if icon.chars().any(|character| {
+    validate_tmux_format_plain_text(icon)
+}
+
+/// Reject symbols/separators that can introduce tmux format syntax into published fragments.
+///
+/// Control characters and `#`, `,`, `{`, `}`, `[`, `]` are rejected. Ordinary printable text
+/// (including multi-character legacy symbols such as `WAIT`) remains valid.
+fn validate_tmux_format_plain_text(value: String) -> Result<String, String> {
+    if value.chars().any(|character| {
         character.is_control() || matches!(character, '#' | ',' | '{' | '}' | '[' | ']')
     }) {
         return Err(
-            "icon may not contain control characters, `#`, `,`, `{`, `}`, `[`, or `]`".to_string()
+            "may not contain control characters, `#`, `,`, `{`, `}`, `[`, or `]`".to_string()
         );
     }
-    Ok(icon)
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -1010,7 +1074,7 @@ color = "palette:yellow"
         for (label, icon, expected) in [
             ("multi-state-icon", "ab", "exactly one Unicode scalar"),
             ("wide-state-icon", "界", "terminal display width one"),
-            ("tmux-delimiter-icon", "}", "icon may not contain"),
+            ("tmux-delimiter-icon", "}", "may not contain"),
         ] {
             let path = write_config(label, &format!("[states.running]\nicon = \"{icon}\"\n"));
             let error = LoadedConfig::load_from_path(path).unwrap_err().to_string();
@@ -1022,6 +1086,54 @@ color = "palette:yellow"
         let error = LoadedConfig::load_from_path(&invalid_color).unwrap_err().to_string();
         assert!(error.contains("states.running"));
         assert!(error.contains("expected `default`"));
+    }
+
+    #[test]
+    fn legacy_symbols_and_separators_reject_tmux_format_syntax() {
+        for (label, source, expected_field) in [
+            ("badge-symbol-hash", "[badges.running]\nsymbol = \"a#b\"\n", "badges.running.symbol"),
+            ("badge-separator-comma", "[badges]\nseparator = \",\"\n", "badges.separator"),
+            (
+                "status-symbol-brace",
+                "[status.finished]\nsymbol = \"{x}\"\n",
+                "status.finished.symbol",
+            ),
+            ("status-separator-bracket", "[status]\nseparator = \"[\"\n", "status.separator"),
+        ] {
+            let path = write_config(label, source);
+            let error = LoadedConfig::load_from_path(path).unwrap_err().to_string();
+            assert!(error.contains(expected_field), "{label}: {error}");
+            assert!(error.contains("may not contain") || error.contains('#'), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn normal_legacy_renderer_symbols_and_styles_remain_valid() {
+        let path = write_config(
+            "legacy-safe",
+            r##"
+[badges]
+separator = "|"
+[badges.waiting_input]
+symbol = "WAIT"
+style = "fg=red,bold"
+
+[status]
+separator = " · "
+[status.running]
+symbol = "run"
+style = "fg=cyan,bg=black"
+"##,
+        );
+        let loaded = LoadedConfig::load_from_path(&path).expect("normal legacy config");
+        assert_eq!(loaded.values.badges.separator, "|");
+        assert_eq!(loaded.values.badges.waiting_input.symbol, "WAIT");
+        assert_eq!(loaded.values.badges.waiting_input.style, "fg=red,bold");
+        assert_eq!(loaded.values.status.separator, " · ");
+        assert_eq!(loaded.values.status.running.symbol, "run");
+        assert_eq!(loaded.values.status.running.style, "fg=cyan,bg=black");
+        assert!(loaded.values.legacy_badge_state_formats);
+        assert!(loaded.values.legacy_status_state_formats);
     }
 
     #[test]

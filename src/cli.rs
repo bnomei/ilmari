@@ -455,4 +455,56 @@ mod tests {
         assert!(config.mcp.enabled);
         assert_eq!(config.mcp.port, 9999);
     }
+
+    #[test]
+    fn explicit_no_socket_wins_over_socket_path() {
+        // `--socket-path` would enable IPC when applied alone; `--no-socket` is
+        // applied after path overlays so an explicit disable always wins.
+        let base =
+            AppConfig::from_env_map(&BTreeMap::new(), crate::config::ViewOverrides::default())
+                .expect("built-in config should load");
+        let command = parse_args_with_config(
+            ["--socket-path=/tmp/explicit.sock", "--no-socket"],
+            base.clone(),
+        )
+        .expect("flags should parse");
+        let CliCommand::Run(config) = command else {
+            panic!("expected run command");
+        };
+        assert!(!config.ipc.enabled);
+        assert_eq!(config.ipc.socket_path, std::path::PathBuf::from("/tmp/explicit.sock"));
+
+        let command =
+            parse_args_with_config(["--no-socket", "--socket-path=/tmp/explicit.sock"], base)
+                .expect("flags should parse in either order");
+        let CliCommand::Run(config) = command else {
+            panic!("expected run command");
+        };
+        assert!(!config.ipc.enabled);
+        assert_eq!(config.ipc.socket_path, std::path::PathBuf::from("/tmp/explicit.sock"));
+    }
+
+    #[test]
+    fn explicit_no_mcp_wins_over_mcp_port() {
+        // `--mcp-port` would enable MCP when applied alone; `--no-mcp` is
+        // applied after port overlays so an explicit disable always wins.
+        let base =
+            AppConfig::from_env_map(&BTreeMap::new(), crate::config::ViewOverrides::default())
+                .expect("built-in config should load");
+        let command = parse_args_with_config(["--mcp-port=64021", "--no-mcp"], base.clone())
+            .expect("flags should parse");
+        let CliCommand::Run(config) = command else {
+            panic!("expected run command");
+        };
+        assert!(!config.mcp.enabled);
+        assert_eq!(config.mcp.port, 64021);
+
+        let command = parse_args_with_config(["--no-mcp", "--mcp-port=64021"], base)
+            .expect("flags should parse in either order");
+        let CliCommand::Run(config) = command else {
+            panic!("expected run command");
+        };
+        assert!(!config.mcp.enabled);
+        assert_eq!(config.mcp.port, 64021);
+    }
 }

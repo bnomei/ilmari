@@ -2,17 +2,29 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-07-17
+
 ### Added
 
 - Added a default-visible popup attention column (the shared attention icon for the explicit unacknowledged latch, blank otherwise), with `n`, `[view].attention`, and remembered-state support.
 - Added typed shared `[states]` icon/color presentations for popup rows, tmux window badges, and global summaries, including palette-resolved, ANSI, RGB, and default color forms plus a separate sticky-attention glyph.
 - Added explicit global tmux counts for combined attention and ordinary waiting, finished, terminated, and unknown states while retaining the existing notification count options.
+- Added durable pane-local `@ilmari_attention` publication so sticky attention survives a popup's direct-scan fallback when a daemon snapshot is unavailable.
+- Added TPM integration coverage and a CI feature matrix for no-default, TUI-only, socket-only, MCP-only, and full builds.
+
+### Changed
+
+- TPM now starts the daemon by default as the per-server popup accelerator while leaving window-tab and status-line placement under the user's tmux theme.
+- Daemon startup now cooperatively replaces an owned healthy daemon when its configured socket path changes, without accepting a foreign endpoint.
+- Responsive optional popup columns collapse only below 100 cells unless the user has explicitly pinned their visibility.
 
 ### Fixed
 
 - Kept selected-window backgrounds continuous across multiple tmux agent badges and aligned the default global summary glyphs with badge glyphs.
 - Made tmux window badges follow the effective popup app-column setting, rendering state symbols without agent names whenever that column is hidden.
 - Restricted shared state icons to one safe terminal cell, rejecting tmux format delimiters and display-width mismatches between popup and tmux.
+- Kept popup selection neutral and full-width while preserving configured attention and lifecycle glyph foreground colors.
+- Cleared all daemon-owned pane and global renderer options during TPM fallback cleanup, and hardened tmux format escaping and numeric window ordering.
 
 ## 0.8.0 - 2026-07-16
 

@@ -286,12 +286,18 @@ snapshot_cleanup_list() {
 
 build_daemon_render_cleanup() {
   local option pane_id
+  # Keep parity with Rust `tmux::clear_published_state` global render options.
   local global_options=(
     '@ilmari_window_badges'
     '@ilmari_status_summary'
     '@ilmari_running_count'
     '@ilmari_waiting_count'
     '@ilmari_finished_count'
+    '@ilmari_attention_count'
+    '@ilmari_waiting_state_count'
+    '@ilmari_finished_state_count'
+    '@ilmari_terminated_count'
+    '@ilmari_unknown_count'
   )
 
   for option in "${global_options[@]}"; do
@@ -307,6 +313,7 @@ build_daemon_render_cleanup() {
     [[ -n "$pane_id" ]] || continue
     append_tmux_command set-option -pqu -t "$pane_id" '@ilmari_state'
     append_tmux_command set-option -pqu -t "$pane_id" '@ilmari_badge'
+    append_tmux_command set-option -pqu -t "$pane_id" '@ilmari_attention'
   done <<<"$pane_ids"
 }
 

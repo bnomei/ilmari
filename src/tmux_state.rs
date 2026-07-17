@@ -173,7 +173,9 @@ impl TmuxStatePublisher {
     /// Advance the shared sticky-attention latch from one direct pane scan.
     ///
     /// Popup snapshots and tmux badges both project this exact latch; lifecycle
-    /// states alone are never treated as attention.
+    /// states alone are never treated as attention. Daemon-originated sticky
+    /// attention published as pane-local `@ilmari_attention` is rehydrated first so a
+    /// failed daemon snapshot followed by a direct scan does not drop the latch.
     pub fn refresh_attention(
         &mut self,
         sessions: &[SessionRecord],
@@ -197,12 +199,92 @@ impl TmuxStatePublisher {
                 session.pane = pane.clone();
             }
         }
+        self.hydrate_attention_from_panes(live_panes, &live_sessions, focused.as_ref().ok());
         self.current_session_ids =
             live_sessions.iter().map(|session| session.pane.pane_id.clone()).collect();
         match focused {
             Ok(focused) => self.update_attention(&live_sessions, &focused, true),
             Err(_) => self.update_attention(&live_sessions, &HashSet::new(), false),
         }
+    }
+
+    /// Seed missing latch entries from durable pane options without inventing transitions.
+    ///
+    /// Only panes that are not yet tracked locally are hydrated, so a live publisher's
+    /// acknowledge/clear decisions win over a stale option. Lifecycle status alone never
+    /// sets the latch; only an explicit `@ilmari_attention=1` bit does.
+    fn hydrate_attention_from_panes(
+        &mut self,
+        live_panes: &[tmux::PaneSnapshot],
+        sessions: &[SessionRecord],
+        focused: Option<&HashSet<String>>,
+    ) {
+        self.hydrate_attention_from_panes_with(live_panes, sessions, focused, |pane_id, value| {
+            let _ = tmux::set_pane_option(pane_id, "@ilmari_attention", value);
+        });
+    }
+
+    /// Reconcile durable daemon attention with a direct scan.
+    ///
+    /// The callback is kept at this boundary so the state transition is testable without a
+    /// tmux server. Production persists the resulting value through the wrapper above.
+    fn hydrate_attention_from_panes_with(
+        &mut self,
+        live_panes: &[tmux::PaneSnapshot],
+        sessions: &[SessionRecord],
+        focused: Option<&HashSet<String>>,
+        mut set_durable_attention: impl FnMut(&str, Option<&str>),
+    ) {
+        let status_by_pane = sessions
+            .iter()
+            .map(|session| (session.pane.pane_id.as_str(), session.status))
+            .collect::<HashMap<_, _>>();
+        for pane in live_panes {
+            if !pane.ilmari_attention {
+                continue;
+            }
+            let status = status_by_pane.get(pane.pane_id.as_str()).copied();
+            if matches!(
+                status,
+                Some(SessionStatus::Running | SessionStatus::Terminated | SessionStatus::Unknown)
+            ) {
+                // A popup does not publish rendered state. Without clearing the durable bit
+                // here, a later popup could rehydrate old daemon attention after this pane has
+                // returned to an ineligible lifecycle state.
+                set_durable_attention(&pane.pane_id, Some("0"));
+                continue;
+            }
+            if self.panes.contains_key(&pane.pane_id) {
+                continue;
+            }
+            if Self::should_acknowledge_durable_attention(pane, focused) {
+                // This direct popup scan is authoritative enough to acknowledge a durable
+                // daemon latch. Persist the acknowledgement so reopening the popup while the
+                // daemon is unavailable cannot revive the stale badge.
+                set_durable_attention(&pane.pane_id, Some("0"));
+                continue;
+            }
+            let mut attention = PaneAttention::default();
+            match status {
+                Some(SessionStatus::WaitingInput) => attention.waiting = true,
+                Some(SessionStatus::Finished) => attention.finished = true,
+                Some(_) | None => {
+                    // A bare option for an unclassified pane is not enough to invent sticky
+                    // attention. Keep it until a later direct scan has a concrete lifecycle;
+                    // classification glitches must not erase a daemon-published latch.
+                }
+            }
+            if attention.waiting || attention.finished {
+                self.panes.insert(pane.pane_id.clone(), attention);
+            }
+        }
+    }
+
+    fn should_acknowledge_durable_attention(
+        pane: &tmux::PaneSnapshot,
+        focused: Option<&HashSet<String>>,
+    ) -> bool {
+        pane.ilmari_attention && focused.is_some_and(|focused| focused.contains(&pane.pane_id))
     }
 
     /// Copy the authoritative latch into runtime records for popup/IPC presentation.
@@ -274,16 +356,19 @@ impl TmuxStatePublisher {
         settings: &RenderSettings,
     ) {
         for pane_id in self.previously_published.difference(live_pane_ids) {
-            let _ = tmux::set_pane_option(pane_id, "@ilmari_state", None);
-            let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", None);
+            clear_pane_daemon_state(pane_id);
         }
         for pane_id in live_pane_ids {
-            if let Some((state, badge)) = rendered.pane_values.get(pane_id) {
-                let _ = tmux::set_pane_option(pane_id, "@ilmari_state", Some(state));
-                let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", Some(badge));
+            if let Some(values) = rendered.pane_values.get(pane_id) {
+                let _ = tmux::set_pane_option(pane_id, "@ilmari_state", Some(&values.state));
+                let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", Some(&values.badge));
+                let _ = tmux::set_pane_option(
+                    pane_id,
+                    "@ilmari_attention",
+                    Some(if values.attention { "1" } else { "0" }),
+                );
             } else {
-                let _ = tmux::set_pane_option(pane_id, "@ilmari_state", None);
-                let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", None);
+                clear_pane_daemon_state(pane_id);
             }
         }
 
@@ -449,29 +534,29 @@ impl TmuxStatePublisher {
                     _ => (session.status.as_str(), None),
                 }
             };
+            let has_attention = attention.waiting || attention.finished;
             let badge = format
                 .map(|format| render_badge(format, session, settings.show_agent_names))
                 .unwrap_or_default();
             if !badge.is_empty() {
                 windows.entry(&session.pane.window_id).or_default().push(badge.clone());
             }
-            pane_values.insert(session.pane.pane_id.clone(), (state.to_string(), badge));
+            pane_values.insert(
+                session.pane.pane_id.clone(),
+                PanePublishedValues { state: state.to_string(), badge, attention: has_attention },
+            );
         }
 
         let mut window_ids = windows.keys().copied().collect::<Vec<_>>();
-        window_ids.sort_unstable();
+        window_ids.sort_unstable_by(|left, right| compare_tmux_window_ids(left, right));
+        // Separators are config-validated plain text; only escape format introducers here.
+        // Commas are escaped once when the joined badges are embedded in `#{?}`.
+        let separator = tmux_content_literal(&settings.badge_separator);
         let window_fragment = window_ids
             .into_iter()
             .map(|window_id| {
-                let badges = windows
-                    .get(window_id)
-                    .cloned()
-                    .unwrap_or_default()
-                    .join(&settings.badge_separator)
-                    .replace(',', "#,");
-                "#{?#{==:#{window_id},WINDOW},BADGES,}"
-                    .replace("WINDOW", window_id)
-                    .replace("BADGES", &badges)
+                let badges = windows.get(window_id).cloned().unwrap_or_default().join(&separator);
+                window_badge_conditional(window_id, &badges)
             })
             .collect::<String>();
 
@@ -512,16 +597,29 @@ impl TmuxStatePublisher {
             counts,
             pane_values,
             window_fragment,
-            status_summary: status_parts.join(&settings.status_separator),
+            status_summary: status_parts.join(&tmux_content_literal(&settings.status_separator)),
         }
     }
 }
 
 struct RenderedState {
     counts: StatusCounts,
-    pane_values: HashMap<String, (String, String)>,
+    pane_values: HashMap<String, PanePublishedValues>,
     window_fragment: String,
     status_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PanePublishedValues {
+    state: String,
+    badge: String,
+    attention: bool,
+}
+
+fn clear_pane_daemon_state(pane_id: &str) {
+    let _ = tmux::set_pane_option(pane_id, "@ilmari_state", None);
+    let _ = tmux::set_pane_option(pane_id, "@ilmari_badge", None);
+    let _ = tmux::set_pane_option(pane_id, "@ilmari_attention", None);
 }
 
 fn render_badge(format: &StateFormat, session: &SessionRecord, show_agent_names: bool) -> String {
@@ -535,7 +633,15 @@ fn render_count(format: &StateFormat, count: usize) -> String {
 
 fn styled(style: &str, symbol: &str, suffix: &str) -> String {
     let style = style.trim();
-    let content = if suffix.is_empty() { symbol.to_string() } else { format!("{symbol} {suffix}") };
+    // Symbols and suffixes are dynamic text; escape format introducers so they cannot inject
+    // format ops. Commas are left alone here and escaped once when embedded in `#{?}`.
+    // Styles remain trusted raw tmux style input (including commas inside `#[...]`).
+    let symbol = tmux_content_literal(symbol);
+    let content = if suffix.is_empty() {
+        symbol
+    } else {
+        format!("{symbol} {}", tmux_content_literal(suffix))
+    };
     if style.is_empty() {
         content
     } else {
@@ -544,6 +650,35 @@ fn styled(style: &str, symbol: &str, suffix: &str) -> String {
         // Scope the reset to the style active at this insertion point instead.
         format!("#[push-default]#[{style}]{content}#[default]#[pop-default]")
     }
+}
+
+/// Build one window's badge conditional without sentinel string replacement.
+fn window_badge_conditional(window_id: &str, badges: &str) -> String {
+    // Embed with comma-escaping so trusted style commas and labels cannot split `#{?}`.
+    format!(
+        "#{{?#{{==:#{{window_id}},{}}},{},}}",
+        tmux::quote_tmux_format_literal(window_id),
+        tmux::escape_tmux_format_embedded(badges)
+    )
+}
+
+/// Escape `#` and `}` in free-standing dynamic text. Commas are handled at `#{?}` embed time.
+fn tmux_content_literal(value: &str) -> String {
+    value.replace('#', "##").replace('}', "#}")
+}
+
+/// Sort `@N` window ids by numeric N so `@2` precedes `@10` (string sort would reverse them).
+fn compare_tmux_window_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    match (tmux_window_id_number(left), tmux_window_id_number(right)) {
+        (Some(left_n), Some(right_n)) => left_n.cmp(&right_n).then_with(|| left.cmp(right)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
+
+fn tmux_window_id_number(window_id: &str) -> Option<u64> {
+    window_id.strip_prefix('@')?.parse().ok()
 }
 
 fn option_override(name: &str) -> Option<bool> {
@@ -636,10 +771,11 @@ mod tests {
                 publisher.render(std::slice::from_ref(&running), &RenderSettings::default());
             assert_eq!(rendered.counts.attention, 0);
             assert_eq!(rendered.counts.running, 1);
-            let (_, badge) =
+            let values =
                 rendered.pane_values.get("%1").expect("running pane should have a rendered badge");
-            assert!(badge.contains("▶"));
-            assert!(!badge.contains("?"));
+            assert!(values.badge.contains("▶"));
+            assert!(!values.badge.contains("?"));
+            assert!(!values.attention);
         }
     }
 
@@ -932,6 +1068,182 @@ mod tests {
     fn unstyled_fragments_preserve_the_enclosing_tmux_style() {
         assert_eq!(super::styled("", "?", "Codex"), "? Codex");
         assert_eq!(super::styled("", "?", ""), "?");
+    }
+
+    #[test]
+    fn dynamic_literals_cannot_alter_tmux_format_grammar() {
+        assert_eq!(super::tmux_content_literal("a#b}c"), "a##b#}c");
+        assert_eq!(super::window_badge_conditional("@2", "x,y"), "#{?#{==:#{window_id},@2},x#,y,}");
+        // Sentinel text that used to collide with WINDOW/BADGES replacement stays literal content.
+        let fragment = super::window_badge_conditional("@10", "WINDOW-BADGES");
+        assert_eq!(fragment, "#{?#{==:#{window_id},@10},WINDOW-BADGES,}");
+        assert!(fragment.contains("WINDOW-BADGES"));
+        // Styles stay trusted raw input; embedding escapes commas for `#{?}` branches only.
+        assert_eq!(
+            super::styled("fg=red,bold", "?", "a,b"),
+            "#[push-default]#[fg=red,bold]? a,b#[default]#[pop-default]"
+        );
+        assert_eq!(
+            super::window_badge_conditional("@1", &super::styled("fg=red,bold", "?", "a,b")),
+            "#{?#{==:#{window_id},@1},#[push-default]#[fg=red#,bold]? a#,b#[default]#[pop-default],}"
+        );
+    }
+
+    #[test]
+    fn window_ids_sort_numerically_not_lexicographically() {
+        let publisher = TmuxStatePublisher::default();
+        let sessions = vec![
+            session("%10", "@10", AgentKind::Codex, SessionStatus::Running),
+            session("%2", "@2", AgentKind::Codex, SessionStatus::Running),
+            session("%3", "@3", AgentKind::Codex, SessionStatus::Running),
+        ];
+        let rendered = publisher.render(&sessions, &RenderSettings::default());
+        let at2 = rendered.window_fragment.find("#{?#{==:#{window_id},@2}").expect("@2 present");
+        let at3 = rendered.window_fragment.find("#{?#{==:#{window_id},@3}").expect("@3 present");
+        let at10 = rendered.window_fragment.find("#{?#{==:#{window_id},@10}").expect("@10 present");
+        assert!(
+            at2 < at3 && at3 < at10,
+            "expected @2 < @3 < @10, got fragment {}",
+            rendered.window_fragment
+        );
+
+        // Badge text equal to the old WINDOW/BADGES sentinels must not rewrite the template.
+        let settings = RenderSettings {
+            badge_running: StateFormat { symbol: "WINDOW".to_string(), style: String::new() },
+            badge_separator: "BADGES".to_string(),
+            ..RenderSettings::default()
+        };
+        let rendered = publisher.render(&sessions, &settings);
+        assert!(rendered.window_fragment.contains("WINDOW"));
+        assert!(rendered.window_fragment.contains("#{?#{==:#{window_id},@2},WINDOW"));
+        assert!(!rendered.window_fragment.contains("#{?#{==:#{window_id},WINDOW}"));
+    }
+
+    #[test]
+    fn hydrates_daemon_attention_on_direct_scan_without_inferring_initial_waiting() {
+        let waiting = session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput);
+        let live_panes = [PaneSnapshot { ilmari_attention: true, ..waiting.pane.clone() }];
+
+        // Direct scan after a failed daemon snapshot: durable option restores the latch.
+        let mut hydrated = TmuxStatePublisher::default();
+        hydrated.hydrate_attention_from_panes(&live_panes, std::slice::from_ref(&waiting), None);
+        hydrated.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        let mut projected = waiting.clone();
+        hydrated.project_attention(std::slice::from_mut(&mut projected));
+        assert!(projected.attention, "daemon-published attention must survive a direct scan");
+        assert!(hydrated
+            .render(std::slice::from_ref(&waiting), &RenderSettings::default())
+            .pane_values
+            .get("%1")
+            .is_some_and(|values| values.attention));
+
+        // Lifecycle alone must not invent attention when the durable bit is off.
+        let cold = [PaneSnapshot { ilmari_attention: false, ..waiting.pane.clone() }];
+        let mut fresh = TmuxStatePublisher::default();
+        fresh.hydrate_attention_from_panes(&cold, std::slice::from_ref(&waiting), None);
+        fresh.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        let mut projected = waiting.clone();
+        fresh.project_attention(std::slice::from_mut(&mut projected));
+        assert!(!projected.attention, "initial waiting must not become attention by inference");
+
+        // A local latch already tracking the pane is not overwritten by a stale option.
+        let mut local = TmuxStatePublisher::default();
+        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        local.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+        local.update_attention(
+            std::slice::from_ref(&waiting),
+            &HashSet::from(["%1".to_string()]),
+            true,
+        );
+        assert_eq!(attention_count(&local, &waiting, SessionStatus::WaitingInput), 0);
+        local.hydrate_attention_from_panes(&live_panes, std::slice::from_ref(&waiting), None);
+        assert_eq!(
+            attention_count(&local, &waiting, SessionStatus::WaitingInput),
+            0,
+            "focus acknowledgement must not be undone by hydrating a stale option"
+        );
+
+        // A fresh direct-popup publisher must acknowledge, rather than rehydrate, a daemon
+        // option when the matching pane is focused.
+        assert!(TmuxStatePublisher::should_acknowledge_durable_attention(
+            &live_panes[0],
+            Some(&HashSet::from(["%1".to_string()])),
+        ));
+    }
+
+    #[test]
+    fn direct_scan_clears_stale_daemon_attention_before_popup_reopens() {
+        let waiting = session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput);
+        let waiting_with_durable_attention =
+            [PaneSnapshot { ilmari_attention: true, ..waiting.pane.clone() }];
+        let mut direct_popup = TmuxStatePublisher::default();
+
+        // The daemon is down, so the first popup direct-scans and restores the durable latch.
+        direct_popup.hydrate_attention_from_panes(
+            &waiting_with_durable_attention,
+            std::slice::from_ref(&waiting),
+            None,
+        );
+        direct_popup.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        let mut projected_waiting = waiting.clone();
+        direct_popup.project_attention(std::slice::from_mut(&mut projected_waiting));
+        assert!(projected_waiting.attention);
+
+        // The same direct scan later observes that the pane has returned to running. Popup
+        // mode does not publish rendered state, so it must persist a cleared durable bit now.
+        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        let running_with_stale_durable_attention =
+            [PaneSnapshot { ilmari_attention: true, ..running.pane.clone() }];
+        let mut durable_writes = Vec::new();
+        direct_popup.hydrate_attention_from_panes_with(
+            &running_with_stale_durable_attention,
+            std::slice::from_ref(&running),
+            None,
+            |pane_id, value| {
+                durable_writes.push((pane_id.to_string(), value.map(str::to_string)));
+            },
+        );
+        assert_eq!(durable_writes, vec![("%1".to_string(), Some("0".to_string()))]);
+        direct_popup.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+        let mut projected_running = running.clone();
+        direct_popup.project_attention(std::slice::from_mut(&mut projected_running));
+        assert!(!projected_running.attention);
+
+        // Simulate reopening after tmux accepted the persisted zero. A later waiting state
+        // cannot rehydrate the old latch; a fresh transition is required to create attention.
+        let reopened_panes = [PaneSnapshot { ilmari_attention: false, ..waiting.pane.clone() }];
+        let mut reopened_popup = TmuxStatePublisher::default();
+        reopened_popup.hydrate_attention_from_panes(
+            &reopened_panes,
+            std::slice::from_ref(&waiting),
+            None,
+        );
+        reopened_popup.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        let mut reopened_waiting = waiting.clone();
+        reopened_popup.project_attention(std::slice::from_mut(&mut reopened_waiting));
+        assert!(
+            !reopened_waiting.attention,
+            "reopening the popup must not revive attention cleared by a direct scan"
+        );
+    }
+
+    #[test]
+    fn rendered_pane_values_publish_attention_zero_or_one() {
+        let mut publisher = TmuxStatePublisher::default();
+        let running = session("%1", "@1", AgentKind::Codex, SessionStatus::Running);
+        publisher.update_attention(std::slice::from_ref(&running), &HashSet::new(), true);
+        let waiting = session("%1", "@1", AgentKind::Codex, SessionStatus::WaitingInput);
+        publisher.update_attention(std::slice::from_ref(&waiting), &HashSet::new(), true);
+        let rendered = publisher.render(std::slice::from_ref(&waiting), &RenderSettings::default());
+        assert!(rendered.pane_values["%1"].attention);
+
+        publisher.update_attention(
+            std::slice::from_ref(&waiting),
+            &HashSet::from(["%1".to_string()]),
+            true,
+        );
+        let rendered = publisher.render(std::slice::from_ref(&waiting), &RenderSettings::default());
+        assert!(!rendered.pane_values["%1"].attention);
     }
 
     #[test]

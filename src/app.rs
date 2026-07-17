@@ -51,6 +51,8 @@ use crate::view_state::{ViewState, ViewStateStore};
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+/// Unpinned optional columns (app/detail/stats) collapse only below this terminal width.
+const RESPONSIVE_OPTIONAL_COLUMN_MIN_WIDTH: usize = 100;
 static SHUTDOWN_SIGNAL: AtomicBool = AtomicBool::new(false);
 type PaneSnapshotCollector = fn() -> Result<tmux::PaneSnapshotCollection, tmux::TmuxError>;
 type DaemonSnapshotRequester = fn(&Path) -> Result<ipc::SnapshotResponse, ipc::SnapshotClientError>;
@@ -1340,8 +1342,15 @@ impl App {
         true
     }
 
-    /// Collapse optional columns on narrow terminals unless the field is pinned.
-    fn apply_responsive_view_defaults(&mut self, _available_width: usize) {
+    /// Collapse unpinned optional columns only on narrow terminals.
+    ///
+    /// Below 100 cells, unpinned app/detail/stats columns collapse. At 100 cells or more,
+    /// configured or remembered unpinned visibility is preserved. Pinned choices always win.
+    fn apply_responsive_view_defaults(&mut self, available_width: usize) {
+        if available_width >= RESPONSIVE_OPTIONAL_COLUMN_MIN_WIDTH {
+            return;
+        }
+
         let mut changed = false;
 
         if !self.show_app_pinned && self.show_app {
@@ -2743,6 +2752,7 @@ mod tests {
         app.show_git = false;
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.request_daemon_snapshot = unavailable_daemon_snapshot;
         app.collect_pane_snapshots = sample_panes_for_output_tail_capture;
         app.capture_output_tails = panic_if_output_tail_capture_called;
 
@@ -2770,6 +2780,7 @@ mod tests {
         app.show_git = false;
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.request_daemon_snapshot = unavailable_daemon_snapshot;
         app.capture_output_tails = panic_if_output_tail_capture_called;
 
         app.collect_pane_snapshots = sample_running_pane_snapshot;
@@ -2802,6 +2813,7 @@ mod tests {
         app.show_git = false;
         app.process_cache =
             ProcessUsageCache::with_collector(DEFAULT_PROCESS_REFRESH_INTERVAL, sample_collector);
+        app.request_daemon_snapshot = unavailable_daemon_snapshot;
         app.capture_output_tails = panic_if_output_tail_capture_called;
 
         app.collect_pane_snapshots = sample_running_pane_snapshot;
@@ -2893,6 +2905,7 @@ mod tests {
         let mut app = App::default();
         app.show_git = false;
         app.output_tail_capture_enabled = false;
+        app.request_daemon_snapshot = unavailable_daemon_snapshot;
         app.collect_pane_snapshots = sample_running_pane_snapshot;
 
         app.refresh(false);
@@ -2938,7 +2951,7 @@ mod tests {
     fn responsive_defaults_keep_extra_columns_hidden_when_width_is_wide() {
         let mut app = App::default();
 
-        app.apply_responsive_view_defaults(81);
+        app.apply_responsive_view_defaults(120);
 
         assert!(!app.model.show_app);
         assert!(app.model.show_attention);
@@ -2962,6 +2975,42 @@ mod tests {
         assert!(app.model.show_output);
         assert!(!app.model.show_stats);
         assert!(app.model.show_git);
+    }
+
+    #[test]
+    fn responsive_defaults_collapse_unpinned_optional_columns_only_below_100_cells() {
+        let mut app = App {
+            show_app: true,
+            show_detail: true,
+            show_stats: true,
+            show_app_pinned: false,
+            show_detail_pinned: false,
+            show_stats_pinned: false,
+            ..Default::default()
+        };
+
+        app.apply_responsive_view_defaults(99);
+        assert!(!app.show_app);
+        assert!(!app.show_detail);
+        assert!(!app.show_stats);
+        assert!(!app.model.show_app);
+        assert!(!app.model.show_detail);
+        assert!(!app.model.show_stats);
+        assert!(app.show_attention, "attention is not an optional collapsed column");
+
+        let mut wide = App {
+            show_app: true,
+            show_detail: true,
+            show_stats: true,
+            show_app_pinned: false,
+            show_detail_pinned: false,
+            show_stats_pinned: false,
+            ..Default::default()
+        };
+        wide.apply_responsive_view_defaults(100);
+        assert!(wide.show_app, "unpinned configured visibility is preserved at 100+");
+        assert!(wide.show_detail);
+        assert!(wide.show_stats);
     }
 
     #[test]
@@ -2989,6 +3038,23 @@ mod tests {
         assert!(app.model.show_time);
         assert!(app.model.show_output);
         assert!(!app.model.show_stats);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn failed_daemon_snapshot_falls_through_to_direct_scan() {
+        let mut app = App::default();
+        app.show_git = false;
+        app.output_tail_capture_enabled = false;
+        app.request_daemon_snapshot = unavailable_daemon_snapshot;
+        app.collect_pane_snapshots = sample_running_pane_snapshot;
+
+        app.refresh(false);
+
+        assert!(app.has_good_rows, "direct scan remains authoritative after daemon miss");
+        assert_eq!(app.sessions[0].pane.pane_id, "%5");
+        // Lifecycle alone must not invent attention; durable-bit hydrate is covered in tmux_state.
+        assert!(app.sessions.iter().all(|session| !session.attention));
     }
 
     #[test]

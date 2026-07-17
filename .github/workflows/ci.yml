@@ -44,9 +44,23 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Test Suite
+    name: Test (${{ matrix.name }})
     needs: [fmt]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimal
+            features: --no-default-features
+          - name: tui-only
+            features: --no-default-features --features tui
+          - name: socket-only
+            features: --no-default-features --features socket
+          - name: mcp-only
+            features: --no-default-features --features mcp
+          - name: all-features
+            features: --all-features
     steps:
       - uses: actions/checkout@v5
       - name: Install Rust
@@ -54,8 +68,33 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}-${{ matrix.name }}
           save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
       - name: Run tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets ${{ matrix.features }}
+
+  tmux-integration:
+    name: Tmux Integration
+    needs: [fmt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-${{ runner.os }}-${{ runner.arch }}-tmux
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
+      - name: Build all-features binary
+        run: cargo build --all-features
+      - name: Run tmux plugin integration
+        run: bash tests/tmux_plugin_integration.sh
+      - name: Run tmux daemon integration
+        run: bash tests/tmux_daemon_integration.sh
+        env:
+          ILMARI_BIN: ${{ github.workspace }}/target/debug/ilmari
