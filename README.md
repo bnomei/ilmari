@@ -16,6 +16,10 @@ manage workflows, or own your tmux layout.
 
 [![Ilmari tmux popup screenshot](https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot.png)](https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot.png)
 
+[![Ilmari tmux popup screenshot agent status](https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot-2.png)](https://raw.githubusercontent.com/bnomei/ilmari/main/screenshot-2.png)
+
+
+
 ## What it helps you answer
 
 Use Ilmari when one tmux workspace has several agent sessions and you need to
@@ -101,32 +105,59 @@ ilmari <version>
 ```
 
 
-### TPM tmux plugin
+### 2. Connect Ilmari to tmux
 
-If you manage tmux plugins with [TPM](https://github.com/tmux-plugins/tpm), you
-can install Ilmari as a small tmux plugin that wires the popup binding for you.
-The plugin still expects the `ilmari` binary to already be installed and visible
-on tmux's `PATH`:
+#### TPM plugin (recommended)
 
-```tmux
-set -g @plugin 'bnomei/ilmari'
+Use [TPM (Tmux Plugin Manager)](https://github.com/tmux-plugins/tpm) when you
+want the normal Ilmari experience: a popup key, a per-server collector daemon,
+and cleanup when that daemon is stopped. TPM is tmux integration, not the
+Ilmari installation. Install the `ilmari` binary first, and make it available
+to the tmux server's `PATH`.
+
+1. Add this line before TPM's `run ... tpm` line in `~/.tmux.conf`:
+
+   ```tmux
+   set -g @plugin 'bnomei/ilmari'
+   ```
+
+2. Reload the tmux configuration:
+
+   ```bash
+   tmux source-file ~/.tmux.conf
+   ```
+
+3. Press `prefix + I` so TPM fetches the plugin, then reload the configuration
+   once more.
+
+With no `@ilmari_*` configuration, the plugin:
+
+- binds `prefix + i` to open the Ilmari popup;
+- starts one daemon for the tmux server that loaded the plugin;
+- lets the popup use that daemon's fresh snapshot before falling back to a
+  direct tmux scan; and
+- publishes empty-safe badge and summary fragments for you to place in your
+  own theme.
+
+Run this from a pane in that tmux server to verify the default daemon started:
+
+```bash
+ilmari daemon status
 ```
 
-Reload tmux and install the plugin with `prefix + I`. By default it binds
-`prefix + i` to the same popup command shown in the quickstart and starts one
-singleton daemon for the current tmux server. Configure these options before TPM
-initializes plugins:
+Expected output:
 
-```tmux
-set -g @ilmari_key 'I'
-set -g @ilmari_command '/opt/homebrew/bin/ilmari --no-git'
-set -g @ilmari_popup_width '90%'
-set -g @ilmari_popup_height '85%'
-set -g @ilmari_bind_key 'on'
-set -g @ilmari_daemon 'on'
-set -g @ilmari_daemon_command '/opt/homebrew/bin/ilmari daemon start'
-set -g @ilmari_daemon_stop_command '/opt/homebrew/bin/ilmari daemon stop'
+```text
+running
 ```
+
+The plugin pins every lifecycle action to the tmux server that loaded it. A
+reload does not start a duplicate healthy daemon.
+
+#### TPM options (optional)
+
+Configure these options before TPM initializes its plugins. You do not need to
+set any of them for the defaults above.
 
 | TPM option | Default | Purpose |
 | --- | --- | --- |
@@ -140,13 +171,18 @@ set -g @ilmari_daemon_stop_command '/opt/homebrew/bin/ilmari daemon stop'
 | `@ilmari_daemon_command` | `ilmari daemon start` | Foreground daemon command that the plugin starts in the background. |
 | `@ilmari_daemon_stop_command` | `ilmari daemon stop` | Command used to stop the daemon when daemon management is disabled. Set it explicitly whenever the start command is customized. |
 
-Set `@ilmari_bind_key` to `off` if you want TPM to install the plugin but prefer
-to define your own binding. Set `@ilmari_daemon` to `off` to stop the daemon for
-that tmux server and clear Ilmari's published pane/global state. Reloading with
-the daemon enabled is safe: `daemon start` recognizes the healthy compatible
-instance and exits successfully instead of starting a duplicate. The plugin
-pins daemon lifecycle and all its own tmux commands to the socket of the server
-that loaded it.
+If tmux cannot find the binary even though your interactive shell can, configure
+the popup and daemon commands as one matching absolute-path pair:
+
+```tmux
+set -g @ilmari_command '/absolute/path/to/ilmari'
+set -g @ilmari_daemon_command '/absolute/path/to/ilmari daemon start'
+set -g @ilmari_daemon_stop_command '/absolute/path/to/ilmari daemon stop'
+```
+
+Set `@ilmari_bind_key` to `off` when you want TPM to manage the daemon but use a
+different popup binding. Set `@ilmari_daemon` to `off` to stop the daemon for
+that tmux server and clear Ilmari's published pane and global state.
 
 The start and stop options are an explicit pair of shell commands; the plugin
 does not try to derive one from the other. If the start command uses an absolute
@@ -154,15 +190,25 @@ path, wrapper, or additional arguments, configure a matching stop command too.
 Both commands receive the same originating `TMUX` context, including custom
 socket paths that contain commas.
 
-### 2. Add a tmux popup binding
+#### Manual popup binding (without TPM)
 
-Add this to `~/.tmux.conf`:
+Use this alternative when you do not use TPM, or when `@ilmari_bind_key` is set
+to `off` and you want a custom key or popup shape. It opens the interactive
+radar but does not start the daemon for you:
 
 ```tmux
 bind-key i display-popup -E -w 90% -h 85% "ilmari"
 ```
 
-Reload tmux:
+If you want daemon-backed refreshes and published tmux fragments without TPM,
+run this foreground collector from that tmux server in a dedicated pane or under
+your service manager:
+
+```bash
+ilmari daemon start
+```
+
+Reload tmux after changing the binding:
 
 ```bash
 tmux source-file ~/.tmux.conf
@@ -295,46 +341,58 @@ being replaced by an empty display.
 command-based tmux status and menu helpers. It exits successfully without output
 when the renderer is disabled or no daemon state is available.
 
-## Tmux badges and status placement
+## Put Ilmari UI in your tmux theme
 
-Ilmari publishes format fragments but never edits `window-status-format`,
-`window-status-current-format`, `status-left`, or `status-right`. Place the
-fragments wherever they fit your theme, for example:
+The default TPM setup starts the daemon and makes two format fragments
+available, but it does not edit your tmux theme. Add the fragments after your
+theme's own `window-status-*` and `status-*` settings. They are empty until a
+daemon has published state, so leaving the placement in your configuration is
+safe when no agents are running.
+
+### Add badges to window tabs
+
+Append the window fragment to both ordinary and selected window formats:
 
 ```tmux
 set -ag window-status-format ' #{E:@ilmari_window_badges}'
 set -ag window-status-current-format ' #{E:@ilmari_window_badges}'
-set -ag status-right ' #{E:@ilmari_status_summary}'
 ```
+
+`-a` preserves the format your theme already set. The one literal space before
+`#{E:...}` is theme-owned separation; remove or change it if your existing
+format already supplies spacing. `#{E:...}` expands the daemon-published
+fragment as tmux format text. Set both options because tmux can use a different
+format for the selected window.
 
 `@ilmari_window_badges` can render more than one badge when a window contains
 multiple agent panes. It preserves the enclosing tmux style for each badge, so
-selected-window backgrounds remain continuous. `@ilmari_status_summary` uses
-the same state glyphs with only nonzero counts: sticky attention first, then
-ordinary waiting, finished, running, terminated, and unknown states. The
-original notification counts remain available as `@ilmari_waiting_count` and
-`@ilmari_finished_count`; `@ilmari_running_count` remains the live running
-count. `@ilmari_attention_count` is their combined attention total. Ordinary
-state counts are published separately as `@ilmari_waiting_state_count`,
-`@ilmari_finished_state_count`, `@ilmari_terminated_count`, and
-`@ilmari_unknown_count`, so no pane is counted in both attention and an
-ordinary state. Pane-local `@ilmari_state` and `@ilmari_badge` options are
-available to advanced custom formats.
+selected-window backgrounds remain continuous.
 
-Window badges include each agent's name only while the popup app column is
-enabled. Set `view.app = true`, or toggle `a` in the popup; remembered changes
-are reflected by the daemon on its next refresh. With the app column hidden,
-badges show only their state symbols.
+### Add the global summary to the status line
 
-Running state is live. Waiting-input and finished attention is sticky only after
-a qualifying transition occurs while that exact pane is not focused by any tmux
-client. Focusing the pane acknowledges it. An unchanged later scan does not
-recreate attention, but a later qualifying transition can. State for disappeared
-panes is removed.
+Choose one side of your status line and append the summary there. This example
+uses the right side:
 
-TOML supplies the default renderer enablement and symbols/styles. These tmux
-server-local overrides are polled and applied immediately without restarting
-the daemon:
+```tmux
+set -ag status-right ' #{E:@ilmari_status_summary}'
+```
+
+Use `status-left` instead when that is where your theme keeps global indicators.
+Do not set both unless you intentionally want the same summary twice. The
+summary uses the same configured glyphs as the popup and shows only nonzero
+counts: sticky attention first, then ordinary waiting, finished, running,
+terminated, and unknown states.
+
+### Control what is shown
+
+Window badges include agent names only while the popup app column is enabled.
+The built-in default is icon-only badges because `view.app` defaults to `false`.
+Set `view.app = true` in Ilmari's TOML configuration, or press `a` in the
+popup. With `view.remember = true` (the default), that popup choice is used by
+the daemon on a later refresh.
+
+Use these server-local tmux options to hide a placement without stopping the
+daemon or removing your theme configuration:
 
 ```tmux
 set -g @ilmari_badges_enabled 'off'
@@ -342,7 +400,29 @@ set -g @ilmari_status_enabled 'off'
 ```
 
 A disabled renderer publishes an empty fragment; collection, snapshots, and
-popup acceleration continue.
+popup acceleration continue. Turn either option back to `on` to show it again.
+
+### Published fragment and counter reference
+
+`@ilmari_status_summary` is the recommended global fragment. For a custom tmux
+format or menu helper, notification totals remain available as
+`@ilmari_waiting_count` and `@ilmari_finished_count`, while
+`@ilmari_running_count` is the live running count and
+`@ilmari_attention_count` is the combined sticky total. Ordinary counts are
+published separately as `@ilmari_waiting_state_count`,
+`@ilmari_finished_state_count`, `@ilmari_terminated_count`, and
+`@ilmari_unknown_count`, so no pane is counted in both attention and an
+ordinary state. Pane-local `@ilmari_state` and `@ilmari_badge` are available to
+advanced custom formats. Pane-local `@ilmari_attention` is `0` or `1` and
+carries the sticky attention latch across a popup's failed daemon snapshot
+followed by a direct scan; it is cleared with the other pane options when state
+is cleaned up or when the focused pane acknowledges attention.
+
+Running state is live. Waiting-input and finished attention is sticky only after
+a qualifying transition occurs while that exact pane is not focused by any tmux
+client. Focusing the pane acknowledges it. An unchanged later scan does not
+recreate attention, but a later qualifying transition can. State for disappeared
+panes is removed.
 
 Before uninstalling the TPM plugin, either set `@ilmari_daemon off` and reload
 tmux or run `ilmari daemon stop` from that tmux server. This stops its daemon and
