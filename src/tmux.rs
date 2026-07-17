@@ -287,7 +287,7 @@ fn generation_condition(identity: &TmuxServerIdentity) -> String {
 fn socket_file_condition(path: &str, device: u64, inode: u64) -> String {
     let path = shell_quote(&quote_tmux_format_literal(path));
     format!(
-        "ilmari_socket_identity=$(stat -f '%d:%i' -- {path} 2>/dev/null || stat -c '%d:%i' -- {path} 2>/dev/null) && test x\"$ilmari_socket_identity\" = x{}",
+        "ilmari_socket_identity=$(stat -c '%d:%i' -- {path} 2>/dev/null || stat -f '%d:%i' -- {path} 2>/dev/null) && test x\"$ilmari_socket_identity\" = x{}",
         shell_quote(&format!("{device}:{inode}"))
     )
 }
@@ -1001,7 +1001,9 @@ mod tests {
         assert!(argv[3].contains("#{pid}"));
         assert!(argv[3].contains("4312"));
         assert!(argv[3].contains("#{socket_path}"));
+        assert!(argv[3].contains("stat -c"));
         assert!(argv[3].contains("stat -f"));
+        assert!(argv[3].find("stat -c") < argv[3].find("stat -f"));
         assert!(argv[3].contains("1:99"));
         assert!(argv[4].contains(GENERATION_ACCEPTED_MARKER));
         assert!(argv[4].contains("list-panes"));
@@ -1043,7 +1045,9 @@ mod tests {
 
         let condition = super::generation_condition(&origin);
         assert!(condition.contains("#{==:#{pid},10}"));
+        assert!(condition.contains("stat -c"));
         assert!(condition.contains("stat -f"));
+        assert!(condition.find("stat -c") < condition.find("stat -f"));
         assert!(condition.contains("1:100"));
         assert!(!condition.contains("1:101"));
         assert_ne!(origin, replacement);

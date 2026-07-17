@@ -77,8 +77,8 @@ server_pid="$(tmux -S "$tmux_socket" display-message -p '#{pid}')"
 tmux_context="$tmux_socket,$server_pid,0"
 pane_id="$(tmux -S "$tmux_socket" display-message -p '#{pane_id}')"
 expected_socket_identity="$(
-  stat -f '%d:%i' -- "$tmux_socket" 2>/dev/null \
-    || stat -c '%d:%i' -- "$tmux_socket" 2>/dev/null
+  stat -c '%d:%i' -- "$tmux_socket" 2>/dev/null \
+    || stat -f '%d:%i' -- "$tmux_socket" 2>/dev/null
 )"
 tmux -S "$tmux_socket" set-environment -g PATH "$tmp_dir/bin:$PATH"
 tmux -S "$tmux_socket" set-environment -g ILMARI_TEST_LOG "$test_log"

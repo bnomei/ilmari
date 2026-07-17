@@ -55,7 +55,7 @@ tmux_cmd=(tmux -S "$tmux_socket")
 tmux_context="$tmux_socket,$tmux_server_pid,$tmux_client_id"
 
 socket_file_identity() {
-  stat -f '%d:%i' -- "$1" 2>/dev/null || stat -c '%d:%i' -- "$1" 2>/dev/null
+  stat -c '%d:%i' -- "$1" 2>/dev/null || stat -f '%d:%i' -- "$1" 2>/dev/null
 }
 
 tmux_socket_file_identity="$(socket_file_identity "$tmux_socket")"
@@ -130,7 +130,7 @@ append_tmux_command() {
 tmux_format_literal_into tmux_socket_format "$tmux_socket"
 shell_quote_into tmux_socket_stat_shell "$tmux_socket_format"
 tmux_guard_format="#{&&:#{==:#{pid},$tmux_server_pid},#{==:#{socket_path},$tmux_socket_format}}"
-tmux_guard_condition="test x$tmux_guard_format = x1 && ilmari_socket_identity=\$(stat -f '%d:%i' -- $tmux_socket_stat_shell 2>/dev/null || stat -c '%d:%i' -- $tmux_socket_stat_shell 2>/dev/null) && test x\"\$ilmari_socket_identity\" = x'$tmux_socket_file_identity'"
+tmux_guard_condition="test x$tmux_guard_format = x1 && ilmari_socket_identity=\$(stat -c '%d:%i' -- $tmux_socket_stat_shell 2>/dev/null || stat -f '%d:%i' -- $tmux_socket_stat_shell 2>/dev/null) && test x\"\$ilmari_socket_identity\" = x'$tmux_socket_file_identity'"
 tmux_guard_accepted='__ILMARI_TMUX_GENERATION_ACCEPTED__'
 tmux_guard_rejected='__ILMARI_TMUX_GENERATION_REJECTED__'
 tmux_guard_end='__ILMARI_TMUX_COMMAND_OUTPUT_END__'

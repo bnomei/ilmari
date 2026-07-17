@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.9.2 - 2026-07-17
+
+### Fixed
+
+- Fixed tmux socket-generation verification on GNU/Linux by using GNU `stat -c` before the BSD `stat -f` fallback, so TPM startup and lifecycle guards bind the originating server correctly.
+
 ## 0.9.1 - 2026-07-17
 
 ### Added
