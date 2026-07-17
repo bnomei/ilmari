@@ -804,6 +804,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "unicode-width",
 ]
 
 [[package]]

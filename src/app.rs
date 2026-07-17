@@ -30,7 +30,7 @@ use time::{OffsetDateTime, UtcOffset};
 
 use crate::agents::SessionTracker;
 use crate::colors::Palette;
-use crate::config::{LoadedConfig, ResolvedViews, ViewOverrides};
+use crate::config::{LoadedConfig, ResolvedViews, StatePresentations, ViewOverrides};
 use crate::git::{GitSummaryCache, GitSummaryReport};
 use crate::ipc::{
     self, IpcConfig, IpcError, IpcServer, PublishedState, PublishedStateHandle, StateBuildOptions,
@@ -74,6 +74,7 @@ pub struct AppConfig {
     pub reset_views: ResolvedViews,
     pub view_state_store: ViewStateStore,
     pub view_state_warning: Option<String>,
+    pub state_presentations: StatePresentations,
     pub render_settings: RenderSettings,
     pub daemon_mode: bool,
     pub ipc: IpcConfig,
@@ -118,9 +119,14 @@ impl AppConfig {
             reset_views,
             view_state_store: store,
             view_state_warning: remembered.warning,
+            state_presentations: values.states.clone().unwrap_or_default(),
             render_settings: RenderSettings::from_config(
+                &values.palette,
                 &values.badges,
                 &values.status,
+                values.states.as_ref(),
+                values.legacy_badge_state_formats,
+                values.legacy_status_state_formats,
                 show_agent_names,
             ),
             daemon_mode: false,
@@ -146,6 +152,7 @@ impl Default for AppConfig {
             reset_views: ResolvedViews::default(),
             view_state_store: ViewStateStore::disabled(),
             view_state_warning: None,
+            state_presentations: StatePresentations::default(),
             render_settings: RenderSettings::default(),
             daemon_mode: false,
             ipc: IpcConfig::disabled(),
@@ -310,6 +317,7 @@ struct App {
     status_line: String,
     git_summaries: Vec<GitSummaryRow>,
     palette: Palette,
+    state_presentations: StatePresentations,
     should_quit: bool,
     /// When true, activating a pane exits the popup (tmux popup workflow).
     quit_on_activate: bool,
@@ -557,6 +565,7 @@ impl App {
         app.view_state_store = config.view_state_store;
         app.view_remember = views.remember;
         app.reset_views = config.reset_views;
+        app.state_presentations = config.state_presentations;
         app.render_settings = config.render_settings;
         if let Some(warning) = config.view_state_warning {
             app.headless_warning = Some(match app.headless_warning.take() {
@@ -659,6 +668,7 @@ impl App {
             status_line,
             git_summaries: Vec::new(),
             palette,
+            state_presentations: StatePresentations::default(),
             should_quit: false,
             quit_on_activate,
             display_offset: display_utc_offset(),
@@ -710,7 +720,7 @@ impl App {
     #[cfg(feature = "tui")]
     fn draw(&mut self, frame: &mut Frame) {
         self.apply_responsive_view_defaults(available_render_width(frame));
-        ui::render(frame, &self.model, &self.palette);
+        ui::render(frame, &self.model, &self.palette, &self.state_presentations);
     }
 
     fn poll_timeout(&self) -> Duration {

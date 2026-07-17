@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
+use unicode_width::UnicodeWidthStr;
 
-use crate::colors::Palette;
+use crate::colors::{ColorSpec, Palette};
 use crate::view_state::ViewState;
 
 /// Built-in main refresh cadence (seconds) before TOML or CLI overrides.
@@ -33,6 +34,13 @@ pub struct Config {
     pub view: ViewConfig,
     pub badges: RendererConfig,
     pub status: RendererConfig,
+    /// Optional shared state presentation. When present it takes precedence over
+    /// legacy badge/status state templates and also drives the popup.
+    pub states: Option<StatePresentations>,
+    /// Legacy state entries were explicitly configured under `[badges]`.
+    pub legacy_badge_state_formats: bool,
+    /// Legacy state entries were explicitly configured under `[status]`.
+    pub legacy_status_state_formats: bool,
 }
 
 /// Refresh cadences for tmux scanning and process-tree hydration.
@@ -113,6 +121,59 @@ impl ViewConfig {
 pub struct StateFormat {
     pub symbol: String,
     pub style: String,
+}
+
+/// One state icon and validated foreground color shared by all Ilmari surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatePresentation {
+    pub icon: String,
+    pub color: ColorSpec,
+}
+
+impl StatePresentation {
+    /// Convert this safe presentation into tmux's small legacy renderer shape.
+    pub fn tmux_format(&self, palette: &Palette) -> StateFormat {
+        StateFormat { symbol: self.icon.clone(), style: self.color.tmux_foreground(palette) }
+    }
+}
+
+/// Canonical popup and tmux state presentation when `[states]` is configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatePresentations {
+    pub running: StatePresentation,
+    pub waiting_input: StatePresentation,
+    pub finished: StatePresentation,
+    pub terminated: StatePresentation,
+    pub unknown: StatePresentation,
+    /// Sticky tmux attention for unacknowledged waiting/finished panes.
+    pub attention: StatePresentation,
+}
+
+impl Default for StatePresentations {
+    fn default() -> Self {
+        Self {
+            running: state_presentation("▶", "palette:blue"),
+            waiting_input: state_presentation("●", "palette:yellow"),
+            finished: state_presentation("●", "palette:yellow"),
+            terminated: state_presentation("✖", "palette:red"),
+            unknown: state_presentation("?", "palette:bright_black"),
+            attention: state_presentation("?", "palette:yellow"),
+        }
+    }
+}
+
+impl StatePresentations {
+    #[cfg(feature = "tui")]
+    /// Look up the ordinary lifecycle presentation used by popup rows.
+    pub fn for_status(&self, status: crate::model::SessionStatus) -> &StatePresentation {
+        match status {
+            crate::model::SessionStatus::Running => &self.running,
+            crate::model::SessionStatus::WaitingInput => &self.waiting_input,
+            crate::model::SessionStatus::Finished => &self.finished,
+            crate::model::SessionStatus::Terminated => &self.terminated,
+            crate::model::SessionStatus::Unknown => &self.unknown,
+        }
+    }
 }
 
 /// Effective configuration for a user-placeable tmux renderer.
@@ -302,6 +363,8 @@ impl LoadedConfig {
                 None => Palette::default(),
             };
         let explicit_views = raw.view.overrides();
+        let legacy_badge_state_formats = raw.badges.has_state_format_overrides();
+        let legacy_status_state_formats = raw.status.has_state_format_overrides();
         let mut values = Config::default();
 
         values.runtime.refresh_seconds =
@@ -320,6 +383,17 @@ impl LoadedConfig {
         values.view = raw.view.merge(ViewConfig::default());
         values.badges = raw.badges.merge(RendererConfig::badges_default());
         values.status = raw.status.merge(RendererConfig::status_default());
+        values.states = raw
+            .states
+            .map(|states| states.merge(StatePresentations::default()))
+            .transpose()
+            .map_err(|(field, message)| ConfigError::Invalid {
+                path: path.clone(),
+                field,
+                message,
+            })?;
+        values.legacy_badge_state_formats = legacy_badge_state_formats;
+        values.legacy_status_state_formats = legacy_status_state_formats;
 
         Ok(Self { values, path: Some(path), loaded_from_file: true, explicit_views })
     }
@@ -340,6 +414,9 @@ impl Default for Config {
             view: ViewConfig::default(),
             badges: RendererConfig::badges_default(),
             status: RendererConfig::status_default(),
+            states: None,
+            legacy_badge_state_formats: false,
+            legacy_status_state_formats: false,
         }
     }
 }
@@ -382,6 +459,13 @@ impl RendererConfig {
 
 fn state_format(symbol: &str, style: &str) -> StateFormat {
     StateFormat { symbol: symbol.to_string(), style: style.to_string() }
+}
+
+fn state_presentation(icon: &str, color: &str) -> StatePresentation {
+    StatePresentation {
+        icon: icon.to_string(),
+        color: ColorSpec::parse(color).expect("built-in state color must be valid"),
+    }
 }
 
 /// Resolve one view boolean and whether it is pinned against responsive defaults.
@@ -464,6 +548,7 @@ struct RawConfig {
     view: RawViewConfig,
     badges: RawRendererConfig,
     status: RawRendererConfig,
+    states: Option<RawStatePresentations>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -555,6 +640,12 @@ struct RawRendererConfig {
 }
 
 impl RawRendererConfig {
+    fn has_state_format_overrides(&self) -> bool {
+        self.running.is_configured()
+            || self.waiting_input.is_configured()
+            || self.finished.is_configured()
+    }
+
     fn merge(self, defaults: RendererConfig) -> RendererConfig {
         RendererConfig {
             enabled: self.enabled.unwrap_or(defaults.enabled),
@@ -574,12 +665,86 @@ struct RawStateFormat {
 }
 
 impl RawStateFormat {
+    fn is_configured(&self) -> bool {
+        self.symbol.is_some() || self.style.is_some()
+    }
+
     fn merge(self, defaults: StateFormat) -> StateFormat {
         StateFormat {
             symbol: self.symbol.unwrap_or(defaults.symbol),
             style: self.style.unwrap_or(defaults.style),
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawStatePresentations {
+    running: RawStatePresentation,
+    waiting_input: RawStatePresentation,
+    finished: RawStatePresentation,
+    terminated: RawStatePresentation,
+    unknown: RawStatePresentation,
+    attention: RawStatePresentation,
+}
+
+impl RawStatePresentations {
+    fn merge(
+        self,
+        defaults: StatePresentations,
+    ) -> Result<StatePresentations, (&'static str, String)> {
+        Ok(StatePresentations {
+            running: self.running.merge(defaults.running, "states.running")?,
+            waiting_input: self
+                .waiting_input
+                .merge(defaults.waiting_input, "states.waiting_input")?,
+            finished: self.finished.merge(defaults.finished, "states.finished")?,
+            terminated: self.terminated.merge(defaults.terminated, "states.terminated")?,
+            unknown: self.unknown.merge(defaults.unknown, "states.unknown")?,
+            attention: self.attention.merge(defaults.attention, "states.attention")?,
+        })
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawStatePresentation {
+    icon: Option<String>,
+    color: Option<String>,
+}
+
+impl RawStatePresentation {
+    fn merge(
+        self,
+        defaults: StatePresentation,
+        field: &'static str,
+    ) -> Result<StatePresentation, (&'static str, String)> {
+        let icon = match self.icon {
+            Some(icon) => validate_state_icon(icon).map_err(|message| (field, message))?,
+            None => defaults.icon,
+        };
+        let color = match self.color {
+            Some(color) => ColorSpec::parse(&color).map_err(|message| (field, message))?,
+            None => defaults.color,
+        };
+        Ok(StatePresentation { icon, color })
+    }
+}
+
+fn validate_state_icon(icon: String) -> Result<String, String> {
+    if icon.chars().count() != 1 || UnicodeWidthStr::width(icon.as_str()) != 1 {
+        return Err(
+            "icon must be exactly one Unicode scalar with terminal display width one".to_string()
+        );
+    }
+    if icon.chars().any(|character| {
+        character.is_control() || matches!(character, '#' | ',' | '{' | '}' | '[' | ']')
+    }) {
+        return Err(
+            "icon may not contain control characters, `#`, `,`, `{`, `}`, `[`, or `]`".to_string()
+        );
+    }
+    Ok(icon)
 }
 
 #[cfg(test)]
@@ -637,6 +802,11 @@ mod tests {
             loaded.values.badges.waiting_input.symbol
         );
         assert_eq!(loaded.values.status.finished.symbol, loaded.values.badges.finished.symbol);
+        assert!(loaded.values.states.is_none());
+        assert_eq!(StatePresentations::default().running.icon, "▶");
+        assert_eq!(StatePresentations::default().waiting_input.icon, "●");
+        assert_eq!(StatePresentations::default().finished.icon, "●");
+        assert_eq!(StatePresentations::default().attention.icon, "?");
         assert_eq!(loaded.explicit_views(), ViewOverrides::default());
     }
 
@@ -733,6 +903,59 @@ style = "fg=cyan"
         assert_eq!(config.badges.waiting_input, state_format("WAIT", "fg=red,bold"));
         assert!(!config.status.enabled);
         assert_eq!(config.status.running, state_format("run", "fg=cyan"));
+        assert!(config.legacy_badge_state_formats);
+        assert!(config.legacy_status_state_formats);
+        assert!(config.states.is_none());
+    }
+
+    #[test]
+    fn shared_states_are_typed_and_override_legacy_renderer_templates() {
+        let path = write_config(
+            "shared-states",
+            r##"
+[badges.running]
+symbol = "legacy-badge"
+style = "fg=red,bold"
+
+[status.running]
+symbol = "legacy-status"
+style = "fg=green"
+
+[states.running]
+icon = "R"
+color = "palette:bright_blue"
+
+[states.waiting_input]
+icon = "W"
+color = "ansi:11"
+
+[states.finished]
+icon = "D"
+color = "#fedcba"
+
+[states.terminated]
+icon = "X"
+color = "red"
+
+[states.unknown]
+icon = "U"
+color = "default"
+
+[states.attention]
+icon = "!"
+color = "palette:yellow"
+"##,
+        );
+
+        let config = LoadedConfig::load_from_path(path).expect("valid shared states").values;
+        let states = config.states.expect("shared states configured");
+        assert_eq!(states.running.icon, "R");
+        assert_eq!(states.running.color, ColorSpec::parse("palette:bright_blue").unwrap());
+        assert_eq!(states.finished.icon, "D");
+        assert_eq!(states.finished.color, ColorSpec::parse("#fedcba").unwrap());
+        assert_eq!(states.attention.icon, "!");
+        assert!(config.legacy_badge_state_formats);
+        assert!(config.legacy_status_state_formats);
     }
 
     #[test]
@@ -756,6 +979,30 @@ style = "fg=cyan"
         let error = LoadedConfig::load_from_path(&palette).unwrap_err().to_string();
         assert!(error.contains("palette.colors"));
         assert!(error.contains("18 comma-separated"));
+
+        let unsafe_state = write_config(
+            "unsafe-state",
+            "[states.running]\nicon = \"#[fg=red]\"\ncolor = \"fg=red\"\n",
+        );
+        let error = LoadedConfig::load_from_path(&unsafe_state).unwrap_err().to_string();
+        assert!(error.contains("states.running"));
+        assert!(error.contains("exactly one Unicode scalar"));
+
+        for (label, icon, expected) in [
+            ("multi-state-icon", "ab", "exactly one Unicode scalar"),
+            ("wide-state-icon", "界", "terminal display width one"),
+            ("tmux-delimiter-icon", "}", "icon may not contain"),
+        ] {
+            let path = write_config(label, &format!("[states.running]\nicon = \"{icon}\"\n"));
+            let error = LoadedConfig::load_from_path(path).unwrap_err().to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+
+        let invalid_color =
+            write_config("invalid-state-color", "[states.running]\ncolor = \"fg=red\"\n");
+        let error = LoadedConfig::load_from_path(&invalid_color).unwrap_err().to_string();
+        assert!(error.contains("states.running"));
+        assert!(error.contains("expected `default`"));
     }
 
     #[test]

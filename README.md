@@ -289,7 +289,7 @@ direct tmux scan and will try the daemon again later. If both sources fail after
 a successful refresh, the last good rows stay visible with a warning instead of
 being replaced by an empty display.
 
-`ilmari status` prints the compact nonzero attention/running summary used by
+`ilmari status` prints the compact nonzero attention and lifecycle summary used by
 command-based tmux status and menu helpers. It exits successfully without output
 when the renderer is disabled or no daemon state is available.
 
@@ -308,11 +308,16 @@ set -ag status-right ' #{E:@ilmari_status_summary}'
 `@ilmari_window_badges` can render more than one badge when a window contains
 multiple agent panes. It preserves the enclosing tmux style for each badge, so
 selected-window backgrounds remain continuous. `@ilmari_status_summary` uses
-the same default state glyphs with only nonzero counts, in waiting-input,
-unacknowledged-finished, then running priority. The underlying counts are also
-available as `@ilmari_waiting_count`, `@ilmari_finished_count`, and
-`@ilmari_running_count`. Pane-local `@ilmari_state` and `@ilmari_badge` options
-are available to advanced custom formats.
+the same state glyphs with only nonzero counts: sticky attention first, then
+ordinary waiting, finished, running, terminated, and unknown states. The
+original notification counts remain available as `@ilmari_waiting_count` and
+`@ilmari_finished_count`; `@ilmari_running_count` remains the live running
+count. `@ilmari_attention_count` is their combined attention total. Ordinary
+state counts are published separately as `@ilmari_waiting_state_count`,
+`@ilmari_finished_state_count`, `@ilmari_terminated_count`, and
+`@ilmari_unknown_count`, so no pane is counted in both attention and an
+ordinary state. Pane-local `@ilmari_state` and `@ilmari_badge` options are
+available to advanced custom formats.
 
 Window badges include each agent's name only while the popup app column is
 enabled. Set `view.app = true`, or toggle `a` in the popup; remembered changes
@@ -389,32 +394,63 @@ remember = true
 enabled = true
 separator = " "
 
-[badges.running]
-symbol = "●"
-style = "fg=blue"
-
-[badges.waiting_input]
-symbol = "?"
-style = "fg=yellow"
-
-[badges.finished]
-symbol = "✓"
-style = "fg=green"
-
 [status]
 enabled = true
 separator = " "
 
-[status.running]
-symbol = "●"
-style = "fg=blue"
+[states.running]
+icon = "▶"
+color = "palette:blue"
 
-[status.waiting_input]
-symbol = "?"
-style = "fg=yellow"
+[states.waiting_input]
+icon = "●"
+color = "palette:yellow"
+
+[states.finished]
+icon = "●"
+color = "palette:yellow"
+
+[states.terminated]
+icon = "✖"
+color = "palette:red"
+
+[states.unknown]
+icon = "?"
+color = "palette:bright_black"
+
+[states.attention]
+icon = "?"
+color = "palette:yellow"
+```
+
+`[states]` is the shared presentation source for popup rows, window badges, and
+the global tmux summary. The ordinary states default to blue `▶` for running,
+yellow `●` for waiting and finished, red `✖` for terminated, and a bright-black
+`?` for unknown. `attention` is separate: it is the yellow `?` used by sticky
+tmux badges for panes that need focus. Attention takes precedence over a
+waiting or finished pane's ordinary glyph until that pane is focused or leaves
+that state. When any
+`[states.*]` subtable is present, it wins over legacy nested renderer formats.
+
+Every state has a plain `icon` and a validated `color`; colors accept
+`palette:<slot>` for any of Ilmari's sixteen palette slots, `ansi:<name-or-index>`
+(or a bare ANSI name/index), `#RRGGBB`, or `default`. Palette references use the
+active popup palette's resolved color in both the popup and tmux. Icons must be
+exactly one Unicode scalar with terminal display width one, and reject tmux
+format/control delimiters. Colors are rendered from typed values rather than
+inserted as raw tmux style strings.
+
+`[badges]` and `[status]` continue to own only their enable flags and
+separators. Existing legacy nested templates remain supported when `[states]`
+is absent and at least one legacy state field is explicitly set:
+
+```toml
+[badges.running]
+symbol = "run"
+style = "fg=cyan"
 
 [status.finished]
-symbol = "✓"
+symbol = "done"
 style = "fg=green"
 ```
 

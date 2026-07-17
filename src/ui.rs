@@ -11,8 +11,9 @@ use ratatui::widgets::{Block, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::colors::{Palette, SemanticRole};
+use crate::config::StatePresentations;
 use crate::model::{
-    AgentDetailTone, AppModel, GitSummaryRow, PaneRow, ResourceUsage, SessionStatus, WorkspaceGroup,
+    AgentDetailTone, AppModel, GitSummaryRow, PaneRow, ResourceUsage, WorkspaceGroup,
 };
 
 const FOOTER_BRAND: &str = "🅸 🅻 🅼 🅰 🆁 🅸 ";
@@ -28,22 +29,23 @@ const SUB_COL_WIDTH: usize = 14;
 const STATUS_COL_WIDTH: usize = 1;
 
 /// Draw the main workspace view and keyboard shortcut footer for one frame.
-pub fn render(frame: &mut Frame, model: &AppModel, palette: &Palette) {
+pub fn render(frame: &mut Frame, model: &AppModel, palette: &Palette, states: &StatePresentations) {
     let sections =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1), Constraint::Length(1)])
             .split(frame.area());
-    frame.render_widget(AppView::new(model, palette), sections[0]);
+    frame.render_widget(AppView::new(model, palette, states), sections[0]);
     frame.render_widget(FooterView::new(palette), sections[2]);
 }
 
 struct AppView<'a> {
     model: &'a AppModel,
     palette: &'a Palette,
+    states: &'a StatePresentations,
 }
 
 impl<'a> AppView<'a> {
-    fn new(model: &'a AppModel, palette: &'a Palette) -> Self {
-        Self { model, palette }
+    fn new(model: &'a AppModel, palette: &'a Palette, states: &'a StatePresentations) -> Self {
+        Self { model, palette, states }
     }
 }
 
@@ -64,9 +66,14 @@ impl Widget for AppView<'_> {
                 .style(self.palette.base_style())
                 .render(sections[0], buf);
         }
-        Paragraph::new(workspace_lines(self.model, self.palette, sections[1].width as usize))
-            .style(self.palette.base_style())
-            .render(sections[1], buf);
+        Paragraph::new(workspace_lines(
+            self.model,
+            self.palette,
+            self.states,
+            sections[1].width as usize,
+        ))
+        .style(self.palette.base_style())
+        .render(sections[1], buf);
     }
 }
 
@@ -90,6 +97,7 @@ impl Widget for FooterView<'_> {
 fn workspace_lines(
     model: &AppModel,
     palette: &Palette,
+    states: &StatePresentations,
     available_width: usize,
 ) -> Vec<Line<'static>> {
     if model.workspace_groups.is_empty() {
@@ -113,6 +121,7 @@ fn workspace_lines(
             lines.push(workspace_row_line(
                 row,
                 palette,
+                states,
                 model.show_app,
                 model.show_detail,
                 model.show_time,
@@ -257,16 +266,19 @@ fn push_raw_spaces(spans: &mut Vec<Span<'static>>, current_width: &mut usize, co
 }
 
 /// One pane row: optional time, status glyph, pane id, agent, detail, stats, excerpt.
+#[allow(clippy::too_many_arguments)]
 fn workspace_row_line(
     row: &PaneRow,
     palette: &Palette,
+    states: &StatePresentations,
     show_app: bool,
     show_detail: bool,
     show_time: bool,
     show_output: bool,
     show_stats: bool,
 ) -> Line<'static> {
-    let status_style = palette.style_for(status_role(row.status));
+    let presentation = states.for_status(row.status);
+    let status_style = palette.style_for_color(&presentation.color);
     let pane_label_style = pane_label_style(row, palette);
     let mut spans = Vec::new();
     let mut current_width = 0;
@@ -287,7 +299,7 @@ fn workspace_row_line(
     push_inline_span(
         &mut spans,
         &mut current_width,
-        truncate_cell(status_symbol(row.status), STATUS_COL_WIDTH),
+        truncate_cell(&presentation.icon, STATUS_COL_WIDTH),
         status_style,
     );
     push_raw_spaces(&mut spans, &mut current_width, 1);
@@ -358,9 +370,9 @@ fn workspace_row_line(
     }
 
     if row.is_selected {
-        let selected_style = selected_row_style(palette);
+        let selected_style = selected_row_style();
         for span in &mut spans {
-            span.style = selected_style;
+            span.style = span.style.patch(selected_style);
         }
         return Line::from(spans).style(selected_style);
     }
@@ -455,18 +467,8 @@ fn prefix_cluster_width(show_time: bool) -> usize {
     time_width + STATUS_COL_WIDTH + 1 + PANE_INLINE_WIDTH
 }
 
-fn status_symbol(status: SessionStatus) -> &'static str {
-    match status {
-        SessionStatus::Running => "▶",
-        SessionStatus::WaitingInput => "●",
-        SessionStatus::Finished => "✔",
-        SessionStatus::Terminated => "✖",
-        SessionStatus::Unknown => "?",
-    }
-}
-
-fn selected_row_style(palette: &Palette) -> Style {
-    palette.base_style().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+fn selected_row_style() -> Style {
+    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
 }
 
 /// Keyboard shortcut footer; switches to a compact key list under the width breakpoint.
@@ -547,16 +549,6 @@ fn compact_footer_line(key_style: Style, sep_style: Style) -> Line<'static> {
     Line::from(spans)
 }
 
-fn status_role(status: SessionStatus) -> SemanticRole {
-    match status {
-        SessionStatus::Running => SemanticRole::StatusRunning,
-        SessionStatus::WaitingInput => SemanticRole::StatusWaitingInput,
-        SessionStatus::Finished => SemanticRole::StatusFinished,
-        SessionStatus::Terminated => SemanticRole::StatusTerminated,
-        SessionStatus::Unknown => SemanticRole::StatusUnknown,
-    }
-}
-
 fn detail_role(tone: AgentDetailTone) -> SemanticRole {
     match tone {
         AgentDetailTone::Neutral => SemanticRole::AgentDetailNeutral,
@@ -622,11 +614,11 @@ fn format_memory_kib(memory_kib: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_footer_line, footer_line, format_usage_chip, selected_row_style,
-        workspace_header_line, workspace_header_lines, workspace_row_line, FOOTER_BRAND,
-        FOOTER_COMPACT_BREAKPOINT,
+        compact_footer_line, footer_line, format_usage_chip, workspace_header_line,
+        workspace_header_lines, workspace_row_line, FOOTER_BRAND, FOOTER_COMPACT_BREAKPOINT,
     };
-    use crate::colors::{Palette, SemanticRole};
+    use crate::colors::{ColorSpec, Palette, SemanticRole};
+    use crate::config::{LoadedConfig, StatePresentation, StatePresentations};
     use crate::model::{
         AgentDetail, AgentDetailTone, AppModel, GitSummaryRow, PaneRow, ResourceUsage,
         SessionProcessUsage, SessionStatus, SubtaskProcess, WorkspaceGroup,
@@ -635,6 +627,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
+    use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, Instant, SystemTime};
 
@@ -674,7 +667,16 @@ mod tests {
             is_selected: false,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, true, true, true, true, true);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
         let time_cell = "14:27";
         let output_cell = "Could you clarify what you'd like me to help with?";
         let self_usage_label =
@@ -735,6 +737,116 @@ mod tests {
     }
 
     #[test]
+    fn shared_state_presentation_controls_popup_icon_and_color() {
+        let row = PaneRow {
+            pane_id: "%7".to_string(),
+            inactive_since_label: String::new(),
+            output_excerpt: None,
+            client_label: "Codex",
+            detail: None,
+            process_usage: None,
+            subtasks_expanded: false,
+            status: SessionStatus::Running,
+            status_label: "running",
+            is_jump_match: false,
+            is_selected: true,
+        };
+        let states = StatePresentations {
+            running: StatePresentation {
+                icon: "R".to_string(),
+                color: ColorSpec::parse("#123456").expect("valid state color"),
+            },
+            ..StatePresentations::default()
+        };
+
+        let line = workspace_row_line(
+            &row,
+            &Palette::default(),
+            &states,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        let status_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "R")
+            .expect("configured state icon");
+        assert_eq!(status_span.style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+        assert!(status_span.style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn custom_shared_config_drives_popup_and_tmux_presentations() {
+        let path = std::env::temp_dir().join(format!(
+            "ilmari-ui-states-{}-{}.toml",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        fs::write(
+            &path,
+            r##"
+[states.running]
+icon = "R"
+color = "#123456"
+
+[states.attention]
+icon = "!"
+color = "palette:yellow"
+"##,
+        )
+        .expect("write shared state config");
+        let config = LoadedConfig::load_from_path(&path).expect("load shared state config").values;
+        fs::remove_file(&path).expect("remove shared state config");
+        let states = config.states.as_ref().expect("states configured");
+
+        let row = PaneRow {
+            pane_id: "%7".to_string(),
+            inactive_since_label: String::new(),
+            output_excerpt: None,
+            client_label: "Codex",
+            detail: None,
+            process_usage: None,
+            subtasks_expanded: false,
+            status: SessionStatus::Running,
+            status_label: "running",
+            is_jump_match: false,
+            is_selected: false,
+        };
+        let line = workspace_row_line(
+            &row,
+            &Palette::default(),
+            states,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        let popup_status = line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "R")
+            .expect("popup uses configured running icon");
+        assert_eq!(popup_status.style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+
+        let tmux = crate::tmux_state::RenderSettings::from_config(
+            &config.palette,
+            &config.badges,
+            &config.status,
+            config.states.as_ref(),
+            config.legacy_badge_state_formats,
+            config.legacy_status_state_formats,
+            false,
+        );
+        assert_eq!(tmux.badge_running.symbol, "R");
+        assert_eq!(tmux.badge_running.style, "fg=#123456");
+        assert_eq!(tmux.badge_attention.symbol, "!");
+    }
+
+    #[test]
     fn selected_workspace_row_uses_uniform_selection_style_for_all_spans() {
         let row = PaneRow {
             pane_id: "%7".to_string(),
@@ -770,17 +882,23 @@ mod tests {
             is_selected: true,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, true, true, true, true, true);
-        let selected_style = selected_row_style(&palette);
-
-        assert_eq!(line.style.fg, selected_style.fg);
-        assert_eq!(line.style.bg, selected_style.bg);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
         assert!(line.style.add_modifier.contains(Modifier::BOLD));
         assert!(line.style.add_modifier.contains(Modifier::REVERSED));
-        assert!(line.spans.iter().all(|span| span.style.fg == selected_style.fg));
-        assert!(line.spans.iter().all(|span| span.style.bg == selected_style.bg));
         assert!(line.spans.iter().all(|span| span.style.add_modifier.contains(Modifier::BOLD)));
         assert!(line.spans.iter().all(|span| span.style.add_modifier.contains(Modifier::REVERSED)));
+        let status_span =
+            line.spans.iter().find(|span| span.content.as_ref() == "●").expect("status span");
+        assert_eq!(status_span.style.fg, Some(Color::Indexed(3)));
     }
 
     #[test]
@@ -799,7 +917,16 @@ mod tests {
             is_selected: false,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, false, false, true, false, false);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            false,
+            false,
+            true,
+            false,
+            false,
+        );
         let time_cell = "14:27";
         let status_cell = "●";
         let pane_cell = "%7";
@@ -839,7 +966,16 @@ mod tests {
             is_selected: false,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, false, false, true, false, false);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            false,
+            false,
+            true,
+            false,
+            false,
+        );
 
         assert_eq!(line.spans[0].content.as_ref(), "     ");
         assert_eq!(line.spans[1].content.as_ref(), " ");
@@ -866,7 +1002,16 @@ mod tests {
             is_selected: false,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, true, true, false, true, false);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            true,
+            true,
+            false,
+            true,
+            false,
+        );
 
         let detail_span =
             line.spans.iter().find(|span| span.content.as_ref() == "smart").expect("detail span");
@@ -899,7 +1044,16 @@ mod tests {
             is_selected: false,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, true, true, true, true, true);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
         let app_position =
             line.spans.iter().position(|span| span.content.as_ref() == "Amp").expect("app span");
         let detail_position = line
@@ -939,7 +1093,16 @@ mod tests {
             is_selected: false,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, false, false, false, false, false);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
         let pane_cell = "%19";
         let pane_span =
             line.spans.iter().find(|span| span.content.as_ref() == pane_cell).expect("pane span");
@@ -1137,6 +1300,7 @@ mod tests {
                 last_refresh_wallclock: SystemTime::now(),
             },
             &palette,
+            &StatePresentations::default(),
             120,
         );
         let text = lines
@@ -1205,6 +1369,7 @@ mod tests {
                 last_refresh_wallclock: SystemTime::now(),
             },
             &palette,
+            &StatePresentations::default(),
             120,
         );
         let subtask_text =
@@ -1298,7 +1463,9 @@ mod tests {
         let backend = TestBackend::new(FOOTER_COMPACT_BREAKPOINT - 1, 8);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
 
-        terminal.draw(|frame| super::render(frame, &model, &palette)).expect("frame should render");
+        terminal
+            .draw(|frame| super::render(frame, &model, &palette, &StatePresentations::default()))
+            .expect("frame should render");
 
         let buffer = terminal.backend().buffer();
 
@@ -1357,7 +1524,9 @@ mod tests {
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).expect("terminal should initialize");
 
-        terminal.draw(|frame| super::render(frame, &model, &palette)).expect("frame should render");
+        terminal
+            .draw(|frame| super::render(frame, &model, &palette, &StatePresentations::default()))
+            .expect("frame should render");
 
         let buffer = terminal.backend().buffer();
 
@@ -1401,7 +1570,16 @@ mod tests {
             is_selected: false,
         };
         let palette = Palette::default();
-        let line = workspace_row_line(&row, &palette, false, false, false, false, false);
+        let line = workspace_row_line(
+            &row,
+            &palette,
+            &StatePresentations::default(),
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
         let text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
 
         assert!(!text.contains("gpt-5.4 xhigh fast"));

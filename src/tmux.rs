@@ -740,6 +740,11 @@ pub fn clear_published_state(
         "@ilmari_running_count",
         "@ilmari_waiting_count",
         "@ilmari_finished_count",
+        "@ilmari_attention_count",
+        "@ilmari_waiting_state_count",
+        "@ilmari_finished_state_count",
+        "@ilmari_terminated_count",
+        "@ilmari_unknown_count",
     ] {
         cleanup.push(TmuxCommand::new(["set-option", "-gu", option]));
     }

@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Added typed shared `[states]` icon/color presentations for popup rows, tmux window badges, and global summaries, including palette-resolved, ANSI, RGB, and default color forms plus a separate sticky-attention glyph.
+- Added explicit global tmux counts for combined attention and ordinary waiting, finished, terminated, and unknown states while retaining the existing notification count options.
+
 ### Fixed
 
 - Kept selected-window backgrounds continuous across multiple tmux agent badges and aligned the default global summary glyphs with badge glyphs.
 - Made tmux window badges follow the effective popup app-column setting, rendering state symbols without agent names whenever that column is hidden.
+- Restricted shared state icons to one safe terminal cell, rejecting tmux format delimiters and display-width mismatches between popup and tmux.
 
 ## 0.8.0 - 2026-07-16
 

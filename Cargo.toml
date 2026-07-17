@@ -34,6 +34,7 @@ time = { version = "0.3", features = ["formatting", "local-offset"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync"], optional = true }
 tokio-util = { version = "0.7", optional = true }
 toml = "0.9.12"
+unicode-width = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.183"
