@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.1 - 2026-07-17
+
 ### Added
 
 - Added prebuilt `cargo binstall ilmari` downloads for macOS and Linux, including GNU-host mapping to Ilmari's static musl release assets.
