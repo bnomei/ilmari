@@ -1,0 +1,20 @@
+{
+  "name": "@bnomei/ilmari",
+  "version": "0.9.0",
+  "description": "Ilmari tmux coding-agent radar launcher.",
+  "homepage": "https://github.com/bnomei/ilmari",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bnomei/ilmari.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "ilmari": "bin/ilmari.js"
+  },
+  "files": [
+    "bin/ilmari.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

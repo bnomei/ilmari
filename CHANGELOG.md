@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Added prebuilt `cargo binstall ilmari` downloads for macOS and Linux, including GNU-host mapping to Ilmari's static musl release assets.
+- Added the `npx @bnomei/ilmari` launcher, which downloads, verifies, and caches the matching macOS or Linux release binary.
+
 ## 0.9.0 - 2026-07-17
 
 ### Added
@@ -14,7 +19,6 @@
 
 ### Changed
 
-- TPM now starts the daemon by default as the per-server popup accelerator while leaving window-tab and status-line placement under the user's tmux theme.
 - Daemon startup now cooperatively replaces an owned healthy daemon when its configured socket path changes, without accepting a foreign endpoint.
 - Responsive optional popup columns collapse only below 100 cells unless the user has explicitly pinned their visibility.
 
@@ -22,7 +26,7 @@
 
 - Kept selected-window backgrounds continuous across multiple tmux agent badges and aligned the default global summary glyphs with badge glyphs.
 - Made tmux window badges follow the effective popup app-column setting, rendering state symbols without agent names whenever that column is hidden.
-- Restricted shared state icons to one safe terminal cell, rejecting tmux format delimiters and display-width mismatches between popup and tmux.
+- Validated all tmux-rendered badge and status symbols and separators, and restricted shared `[states]` icons to one safe terminal cell, rejecting format delimiters and display-width mismatches.
 - Kept popup selection neutral and full-width while preserving configured attention and lifecycle glyph foreground colors.
 - Cleared all daemon-owned pane and global renderer options during TPM fallback cleanup, and hardened tmux format escaping and numeric window ordering.
 

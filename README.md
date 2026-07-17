@@ -237,6 +237,29 @@ target pane and Ilmari keeps running.
 cargo install ilmari
 ```
 
+### Cargo binstall
+
+Download the matching prebuilt release binary instead of compiling it locally:
+
+```bash
+cargo binstall ilmari
+```
+
+### npm / npx
+
+The npm package is a small launcher: on its first run it downloads the matching
+verified GitHub Release binary into a local cache, then forwards Ilmari's
+arguments. Node.js 18 or newer is required.
+
+```bash
+npx @bnomei/ilmari --version
+```
+
+It supports macOS (Intel and Apple Silicon) and Linux (x86_64 and ARM64 musl)
+only. Windows is intentionally unsupported because Ilmari requires a Unix-like
+tmux environment. Set `ILMARI_NPM_CACHE` to choose a different binary cache
+location.
+
 ### Homebrew
 
 ```bash
