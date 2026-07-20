@@ -36,8 +36,13 @@ fail() {
 [[ -x "$ilmari_bin" ]] || fail "binary not found: $ilmari_bin (run cargo build --all-features)"
 mkdir -m 700 -p "$runtime_dir" "$config_dir" "$state_dir"
 tmux -S "$tmux_socket" new-session -d -s ilmari-daemon 'sleep 120'
-server_pid="$(tmux -S "$tmux_socket" display-message -p '#{pid}')"
-tmux_context="$tmux_socket,$server_pid,0"
+
+refresh_tmux_context() {
+  server_pid="$(tmux -S "$tmux_socket" display-message -p '#{pid}')"
+  tmux_context="$tmux_socket,$server_pid,0"
+}
+
+refresh_tmux_context
 
 run_ilmari() {
   TMUX="$tmux_context" XDG_RUNTIME_DIR="$runtime_dir" \
@@ -63,6 +68,34 @@ fi
 # A compatible second start must succeed without replacing the collector.
 run_ilmari daemon start
 kill -0 "$daemon_pid" 2>/dev/null || fail 'singleton start replaced or stopped the daemon'
+
+# A tmux restart can reuse the same socket pathname but creates a new server
+# generation. The old daemon must be identified as an owned incompatible peer,
+# stopped cooperatively, and replaced without needing another plugin reload.
+old_daemon_pid="$daemon_pid"
+tmux -S "$tmux_socket" kill-server
+tmux -S "$tmux_socket" new-session -d -s ilmari-daemon-restarted 'sleep 120'
+refresh_tmux_context
+# Server-global options are intentionally lost with the old server. Restore the
+# popup-owned legacy URL before the replacement daemon publishes its own state.
+tmux -S "$tmux_socket" set-option -g @ilmari_mcp_url "$popup_mcp_url"
+run_ilmari daemon start --mcp --mcp-port 0 >"$tmp_dir/restarted-daemon.log" 2>&1 &
+daemon_pid="$!"
+for _ in {1..100}; do
+  [[ "$(run_ilmari daemon status)" == 'running' ]] && break
+  sleep 0.05
+done
+if [[ "$(run_ilmari daemon status)" != 'running' ]]; then
+  sed -n '1,120p' "$tmp_dir/restarted-daemon.log" >&2
+  fail 'daemon did not recover after tmux server replacement'
+fi
+for _ in {1..100}; do
+  kill -0 "$old_daemon_pid" 2>/dev/null || break
+  sleep 0.05
+done
+kill -0 "$old_daemon_pid" 2>/dev/null \
+  && fail 'tmux server replacement did not stop the stale daemon'
+wait "$old_daemon_pid" 2>/dev/null || true
 
 # Learn the default daemon target, then deliberately move the owned collector
 # elsewhere. A regular Ilmari IPC server now occupies the old target as a
