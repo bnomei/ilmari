@@ -8,7 +8,7 @@ use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};
 use crate::tmux::PaneSnapshot;
 
 use super::super::{
-    classify_supported_session, command_matches, extract_amp_detail, extract_amp_output_excerpt,
+    classify_amp_session, command_matches, extract_amp_detail, extract_amp_output_excerpt,
     reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
 };
 
@@ -31,7 +31,7 @@ impl AgentAdapter for AmpAdapter {
         output_fingerprint: Option<u64>,
         previous: Option<&SessionRecord>,
     ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
+        classify_amp_session(self, pane, output_tail, output_fingerprint, previous)
     }
 
     fn extract_detail(

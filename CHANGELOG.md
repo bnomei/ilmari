@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.9.4 - 2026-07-20
+
+### Fixed
+
+- Track Amp's animated `≈`/`≋`/`∼` activity footer, status text, and token-count changes as running activity instead of discarding the entire bottom border as terminal chrome.
+
 ## 0.9.3 - 2026-07-20
 
 ### Fixed

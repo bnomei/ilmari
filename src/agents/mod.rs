@@ -391,6 +391,28 @@ fn classify_supported_session(
     )
 }
 
+/// Amp-specific classifier: its animated bottom-border status is an explicit Running signal.
+fn classify_amp_session(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+) -> SessionStatus {
+    classify_supported_session_with_tail_classifier(
+        adapter,
+        pane,
+        output_tail,
+        output_fingerprint,
+        previous,
+        |output_tail| {
+            looks_like_amp_active_footer(output_tail)
+                .then_some(SessionStatus::Running)
+                .or_else(|| classify_output_tail(output_tail))
+        },
+    )
+}
+
 /// Antigravity-specific classifier using that agent's footer/prompt tail patterns.
 fn classify_antigravity_session(
     adapter: &dyn AgentAdapter,
@@ -1178,6 +1200,19 @@ fn is_amp_output_noise(raw: &str, normalized: &str) -> bool {
         || (normalized.chars().count() == 1 && raw.trim_start().starts_with(['│', '┃']))
 }
 
+fn looks_like_amp_active_footer(output_tail: &str) -> bool {
+    output_tail
+        .lines()
+        .rev()
+        .take(AMP_STATUS_SIGNAL_WINDOW_LINES)
+        .any(|raw| is_amp_active_footer_line(raw.trim(), &normalize_output_line(raw.trim())))
+}
+
+fn is_amp_active_footer_line(raw: &str, normalized: &str) -> bool {
+    raw.trim_start().starts_with('╰')
+        && matches!(normalized.split_whitespace().next(), Some("≈" | "≋" | "∼"))
+}
+
 fn extract_claude_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
     extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
@@ -1687,7 +1722,10 @@ fn amp_output_fingerprint(output_tail: &str) -> Option<u64> {
         }
 
         let normalized = normalize_output_line(trimmed);
-        if normalized.is_empty() || is_amp_output_noise(trimmed, &normalized) {
+        if normalized.is_empty()
+            || (!is_amp_active_footer_line(trimmed, &normalized)
+                && is_amp_output_noise(trimmed, &normalized))
+        {
             continue;
         }
 
@@ -4405,6 +4443,23 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
     }
 
     #[test]
+    fn amp_fingerprint_tracks_active_footer_animation_status_and_tokens() {
+        let first = "\
+ Writing the core validation module next.
+╭───────────────────────────────────────────────────── $0.24 ─ grok 4.5 ─╮
+│                                                                         │
+╰ ≈ Streaming 10 tok ─────────────────────────────── ~/workspace (main) ─╯
+";
+        let next_wave = first.replace("≈ Streaming", "≋ Streaming");
+        let next_status = first.replace("Streaming 10 tok", "Running Tools");
+        let next_token = first.replace("Streaming 10 tok", "Streaming 11 tok");
+
+        assert_ne!(amp_output_fingerprint(first), amp_output_fingerprint(&next_wave));
+        assert_ne!(amp_output_fingerprint(first), amp_output_fingerprint(&next_status));
+        assert_ne!(amp_output_fingerprint(first), amp_output_fingerprint(&next_token));
+    }
+
+    #[test]
     fn tracker_keeps_amp_waiting_when_compact_chrome_changes() {
         let mut tracker = SessionTracker::new();
         let pane = snapshot("%30", "amp", false);
@@ -4449,7 +4504,7 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
     }
 
     #[test]
-    fn tracker_marks_amp_running_when_bottom_status_changes() {
+    fn tracker_marks_amp_running_from_active_footer() {
         let mut tracker = SessionTracker::new();
         let pane = snapshot("%30", "amp", false);
         let now = Instant::now();
@@ -4473,9 +4528,9 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
 
  Hello!
 ╭────────────────────────────────────────────────────────── $0.001 ─ ↯rush ─╮
-│ streaming tokens                                                          │
 │                                                                           │
-╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+│                                                                           │
+╰ ≈ Streaming 10 tok ───────────────────────────────── ~/workspace (main) ─╯
 "
             .to_string(),
         )]);
@@ -4486,6 +4541,32 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
         let second = tracker.refresh(
             std::slice::from_ref(&pane),
             &running_output,
+            now + Duration::from_secs(5),
+        );
+
+        assert_eq!(second[0].status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn tracker_keeps_amp_running_when_only_activity_wave_changes() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot("%30", "amp", false);
+        let now = Instant::now();
+        let first_output = HashMap::from([(
+            pane.pane_id.clone(),
+            "╰ ≈ Streaming 10 tok ───────────────── ~/workspace (main) ─╯".to_string(),
+        )]);
+        let second_output = HashMap::from([(
+            pane.pane_id.clone(),
+            "╰ ∼ Streaming 10 tok ───────────────── ~/workspace (main) ─╯".to_string(),
+        )]);
+
+        let first = tracker.refresh(std::slice::from_ref(&pane), &first_output, now);
+        assert_eq!(first[0].status, SessionStatus::Running);
+
+        let second = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &second_output,
             now + Duration::from_secs(5),
         );
 
