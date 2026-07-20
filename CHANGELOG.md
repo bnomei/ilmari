@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.9.5 - 2026-07-20
+
+### Fixed
+
+- Detect Amp's current built-in modes and free-form custom mode labels from its light, heavy, or double prompt borders, including borders joined to preceding full-width rows by `capture-pane -J`, while retaining legacy mode support.
+- Ignore process-tree agent hints while Ilmari, Yazi, Lazygit, or another unrelated application owns the pane foreground.
+
 ## 0.9.4 - 2026-07-20
 
 ### Fixed

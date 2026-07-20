@@ -162,6 +162,10 @@ pub enum SemanticRole {
     /// Agent name in the app column.
     AppLabel,
     AgentDetailNeutral,
+    AgentDetailGrok,
+    AgentDetailLuna,
+    AgentDetailTerra,
+    AgentDetailSol,
     AgentDetailAmpDeep,
     AgentDetailAmpSmart,
     AgentDetailAmpRush,
@@ -215,7 +219,11 @@ impl Palette {
             SemanticRole::StatusTerminated => self.ansi_color(1),
             SemanticRole::StatusUnknown => self.ansi_color(8),
             SemanticRole::AppLabel => self.ansi_color(14),
-            SemanticRole::AgentDetailNeutral => self.ansi_color(8),
+            SemanticRole::AgentDetailNeutral => self.ansi_color(3),
+            SemanticRole::AgentDetailGrok => self.ansi_color(13),
+            SemanticRole::AgentDetailLuna => self.ansi_color(9),
+            SemanticRole::AgentDetailTerra => self.ansi_color(6),
+            SemanticRole::AgentDetailSol => self.ansi_color(11),
             SemanticRole::AgentDetailAmpDeep => self.ansi_color(6),
             SemanticRole::AgentDetailAmpSmart => self.ansi_color(10),
             SemanticRole::AgentDetailAmpRush => self.ansi_color(3),
@@ -361,6 +369,11 @@ mod tests {
         assert_eq!(palette.base_style().fg, Some(Color::Reset));
         assert_eq!(palette.base_style().bg, Some(Color::Reset));
         assert_eq!(palette.style_for(SemanticRole::StatusRunning).fg, Some(Color::Indexed(4)));
+        assert_eq!(palette.style_for(SemanticRole::AgentDetailNeutral).fg, Some(Color::Indexed(3)));
+        assert_eq!(palette.style_for(SemanticRole::AgentDetailGrok).fg, Some(Color::Indexed(13)));
+        assert_eq!(palette.style_for(SemanticRole::AgentDetailLuna).fg, Some(Color::Indexed(9)));
+        assert_eq!(palette.style_for(SemanticRole::AgentDetailTerra).fg, Some(Color::Indexed(6)));
+        assert_eq!(palette.style_for(SemanticRole::AgentDetailSol).fg, Some(Color::Indexed(11)));
         assert_eq!(palette.style_for(SemanticRole::AgentDetailAmpDeep).fg, Some(Color::Indexed(6)));
         assert_eq!(
             palette.style_for(SemanticRole::AgentDetailAmpSmart).fg,

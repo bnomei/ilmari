@@ -356,7 +356,7 @@ fn workspace_row_line_with_attention(
                 &mut spans,
                 &mut current_width,
                 truncate_cell(&format_usage_chip(process_usage.spawned), SUB_COL_WIDTH),
-                palette.style_for(SemanticRole::AgentDetailNeutral),
+                palette.style_for(SemanticRole::MutedText),
             );
         } else {
             push_cell(
@@ -617,6 +617,10 @@ fn compact_footer_line(key_style: Style, sep_style: Style) -> Line<'static> {
 fn detail_role(tone: AgentDetailTone) -> SemanticRole {
     match tone {
         AgentDetailTone::Neutral => SemanticRole::AgentDetailNeutral,
+        AgentDetailTone::Grok => SemanticRole::AgentDetailGrok,
+        AgentDetailTone::Luna => SemanticRole::AgentDetailLuna,
+        AgentDetailTone::Terra => SemanticRole::AgentDetailTerra,
+        AgentDetailTone::Sol => SemanticRole::AgentDetailSol,
         AgentDetailTone::AmpDeep => SemanticRole::AgentDetailAmpDeep,
         AgentDetailTone::AmpSmart => SemanticRole::AgentDetailAmpSmart,
         AgentDetailTone::AmpRush => SemanticRole::AgentDetailAmpRush,
@@ -788,7 +792,7 @@ mod tests {
         let pane_span =
             line.spans.iter().find(|span| span.content.as_ref() == "%7").expect("pane span");
 
-        assert_eq!(detail_span.style.fg, Some(Color::Indexed(8)));
+        assert_eq!(detail_span.style.fg, Some(Color::Indexed(3)));
         assert_eq!(output_span.style.fg, palette.base_style().fg);
         assert_eq!(time_span.style.fg, Some(Color::Indexed(8)));
         assert_eq!(self_usage_span.style.fg, Some(Color::Indexed(12)));

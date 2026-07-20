@@ -234,8 +234,16 @@ pub struct SessionProcessUsage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentDetailTone {
-    /// Default muted detail color for ordinary model names.
+    /// Default yellow detail color for ordinary model names.
     Neutral,
+    /// Grok model accent.
+    Grok,
+    /// Luna model accent.
+    Luna,
+    /// Terra model accent.
+    Terra,
+    /// Sol model accent.
+    Sol,
     /// Amp deep mode accent.
     AmpDeep,
     /// Amp smart mode accent.

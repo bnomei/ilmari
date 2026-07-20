@@ -132,8 +132,10 @@ impl AdapterRegistry {
         previous: Option<&SessionRecord>,
         identity_hint: Option<AgentKind>,
     ) -> bool {
+        let has_applicable_identity_hint =
+            self.applicable_identity_adapter(pane, identity_hint).is_some();
         !pane.pane_dead
-            && (identity_hint.is_some()
+            && (has_applicable_identity_hint
                 || (!is_shell_command(&pane.pane_current_command)
                     && (self.select_adapter(pane, None, previous, None).is_some()
                         || is_runtime_wrapped_agent_candidate(&pane.pane_current_command)
@@ -142,9 +144,10 @@ impl AdapterRegistry {
 
     /// Pick the adapter that should own this pane for the current refresh.
     ///
-    /// Priority: process-tree identity hint, sticky previous kind while the pane
-    /// still looks like that agent (including shell after exit and Claude spinner
-    /// titles), then first detect/detect_output match among enabled adapters.
+    /// Priority: process-tree identity hint when compatible with the foreground
+    /// command, sticky previous kind while the pane still looks like that agent
+    /// (including shell after exit and Claude spinner titles), then first
+    /// detect/detect_output match among enabled adapters.
     fn select_adapter<'a>(
         &'a self,
         pane: &PaneSnapshot,
@@ -152,15 +155,8 @@ impl AdapterRegistry {
         previous: Option<&SessionRecord>,
         identity_hint: Option<AgentKind>,
     ) -> Option<&'a dyn AgentAdapter> {
-        if let Some(identity_hint) = identity_hint {
-            if let Some(adapter) = self
-                .adapters
-                .iter()
-                .find(|adapter| adapter.kind() == identity_hint)
-                .map(Box::as_ref)
-            {
-                return Some(adapter);
-            }
+        if let Some(adapter) = self.applicable_identity_adapter(pane, identity_hint) {
+            return Some(adapter);
         }
 
         if let Some(previous) = previous {
@@ -190,6 +186,23 @@ impl AdapterRegistry {
                         .is_some_and(|output_tail| adapter.detect_output(pane, output_tail))
             })
             .map(Box::as_ref)
+    }
+
+    fn applicable_identity_adapter(
+        &self,
+        pane: &PaneSnapshot,
+        identity_hint: Option<AgentKind>,
+    ) -> Option<&dyn AgentAdapter> {
+        let adapter = self
+            .adapters
+            .iter()
+            .find(|adapter| Some(adapter.kind()) == identity_hint)
+            .map(Box::as_ref)?;
+
+        (adapter.detect(pane)
+            || is_shell_command(&pane.pane_current_command)
+            || is_runtime_wrapped_agent_candidate(&pane.pane_current_command))
+        .then_some(adapter)
     }
 }
 
@@ -930,37 +943,47 @@ fn extract_amp_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     let output_tail = output_tail?;
     let label = output_tail.lines().rev().find_map(|line| {
         let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.contains("skills") {
-            amp_mode_pattern()
-                .captures(trimmed)
-                .and_then(|captures| captures.name("mode"))
-                .map(|matched| normalize_amp_mode_label(matched.as_str(), false))
-        } else {
-            amp_compact_mode_pattern().captures(trimmed).and_then(|captures| {
-                let has_bolt = captures.name("bolt").is_some();
-                let mode = captures.name("mode")?;
-                let label = normalize_amp_mode_label(mode.as_str(), has_bolt);
-                (has_bolt || label != "rush").then_some(label)
+        amp_mode_pattern()
+            .captures_iter(trimmed)
+            .last()
+            .and_then(|captures| captures.name("mode"))
+            .map(|matched| normalize_amp_mode_label(matched.as_str(), false))
+            .or_else(|| {
+                amp_compact_mode_pattern().captures_iter(trimmed).last().and_then(|captures| {
+                    let has_bolt = captures.name("bolt").is_some();
+                    let mode = captures.name("mode")?;
+                    let label = normalize_amp_mode_label(mode.as_str(), has_bolt);
+                    (!label.is_empty()).then_some(label)
+                })
             })
-        }
     })?;
 
     let mode = label.strip_prefix('↯').unwrap_or(&label);
-    let tone = match mode {
-        "deep" | "deep²" => AgentDetailTone::AmpDeep,
-        "smart" => AgentDetailTone::AmpSmart,
-        "rush" => AgentDetailTone::AmpRush,
-        _ => AgentDetailTone::Neutral,
+    let mode_key = mode.to_ascii_lowercase();
+    let family = mode_key.split(['/', ' ']).next().unwrap_or(&mode_key);
+    let tone = match family {
+        "luna" => AgentDetailTone::Luna,
+        "terra" => AgentDetailTone::Terra,
+        "sol" => AgentDetailTone::Sol,
+        _ => match mode_key.as_str() {
+            "high" | "deep" | "deep²" => AgentDetailTone::AmpDeep,
+            "medium" | "smart" => AgentDetailTone::AmpSmart,
+            "low" | "rush" => AgentDetailTone::AmpRush,
+            _ => AgentDetailTone::Neutral,
+        },
     };
 
     Some(AgentDetail { label, tone })
 }
 
 fn normalize_amp_mode_label(mode: &str, has_bolt: bool) -> String {
-    let normalized = match mode.to_ascii_lowercase().as_str() {
+    let normalized = normalize_detail_label(mode);
+    let normalized = match normalized.to_ascii_lowercase().as_str() {
         "deep2" => "deep²".to_string(),
-        other => other.to_string(),
+        "deep²" | "deep" | "smart" | "rush" | "low" | "medium" | "high" | "ultra" => {
+            normalized.to_ascii_lowercase()
+        }
+        _ => normalized,
     };
 
     if has_bolt {
@@ -1122,7 +1145,7 @@ fn extract_grok_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
             .map(|matched| normalize_detail_label(matched.as_str()))
             .filter(|label| !label.is_empty())
     });
-    label.map(|label| AgentDetail { label, tone: AgentDetailTone::Neutral })
+    label.map(|label| AgentDetail { label, tone: AgentDetailTone::Grok })
 }
 
 fn extract_copilot_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
@@ -2222,7 +2245,7 @@ fn codex_status_model_pattern() -> &'static Regex {
 fn amp_mode_pattern() -> &'static Regex {
     static AMP_MODE: OnceLock<Regex> = OnceLock::new();
     AMP_MODE.get_or_init(|| {
-        Regex::new(r"(?i)(?P<mode>deep²|deep2|smart|rush|deep)(?:\b|\s|─)")
+        Regex::new(r"(?i)╭[^╭╮\r\n]*[─━═]+\s*(?P<mode>[^─━═╭╮]+?)\s*[─━═]+\s*\d+\s+skills\s*[─━═]╮")
             .expect("amp mode regex should compile")
     })
 }
@@ -2230,7 +2253,7 @@ fn amp_mode_pattern() -> &'static Regex {
 fn amp_compact_mode_pattern() -> &'static Regex {
     static AMP_COMPACT_MODE: OnceLock<Regex> = OnceLock::new();
     AMP_COMPACT_MODE.get_or_init(|| {
-        Regex::new(r"(?i)(?P<bolt>↯\s*)?(?P<mode>deep²|deep2|smart|rush|deep)(?:\b|\s|─)")
+        Regex::new(r"╭[^╭╮\r\n]*[─━═]\s*(?P<bolt>↯\s*)?(?P<mode>[^─━═╭╮]+?)\s*[─━═]╮")
             .expect("amp compact mode regex should compile")
     })
 }
@@ -3016,6 +3039,32 @@ Gemini 3.5 Flash (Medium)
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AgentKind::Auggie);
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
+    }
+
+    #[test]
+    fn process_identity_hint_does_not_override_non_agent_foreground_apps() {
+        let now = Instant::now();
+
+        for command in ["ilmari", "yazi", "lazygit"] {
+            let mut tracker = SessionTracker::new();
+            let amp = snapshot_with_title("%25", "amp", false, "Amp thread");
+            tracker.refresh(&[amp], &HashMap::new(), now);
+
+            let pane = snapshot_with_title("%25", command, false, "Amp thread");
+            let process_kinds = HashMap::from([(pane.pane_id.clone(), AgentKind::Amp)]);
+            let previous = tracker.records().get(&pane.pane_id);
+
+            assert!(!tracker.registry().needs_output_tail(&pane, previous, Some(AgentKind::Amp)));
+            assert!(tracker
+                .refresh_with_process_kinds(
+                    &[pane],
+                    &HashMap::new(),
+                    &process_kinds,
+                    &HashSet::new(),
+                    now,
+                )
+                .is_empty());
+        }
     }
 
     #[test]
@@ -4324,6 +4373,10 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
 ╭──────────────────────deep²──4 skills─╮
 ╰────────────────~/workspace (main)─╯
 ";
+        let legacy_custom = "\
+╭─26% of 168k · $0.45──────────────────────────────Architect Mode──4 skills─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
         let compact_smart = "\
 ╭─────────────────────────────────────────────────────────────────── smart ─╮
 ╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
@@ -4348,6 +4401,45 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
 ╭──────────────────────────────────────────────────────────────────── rush ─╮
 ╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
 ";
+        let medium = "\
+╭────────────────────────────────────────────────────────── $0.16 ─ medium ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let low = "\
+╭──────────────────────────────────────────────────────────── $0.01 ─ low ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let high = "\
+╭────────────────────────────────────────────────────────── $···· ─ high ─╮
+╰ ≈ Running Tools ─────────────────────────────── ~/workspace (main) ─╯
+";
+        let ultra = "\
+╭────────────────────────────────────────────────────────────────── ultra ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let custom = "\
+╭────────────────────────────────────────────────────── $0.42 ─ Grok 4.5 ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let luna = "\
+╭────────────────────────────────────────────────────── $0.04 ─ luna/low ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let terra = "\
+╭─────────────────────────────────────────────────── $0.16 ─ terra/medium ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let sol = "\
+╭────────────────────────────────────────────────────── $0.42 ─ sol/high ─╮
+╰──────────────────────────────────────────────────── ~/workspace (main) ─╯
+";
+        let joined_soft_wrap = "\
+⡦ Exploring 2 files, 1 search ▸                                          █╭───────────────────────────────────────────────────────── $0.004 ─ high ─╮│                                                                         │╰ ∼ Running Tools ───────────────────────────── ~/PROJECTS/ilmari (main) ─╯
+";
+        let heavy_border = "\
+╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ $0.22 ━ medium ━╮
+╰ ≈ Running Tools ────────────────────────────────────────── ~/.config/amp ─╯
+";
 
         assert_eq!(
             extract_amp_detail(Some(smart)),
@@ -4360,6 +4452,13 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
         assert_eq!(
             extract_amp_detail(Some(deep)),
             Some(AgentDetail { label: "deep²".to_string(), tone: AgentDetailTone::AmpDeep })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(legacy_custom)),
+            Some(AgentDetail {
+                label: "Architect Mode".to_string(),
+                tone: AgentDetailTone::Neutral
+            })
         );
         assert_eq!(
             extract_amp_detail(Some(compact_smart)),
@@ -4381,7 +4480,51 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
             extract_amp_detail(Some(compact_rush)),
             Some(AgentDetail { label: "↯rush".to_string(), tone: AgentDetailTone::AmpRush })
         );
-        assert_eq!(extract_amp_detail(Some(compact_rush_without_marker)), None);
+        assert_eq!(
+            extract_amp_detail(Some(compact_rush_without_marker)),
+            Some(AgentDetail { label: "rush".to_string(), tone: AgentDetailTone::AmpRush })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(medium)),
+            Some(AgentDetail { label: "medium".to_string(), tone: AgentDetailTone::AmpSmart })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(low)),
+            Some(AgentDetail { label: "low".to_string(), tone: AgentDetailTone::AmpRush })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(high)),
+            Some(AgentDetail { label: "high".to_string(), tone: AgentDetailTone::AmpDeep })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(ultra)),
+            Some(AgentDetail { label: "ultra".to_string(), tone: AgentDetailTone::Neutral })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(custom)),
+            Some(AgentDetail { label: "Grok 4.5".to_string(), tone: AgentDetailTone::Neutral })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(luna)),
+            Some(AgentDetail { label: "luna/low".to_string(), tone: AgentDetailTone::Luna })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(terra)),
+            Some(AgentDetail { label: "terra/medium".to_string(), tone: AgentDetailTone::Terra })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(sol)),
+            Some(AgentDetail { label: "sol/high".to_string(), tone: AgentDetailTone::Sol })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(joined_soft_wrap)),
+            Some(AgentDetail { label: "high".to_string(), tone: AgentDetailTone::AmpDeep })
+        );
+        assert_eq!(
+            extract_amp_detail(Some(heavy_border)),
+            Some(AgentDetail { label: "medium".to_string(), tone: AgentDetailTone::AmpSmart })
+        );
+        assert_eq!(extract_amp_detail(Some("ordinary high priority prose")), None);
     }
 
     #[test]
@@ -5383,13 +5526,13 @@ Try out Grok Build
         // detail extraction (WIDE has version; NARROW yields None per "Grok Build" not version)
         assert_eq!(
             extract_grok_detail(Some(GROK_WAITING_WIDE)),
-            Some(AgentDetail { label: "Grok 4.3".to_string(), tone: AgentDetailTone::Neutral })
+            Some(AgentDetail { label: "Grok 4.3".to_string(), tone: AgentDetailTone::Grok })
         );
         assert_eq!(
             extract_grok_detail(Some(
                 "╰────────────────────────────────────── Composer 2.5 · always-approve ─╯"
             )),
-            Some(AgentDetail { label: "Composer 2.5".to_string(), tone: AgentDetailTone::Neutral })
+            Some(AgentDetail { label: "Composer 2.5".to_string(), tone: AgentDetailTone::Grok })
         );
         assert_eq!(extract_grok_detail(Some(GROK_WAITING_NARROW)), None);
         assert_eq!(extract_grok_detail(Some("I asked Grok 4.3. about the project.")), None);
