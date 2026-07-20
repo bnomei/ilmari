@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.9.3 - 2026-07-20
+
+### Fixed
+
+- Added end-to-end coverage for automatic Ilmari daemon recovery when tmux restarts at the same socket path, ensuring the stale generation is cooperatively replaced by the current server's daemon.
+
 ## 0.9.2 - 2026-07-17
 
 ### Fixed
