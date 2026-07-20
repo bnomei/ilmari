@@ -962,6 +962,7 @@ fn extract_amp_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     let mode_key = mode.to_ascii_lowercase();
     let family = mode_key.split(['/', ' ']).next().unwrap_or(&mode_key);
     let tone = match family {
+        "grok" => AgentDetailTone::Grok,
         "luna" => AgentDetailTone::Luna,
         "terra" => AgentDetailTone::Terra,
         "sol" => AgentDetailTone::Sol,
@@ -4502,7 +4503,7 @@ esc to cancel                                            Gemini 3.5 Flash (Mediu
         );
         assert_eq!(
             extract_amp_detail(Some(custom)),
-            Some(AgentDetail { label: "Grok 4.5".to_string(), tone: AgentDetailTone::Neutral })
+            Some(AgentDetail { label: "Grok 4.5".to_string(), tone: AgentDetailTone::Grok })
         );
         assert_eq!(
             extract_amp_detail(Some(luna)),
