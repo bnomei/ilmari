@@ -493,7 +493,7 @@ fn classify_grok_session(
     SessionStatus::Unknown
 }
 
-/// Copilot CLI classifier with its own waiting-prompt and noise heuristics.
+/// Copilot CLI classifier with explicit working-footer and waiting-prompt heuristics.
 fn classify_copilot_session(
     adapter: &dyn AgentAdapter,
     pane: &PaneSnapshot,
@@ -1917,10 +1917,26 @@ fn classify_copilot_output_tail(output_tail: &str) -> Option<SessionStatus> {
 }
 
 fn looks_like_copilot_active(output_tail: &str) -> bool {
-    recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW).iter().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        lower.contains("working") && lower.contains("esc") && lower.contains("cancel")
-    })
+    recent_nonempty_lines(output_tail, PROMPT_LINE_WINDOW)
+        .iter()
+        .any(|line| is_copilot_working_line(line))
+}
+
+fn is_copilot_working_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix('○').or_else(|| trimmed.strip_prefix('●')) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix(char::is_whitespace) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+
+    rest == "Working"
+        || rest
+            .strip_prefix("Working")
+            .and_then(|suffix| suffix.chars().next())
+            .is_some_and(char::is_whitespace)
 }
 
 fn looks_like_copilot_trust_prompt(output_tail: &str) -> bool {
@@ -2913,6 +2929,19 @@ Gemini 3.5 Flash (Medium)
             classify_copilot_output_tail(COPILOT_FINAL_OUTPUT),
             Some(SessionStatus::WaitingInput)
         );
+    }
+
+    #[test]
+    fn tracker_marks_copilot_compact_working_spinner_running() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot_with_title("%28", "copilot", false, "GitHub Copilot");
+        let output_tails = HashMap::from([(pane.pane_id.clone(), "○ Working –\n".to_string())]);
+
+        let records = tracker.refresh(&[pane], &output_tails, Instant::now());
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::GitHubCopilotCli);
+        assert_eq!(records[0].status, SessionStatus::Running);
     }
 
     #[test]

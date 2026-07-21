@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.9.6 - 2026-07-21
+
+### Fixed
+
+- Recognize Copilot CLI's compact animated `○ Working` footer, including narrow-pane bouncing-dash variants, as running without requiring the optional `esc cancel` hint.
+
 ## 0.9.5 - 2026-07-20
 
 ### Fixed
