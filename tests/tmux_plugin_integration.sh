@@ -40,6 +40,14 @@ case "$*" in
       == "${ILMARI_EXPECTED_SOCKET_IDENTITY:-}" ]] || exit 94
     ;;
 esac
+if [[ "$*" == 'daemon start --restart-test' ]]; then
+  restart_count=0
+  [[ ! -f "$ILMARI_TEST_RESTART_COUNT" ]] \
+    || restart_count="$(cat "$ILMARI_TEST_RESTART_COUNT")"
+  restart_count=$((restart_count + 1))
+  printf '%s\n' "$restart_count" >"$ILMARI_TEST_RESTART_COUNT"
+  ((restart_count >= 2)) || exit 73
+fi
 printf '%s|%s\n' "${TMUX:-}" "$*" >>"$ILMARI_TEST_LOG"
 FAKE_ILMARI
 chmod +x "$tmp_dir/bin/ilmari"
@@ -138,6 +146,23 @@ done
 [[ -s "$test_log" ]] || fail 'background daemon command did not run'
 grep -F "$tmux_context|daemon start" "$test_log" >/dev/null \
   || fail 'daemon start was not routed through the originating TMUX context'
+
+# A failed daemon command is retried automatically. The second quick success
+# models convergence after recovery and must let this reload supervisor exit.
+restart_count_file="$tmp_dir/restart-count"
+tmux -S "$tmux_socket" set-environment -g ILMARI_TEST_RESTART_COUNT "$restart_count_file"
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_command \
+  'ilmari daemon start --restart-test'
+PATH="$tmp_dir/bin:$PATH" ILMARI_TEST_LOG="$test_log" \
+  ILMARI_TEST_RESTART_COUNT="$restart_count_file" TMUX="$tmux_context" \
+  bash "$repo_root/ilmari.tmux"
+for _ in {1..150}; do
+  [[ -f "$restart_count_file" ]] && [[ "$(cat "$restart_count_file")" -ge 2 ]] && break
+  sleep 0.02
+done
+[[ -f "$restart_count_file" ]] && [[ "$(cat "$restart_count_file")" -ge 2 ]] \
+  || fail 'failed daemon command was not restarted automatically'
+tmux -S "$tmux_socket" set-option -g @ilmari_daemon_command 'ilmari daemon start'
 
 binding="$(read_popup_binding)"
 [[ "$binding" == *'display-popup'* ]] || fail 'popup binding was not installed'

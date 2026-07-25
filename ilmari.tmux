@@ -184,12 +184,59 @@ lifecycle_environment_into() {
 daemon_start_shell_command_into() {
   local destination="$1"
   local command="$2"
-  local lifecycle_environment quoted_command
+  local lifecycle_environment quoted_command quoted_socket quoted_server_pid
+  local quoted_socket_identity quoted_supervisor supervisor
 
   lifecycle_environment_into lifecycle_environment
   shell_quote_into quoted_command "$command"
-  printf -v "$destination" '%s nohup sh -c %s </dev/null >/dev/null 2>&1' \
-    "$lifecycle_environment" "$quoted_command"
+  shell_quote_into quoted_socket "$tmux_socket"
+  shell_quote_into quoted_server_pid "$tmux_server_pid"
+  shell_quote_into quoted_socket_identity "$tmux_socket_file_identity"
+  supervisor='command=$1
+tmux_socket=$2
+tmux_server_pid=$3
+tmux_socket_identity=$4
+delay=1
+
+origin_is_live() {
+  current_identity=$(stat -c "%d:%i" -- "$tmux_socket" 2>/dev/null || stat -f "%d:%i" -- "$tmux_socket" 2>/dev/null) || return 1
+  [ "$current_identity" = "$tmux_socket_identity" ] || return 1
+  [ "$(tmux -S "$tmux_socket" display-message -p "#{pid}" 2>/dev/null)" = "$tmux_server_pid" ]
+}
+
+daemon_is_enabled() {
+  value=$(tmux -S "$tmux_socket" show-option -gqv @ilmari_daemon 2>/dev/null) || return 1
+  case "$(printf "%s" "${value:-on}" | tr "[:upper:]" "[:lower:]")" in
+    1|yes|true|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+while origin_is_live && daemon_is_enabled; do
+  started_at=$(date +%s)
+  sh -c "$command"
+  command_status=$?
+  runtime=$(($(date +%s) - started_at))
+
+  origin_is_live && daemon_is_enabled || exit 0
+  # `daemon start` exits successfully and quickly when a healthy incumbent
+  # already exists. This is the normal plugin-reload path, not a crash.
+  if [ "$command_status" -eq 0 ] && [ "$runtime" -lt 5 ]; then
+    exit 0
+  fi
+  if [ "$runtime" -ge 5 ]; then
+    delay=1
+  fi
+  sleep "$delay"
+  if [ "$delay" -lt 30 ]; then
+    delay=$((delay * 2))
+    [ "$delay" -le 30 ] || delay=30
+  fi
+done'
+  shell_quote_into quoted_supervisor "$supervisor"
+  printf -v "$destination" '%s nohup sh -c %s ilmari-daemon-supervisor %s %s %s %s </dev/null >/dev/null 2>&1' \
+    "$lifecycle_environment" "$quoted_supervisor" "$quoted_command" "$quoted_socket" \
+    "$quoted_server_pid" "$quoted_socket_identity"
 }
 
 daemon_stop_shell_command_into() {
@@ -322,9 +369,13 @@ start_daemon() {
 
   # The command is deliberately interpreted as a shell command because the tmux
   # option may include an absolute binary path and arguments. Quoting it as one
-  # `sh -c` argument keeps it isolated from this entrypoint's shell. The
-  # receiving server starts it only inside the accepted generation guard, and
-  # `run-shell -b` keeps plugin reload nonblocking.
+  # `sh -c` argument keeps it isolated from this entrypoint's shell. A small
+  # supervisor restarts failed or crashed commands with capped backoff while the
+  # originating tmux generation and @ilmari_daemon remain live. A quick success
+  # means an incumbent daemon already exists, so plugin reloads do not leave
+  # duplicate supervisors behind. The receiving server starts the supervisor
+  # only inside the accepted generation guard, and `run-shell -b` keeps plugin
+  # reload nonblocking.
   daemon_start_shell_command_into start_shell_command "$ilmari_daemon_command"
   tmux_guarded run-shell -b "$start_shell_command"
 }

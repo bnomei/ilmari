@@ -152,7 +152,10 @@ running
 ```
 
 The plugin pins every lifecycle action to the tmux server that loaded it. A
-reload does not start a duplicate healthy daemon.
+generation-bound supervisor restarts failed starts and unexpected daemon exits
+with capped exponential backoff. It stops retrying when that tmux server exits
+or `@ilmari_daemon` is disabled, and a reload does not start a duplicate healthy
+daemon.
 
 #### TPM options (optional)
 
