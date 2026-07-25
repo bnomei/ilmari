@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.9.7 - 2026-07-25
+
+### Fixed
+
+- Automatically restart failed tmux daemon launches and unexpected daemon exits with generation-bound, capped exponential backoff while avoiding duplicate supervisors on plugin reload.
+
 ## 0.9.6 - 2026-07-21
 
 ### Fixed
