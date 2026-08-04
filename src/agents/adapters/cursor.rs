@@ -1,4 +1,4 @@
-//! Planned Cursor CLI adapter scaffold (disabled in the v1 registry).
+//! Cursor CLI adapter with output-tail recovery for runtime-wrapped sessions.
 //!
 //! Tracking issue: https://github.com/bnomei/ilmari/issues/11
 //! Repository: https://github.com/cursor/cursor
@@ -9,9 +9,12 @@ use std::sync::Arc;
 use crate::model::{AgentDetail, AgentKind, SessionRecord, SessionStatus};
 use crate::tmux::PaneSnapshot;
 
-use super::super::{classify_supported_session, command_matches, AgentAdapter};
+use super::super::{
+    classify_cursor_session, command_matches, extract_cursor_detail, extract_cursor_output_excerpt,
+    looks_like_cursor_output, reuse_detail_arc, reuse_output_excerpt_arc, AgentAdapter,
+};
 
-/// Planned Cursor CLI adapter scaffold; filtered out of `AdapterRegistry::v1`.
+/// Enabled Cursor CLI adapter (`cursor` / `cursor-agent`).
 pub(in crate::agents) struct CursorCliAdapter;
 
 impl AgentAdapter for CursorCliAdapter {
@@ -23,6 +26,10 @@ impl AgentAdapter for CursorCliAdapter {
         command_matches(&pane.pane_current_command, "cursor")
     }
 
+    fn detect_output(&self, _pane: &PaneSnapshot, output_tail: &str) -> bool {
+        looks_like_cursor_output(output_tail)
+    }
+
     fn classify(
         &self,
         pane: &PaneSnapshot,
@@ -30,22 +37,22 @@ impl AgentAdapter for CursorCliAdapter {
         output_fingerprint: Option<u64>,
         previous: Option<&SessionRecord>,
     ) -> SessionStatus {
-        classify_supported_session(self, pane, output_tail, output_fingerprint, previous)
+        classify_cursor_session(self, pane, output_tail, output_fingerprint, previous)
     }
 
     fn extract_detail(
         &self,
-        _output_tail: Option<&str>,
-        _previous: Option<&SessionRecord>,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
     ) -> Option<Arc<AgentDetail>> {
-        None
+        reuse_detail_arc(extract_cursor_detail(output_tail), previous)
     }
 
     fn extract_output_excerpt(
         &self,
-        _output_tail: Option<&str>,
-        _previous: Option<&SessionRecord>,
+        output_tail: Option<&str>,
+        previous: Option<&SessionRecord>,
     ) -> Option<Arc<str>> {
-        None
+        reuse_output_excerpt_arc(extract_cursor_output_excerpt(output_tail), previous)
     }
 }

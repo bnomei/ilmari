@@ -211,7 +211,7 @@ impl ProcessTree {
                 command_executable_matches(&process.command, "copilot")
                     || node_wrapper_path_matches(&process.command, "copilot")
             }
-            AgentKind::CursorCli => command_executable_matches(&process.command, "cursor"),
+            AgentKind::CursorCli => command_executable_matches(&process.command, "cursor-agent"),
             AgentKind::Aider => command_executable_matches(&process.command, "aider"),
             AgentKind::ClineCli => command_executable_matches(&process.command, "cline"),
             AgentKind::GooseCli => command_executable_matches(&process.command, "goose"),
@@ -597,6 +597,12 @@ mod tests {
                 "deno /workspace/bin/kiro-cli",
             ),
             (
+                AgentKind::CursorCli,
+                "cursor-agent",
+                "/workspace/bin/cursor-agent --use-system-ca",
+                "cursor-agent-debug",
+            ),
+            (
                 AgentKind::Grok,
                 "grok-macos-aarc",
                 "node /opt/homebrew/bin/grok-macos-aarc",
@@ -631,7 +637,6 @@ mod tests {
     #[test]
     fn planned_process_matchers_exist_but_are_not_auto_identified() {
         let planned = [
-            (AgentKind::CursorCli, "cursor"),
             (AgentKind::Aider, "aider"),
             (AgentKind::ClineCli, "cline"),
             (AgentKind::GooseCli, "goose"),

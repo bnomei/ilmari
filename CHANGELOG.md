@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-08-04
+
+### Added
+
+- Added Cursor CLI (`cursor` / `cursor-agent`) session detection from live tmux process and output samples, including runtime-wrapped identity recovery, composing and tool-running states, approval prompts, model details, and sanitized output excerpts. (#11)
+
 ## 0.9.7 - 2026-07-25
 
 ### Fixed

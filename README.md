@@ -56,13 +56,13 @@ output identifies an enabled agent.
 | Auggie | `auggie` |
 | Grok | `grok` |
 | GitHub Copilot CLI | `copilot` |
+| Cursor CLI | `cursor`, `cursor-agent` |
 | Kiro CLI | `kiro-cli` |
 
 Tracked but disabled agent adapters:
 
 | Agent | Tracking issue |
 | --- | --- |
-| Cursor CLI | [#11](https://github.com/bnomei/ilmari/issues/11) |
 | Aider | [#12](https://github.com/bnomei/ilmari/issues/12) |
 | Cline CLI | [#13](https://github.com/bnomei/ilmari/issues/13) |
 | Goose CLI | [#14](https://github.com/bnomei/ilmari/issues/14) |

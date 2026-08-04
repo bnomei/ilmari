@@ -73,8 +73,8 @@ impl AgentKind {
             | Self::Auggie
             | Self::Grok
             | Self::GitHubCopilotCli
+            | Self::CursorCli
             | Self::KiroCli => AgentSupport::Enabled,
-            Self::CursorCli => AgentSupport::Planned { issue: 11 },
             Self::Aider => AgentSupport::Planned { issue: 12 },
             Self::ClineCli => AgentSupport::Planned { issue: 13 },
             Self::GooseCli => AgentSupport::Planned { issue: 14 },
@@ -399,6 +399,7 @@ mod tests {
                 AgentKind::Auggie,
                 AgentKind::Grok,
                 AgentKind::GitHubCopilotCli,
+                AgentKind::CursorCli,
                 AgentKind::KiroCli,
             ]
         );
@@ -407,7 +408,6 @@ mod tests {
     #[test]
     fn planned_agent_kinds_are_issue_tracked_but_disabled() {
         let planned = [
-            (AgentKind::CursorCli, 11),
             (AgentKind::Aider, 12),
             (AgentKind::ClineCli, 13),
             (AgentKind::GooseCli, 14),

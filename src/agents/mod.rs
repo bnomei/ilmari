@@ -546,6 +546,60 @@ fn classify_copilot_session(
     SessionStatus::Unknown
 }
 
+/// Cursor-specific classifier: permission prompts wait, while composing and tool
+/// activity spinners remain Running even though the follow-up prompt is visible.
+fn classify_cursor_session(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+) -> SessionStatus {
+    if pane.pane_dead {
+        return SessionStatus::Terminated;
+    }
+
+    if previous.is_some() && !adapter.detect(pane) && is_shell_command(&pane.pane_current_command) {
+        return SessionStatus::Finished;
+    }
+
+    if let Some(retained_status) = retained_status_without_output_tail(output_tail, previous) {
+        return retained_status;
+    }
+
+    let output_tail = output_tail.unwrap_or_default();
+
+    if looks_like_cursor_permission_prompt(output_tail) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if looks_like_cursor_active(output_tail) {
+        return SessionStatus::Running;
+    }
+
+    if looks_like_cursor_prompt(output_tail) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if output_has_recent_motion(output_fingerprint, previous) {
+        return SessionStatus::Running;
+    }
+
+    if let Some(status) = classify_output_tail(output_tail) {
+        return status;
+    }
+
+    if output_is_stable(output_fingerprint, previous) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if adapter.detect(pane) {
+        return SessionStatus::WaitingInput;
+    }
+
+    SessionStatus::Unknown
+}
+
 /// Kiro CLI classifier: active tool lines stay Running; prompt patterns wait.
 fn classify_kiro_session(
     adapter: &dyn AgentAdapter,
@@ -866,6 +920,13 @@ fn looks_like_copilot_output(output_tail: &str) -> bool {
             && lower.contains("? help"))
 }
 
+fn looks_like_cursor_output(output_tail: &str) -> bool {
+    let lower = output_tail.to_ascii_lowercase();
+    (lower.contains("cursor agent") && cursor_version_pattern().is_match(output_tail))
+        || (lower.contains("add a follow-up")
+            && output_tail.lines().any(|line| cursor_footer_model_pattern().is_match(line.trim())))
+}
+
 fn looks_like_kiro_output(output_tail: &str) -> bool {
     let lower = output_tail.to_ascii_lowercase();
     lower.contains("welcome to kiro cli")
@@ -1162,6 +1223,19 @@ fn extract_copilot_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
 }
 
+fn extract_cursor_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = output_tail.lines().rev().find_map(|line| {
+        cursor_footer_model_pattern()
+            .captures(line.trim())
+            .and_then(|captures| captures.name("model"))
+            .map(|matched| normalize_detail_label(matched.as_str()))
+            .filter(|label| !label.is_empty())
+    })?;
+
+    Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
+}
+
 fn extract_kiro_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
     let output_tail = output_tail?;
     let label = output_tail.lines().rev().find_map(|line| {
@@ -1348,6 +1422,15 @@ fn extract_copilot_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     extract_output_excerpt_from_tail(output_tail, is_copilot_output_noise)
 }
 
+fn extract_cursor_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    if looks_like_cursor_active(output_tail) || looks_like_cursor_permission_prompt(output_tail) {
+        return None;
+    }
+
+    extract_output_excerpt_from_tail(output_tail, is_cursor_output_noise)
+}
+
 fn extract_gemini_output_excerpt(output_tail: Option<&str>) -> Option<String> {
     let output_tail = output_tail?;
     extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
@@ -1435,6 +1518,36 @@ fn is_copilot_output_noise(raw: &str, normalized: &str) -> bool {
         || lower.contains("@ files")
         || lower.contains("# issues")
         || copilot_footer_model_pattern().is_match(normalized)
+}
+
+fn is_cursor_output_noise(raw: &str, normalized: &str) -> bool {
+    let lower = normalized.to_ascii_lowercase();
+
+    is_common_output_noise(raw, normalized)
+        || lower == "cursor agent"
+        || cursor_version_pattern().is_match(normalized)
+        || lower.starts_with("tip: type ? in the prompt bar")
+        || lower.contains("add a follow-up")
+        || lower.contains("ctrl+c to stop")
+        || lower.starts_with("ctrl+b twice to send to background")
+        || lower == "retrying the command."
+        || lower.contains("waiting for approval")
+        || lower.starts_with("run this command?")
+        || lower.starts_with("not in allowlist:")
+        || lower.starts_with("run (once)")
+        || lower.starts_with("add shell(")
+        || lower.starts_with("run everything")
+        || lower.starts_with("skip & tell the agent")
+        || lower.starts_with("tell the agent what to do instead")
+        || lower.starts_with("empty to skip")
+        || lower.starts_with("esc to cancel")
+        || lower.contains("composing") && normalized.chars().any(is_braille_pattern)
+        || is_cursor_running_line(normalized)
+        || cursor_task_count_pattern().is_match(normalized)
+        || cursor_footer_model_pattern().is_match(normalized)
+        || normalized.starts_with("~/")
+        || normalized.starts_with('/')
+        || raw.trim_start().starts_with('$')
 }
 
 fn is_kiro_output_noise(raw: &str, normalized: &str) -> bool {
@@ -1946,6 +2059,46 @@ fn looks_like_copilot_trust_prompt(output_tail: &str) -> bool {
         && lower.contains("enter to select")
 }
 
+fn looks_like_cursor_prompt(output_tail: &str) -> bool {
+    !looks_like_cursor_active(output_tail)
+        && !looks_like_cursor_permission_prompt(output_tail)
+        && recent_nonempty_lines(output_tail, 14).iter().rev().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("add a follow-up") && !lower.contains("ctrl+c to stop")
+        })
+        && extract_cursor_detail(Some(output_tail)).is_some()
+}
+
+fn looks_like_cursor_active(output_tail: &str) -> bool {
+    for line in recent_nonempty_lines(output_tail, 14).into_iter().rev() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("add a follow-up") && !lower.contains("ctrl+c to stop") {
+            return false;
+        }
+
+        let normalized = normalize_output_line(line.trim());
+        let status = normalized.trim_start_matches(is_braille_pattern).trim_start();
+        if status.eq_ignore_ascii_case("composing") || is_cursor_running_line(status) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_cursor_running_line(normalized: &str) -> bool {
+    let status = normalized.trim_start_matches(is_braille_pattern).trim_start();
+    cursor_running_pattern().is_match(status)
+}
+
+fn looks_like_cursor_permission_prompt(output_tail: &str) -> bool {
+    let lower = recent_nonempty_lines(output_tail, 10).join("\n").to_ascii_lowercase();
+    (lower.contains("run this command?")
+        && lower.contains("run (once)")
+        && lower.contains("not in allowlist:"))
+        || (lower.contains("tell the agent what to do instead") && lower.contains("empty to skip"))
+}
+
 fn looks_like_kiro_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
     !looks_like_kiro_active(output_tail)
         && recent_lines.iter().any(|line| {
@@ -2426,6 +2579,37 @@ fn copilot_footer_model_pattern() -> &'static Regex {
     })
 }
 
+fn cursor_footer_model_pattern() -> &'static Regex {
+    static CURSOR_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
+    CURSOR_FOOTER_MODEL.get_or_init(|| {
+        Regex::new(r"^(?P<model>.+?)\s+·\s+\d+(?:\.\d+)?%\s*$")
+            .expect("cursor footer model regex should compile")
+    })
+}
+
+fn cursor_version_pattern() -> &'static Regex {
+    static CURSOR_VERSION: OnceLock<Regex> = OnceLock::new();
+    CURSOR_VERSION.get_or_init(|| {
+        Regex::new(r"(?im)^\s*v\d{4}\.\d{2}\.\d{2}-[a-z0-9]+\s*$")
+            .expect("cursor version regex should compile")
+    })
+}
+
+fn cursor_running_pattern() -> &'static Regex {
+    static CURSOR_RUNNING: OnceLock<Regex> = OnceLock::new();
+    CURSOR_RUNNING.get_or_init(|| {
+        Regex::new(r"(?i)^Running\s+\d+(?:[.,]\d+)?\s+tokens?$")
+            .expect("cursor running regex should compile")
+    })
+}
+
+fn cursor_task_count_pattern() -> &'static Regex {
+    static CURSOR_TASK_COUNT: OnceLock<Regex> = OnceLock::new();
+    CURSOR_TASK_COUNT.get_or_init(|| {
+        Regex::new(r"(?i)^\d+\s+tasks?$").expect("cursor task count regex should compile")
+    })
+}
+
 fn kiro_footer_model_pattern() -> &'static Regex {
     static KIRO_FOOTER_MODEL: OnceLock<Regex> = OnceLock::new();
     KIRO_FOOTER_MODEL.get_or_init(|| {
@@ -2571,11 +2755,11 @@ mod tests {
         extract_antigravity_output_excerpt, extract_auggie_detail, extract_auggie_output_excerpt,
         extract_claude_detail, extract_claude_output_excerpt, extract_codex_detail,
         extract_codex_output_excerpt, extract_copilot_detail, extract_copilot_output_excerpt,
-        extract_gemini_detail, extract_gemini_output_excerpt, extract_grok_detail,
-        extract_grok_output_excerpt, extract_kiro_detail, extract_kiro_output_excerpt,
-        extract_opencode_detail, extract_opencode_output_excerpt, extract_pi_detail,
-        extract_pi_output_excerpt, is_grok_active_waiting_footer_line, is_shell_command,
-        AdapterRegistry, AgentAdapter, SessionTracker,
+        extract_cursor_detail, extract_gemini_detail, extract_gemini_output_excerpt,
+        extract_grok_detail, extract_grok_output_excerpt, extract_kiro_detail,
+        extract_kiro_output_excerpt, extract_opencode_detail, extract_opencode_output_excerpt,
+        extract_pi_detail, extract_pi_output_excerpt, is_grok_active_waiting_footer_line,
+        is_shell_command, AdapterRegistry, AgentAdapter, SessionTracker,
     };
     use crate::model::{AgentDetail, AgentDetailTone, AgentKind, SessionRecord, SessionStatus};
     use crate::tmux::PaneSnapshot;
@@ -2600,6 +2784,8 @@ mod tests {
         let pi_agent = snapshot("%8", "pi-agent", false);
         let antigravity = snapshot("%9", "agy", false);
         let copilot = snapshot("%10", "copilot", false);
+        let cursor = snapshot("%36", "cursor", false);
+        let cursor_agent = snapshot("%37", "cursor-agent", false);
         let kiro = snapshot("%11", "kiro-cli", false);
         let copilot_title = snapshot_with_title("%12", "node", false, "GitHub Copilot");
         let kiro_title = snapshot_with_title("%13", "node", false, "Kiro CLI");
@@ -2637,6 +2823,8 @@ mod tests {
         assert_eq!(registry.detect_kind(&pi_agent, None), Some(AgentKind::Pi));
         assert_eq!(registry.detect_kind(&antigravity, None), Some(AgentKind::AntigravityCli));
         assert_eq!(registry.detect_kind(&copilot, None), Some(AgentKind::GitHubCopilotCli));
+        assert_eq!(registry.detect_kind(&cursor, None), Some(AgentKind::CursorCli));
+        assert_eq!(registry.detect_kind(&cursor_agent, None), Some(AgentKind::CursorCli));
         assert_eq!(registry.detect_kind(&kiro, None), Some(AgentKind::KiroCli));
         assert_eq!(registry.detect_kind(&copilot_title, None), Some(AgentKind::GitHubCopilotCli));
         assert_eq!(registry.detect_kind(&kiro_title, None), Some(AgentKind::KiroCli));
@@ -2958,6 +3146,165 @@ Gemini 3.5 Flash (Medium)
         assert_eq!(records[0].kind, AgentKind::GitHubCopilotCli);
         assert_eq!(records[0].status, SessionStatus::WaitingInput);
         assert_eq!(records[0].output_excerpt, None);
+    }
+
+    #[test]
+    fn tracker_detects_cursor_from_live_output() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%36", "node", false, "worker");
+        let output_tail = include_str!("fixtures/output_cursor.txt");
+        let output_tails = HashMap::from([(pane.pane_id.clone(), output_tail.to_string())]);
+
+        let records = tracker.refresh(&[pane], &output_tails, now);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AgentKind::CursorCli);
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(
+            records[0].detail,
+            Some(
+                AgentDetail {
+                    label: "Composer 2.5 Fast".to_string(),
+                    tone: AgentDetailTone::Neutral,
+                }
+                .into()
+            )
+        );
+        assert_eq!(
+            records[0].output_excerpt.as_deref(),
+            Some("Hello — ready when you are. What would you like to work on?")
+        );
+        assert_eq!(
+            extract_cursor_detail(Some(output_tail)),
+            Some(AgentDetail {
+                label: "Composer 2.5 Fast".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+        assert!(!records[0]
+            .output_excerpt
+            .as_deref()
+            .is_some_and(|excerpt| excerpt.contains("workspace")));
+    }
+
+    #[test]
+    fn tracker_marks_cursor_composing_and_tool_activity_running() {
+        let pane = snapshot_with_title("%36", "cursor-agent", false, "worker");
+
+        for output_tail in [
+            CURSOR_COMPOSING_OUTPUT.to_string(),
+            CURSOR_TOOL_RUNNING_OUTPUT.to_string(),
+            format!("{CURSOR_TOOL_RUNNING_OUTPUT}\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"),
+        ] {
+            let mut tracker = SessionTracker::new();
+            let records = tracker.refresh(
+                std::slice::from_ref(&pane),
+                &HashMap::from([(pane.pane_id.clone(), output_tail)]),
+                Instant::now(),
+            );
+
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].kind, AgentKind::CursorCli);
+            assert_eq!(records[0].status, SessionStatus::Running);
+            assert_eq!(records[0].output_excerpt, None);
+        }
+    }
+
+    #[test]
+    fn tracker_marks_cursor_permission_prompts_waiting_input() {
+        let pane = snapshot_with_title("%36", "cursor-agent", false, "worker");
+
+        for output_tail in [CURSOR_PERMISSION_OUTPUT, CURSOR_PERMISSION_FOLLOW_UP_OUTPUT] {
+            let mut tracker = SessionTracker::new();
+            let records = tracker.refresh(
+                std::slice::from_ref(&pane),
+                &HashMap::from([(pane.pane_id.clone(), output_tail.to_string())]),
+                Instant::now(),
+            );
+
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].kind, AgentKind::CursorCli);
+            assert_eq!(records[0].status, SessionStatus::WaitingInput);
+            assert_eq!(records[0].output_excerpt, None);
+        }
+    }
+
+    #[test]
+    fn tracker_ignores_cursor_permission_prompt_after_newer_activity() {
+        let pane = snapshot_with_title("%36", "cursor-agent", false, "worker");
+
+        for (newer, expected) in [
+            (CURSOR_TOOL_RUNNING_OUTPUT, SessionStatus::Running),
+            (CURSOR_TOOL_COMPLETE_OUTPUT, SessionStatus::WaitingInput),
+        ] {
+            let mut tracker = SessionTracker::new();
+            let output_tail = format!("{CURSOR_PERMISSION_OUTPUT}\n{newer}");
+            let records = tracker.refresh(
+                std::slice::from_ref(&pane),
+                &HashMap::from([(pane.pane_id.clone(), output_tail)]),
+                Instant::now(),
+            );
+
+            assert_eq!(records[0].status, expected);
+        }
+    }
+
+    #[test]
+    fn tracker_prefers_cursor_newer_idle_footer_over_older_active_chrome() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot_with_title("%36", "cursor-agent", false, "worker");
+        let output_tail = format!("{CURSOR_TOOL_RUNNING_OUTPUT}\n{CURSOR_TOOL_COMPLETE_OUTPUT}");
+        let records = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), output_tail)]),
+            Instant::now(),
+        );
+
+        assert_eq!(records[0].status, SessionStatus::WaitingInput);
+        assert_eq!(records[0].output_excerpt.as_deref(), Some("finished"));
+    }
+
+    #[test]
+    fn tracker_marks_cursor_completed_tool_turn_waiting_with_clean_excerpt() {
+        let mut tracker = SessionTracker::new();
+        let now = Instant::now();
+        let pane = snapshot_with_title("%36", "cursor-agent", false, "worker");
+
+        let active = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), CURSOR_TOOL_RUNNING_OUTPUT.to_string())]),
+            now,
+        );
+        assert_eq!(active[0].status, SessionStatus::Running);
+
+        let completed = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(pane.pane_id.clone(), CURSOR_TOOL_COMPLETE_OUTPUT.to_string())]),
+            now + Duration::from_secs(10),
+        );
+
+        assert_eq!(completed[0].status, SessionStatus::WaitingInput);
+        assert_eq!(completed[0].output_excerpt.as_deref(), Some("finished"));
+        assert_eq!(
+            completed[0].detail.as_deref(),
+            Some(&AgentDetail {
+                label: "Composer 2.5 Fast".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_output_detection_rejects_generic_mentions() {
+        let mut tracker = SessionTracker::new();
+        let pane = snapshot_with_title("%36", "node", false, "worker");
+        let output_tails = HashMap::from([(
+            pane.pane_id.clone(),
+            "The changelog mentions Cursor Agent sessions and Composer models.".to_string(),
+        )]);
+
+        assert!(tracker.refresh(&[pane], &output_tails, Instant::now()).is_empty());
     }
 
     #[test]
@@ -5233,13 +5580,13 @@ shift+tab to accept edits
             ),
             (AgentKind::Grok, "node", "worker", include_str!("fixtures/output_grok.txt")),
             (AgentKind::GitHubCopilotCli, "node", "worker", COPILOT_FINAL_OUTPUT),
+            (AgentKind::CursorCli, "node", "worker", include_str!("fixtures/output_cursor.txt")),
             (AgentKind::KiroCli, "node", "worker", KIRO_LONG_REPLY_OUTPUT),
         ]
     }
 
     fn planned_command_fixtures() -> Vec<(AgentKind, &'static str)> {
         vec![
-            (AgentKind::CursorCli, "cursor"),
             (AgentKind::Aider, "aider"),
             (AgentKind::ClineCli, "cline"),
             (AgentKind::GooseCli, "goose"),
@@ -5259,6 +5606,7 @@ shift+tab to accept edits
             "Auggie" => AgentKind::Auggie,
             "Grok" => AgentKind::Grok,
             "GitHubCopilotCli" => AgentKind::GitHubCopilotCli,
+            "CursorCli" => AgentKind::CursorCli,
             "KiroCli" => AgentKind::KiroCli,
             other => panic!("unknown fixture agent kind: {other}"),
         }
@@ -5341,6 +5689,73 @@ shift+tab to accept edits
 │   3. No (Esc)                                                                                                                             │
 │ ↑/↓ to navigate · enter to select · esc to cancel                                                                                         │
 ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+";
+
+    const CURSOR_COMPOSING_OUTPUT: &str = "\
+Cursor Agent
+v2026.07.23-e383d2b
+
+Run sleep 10 in the terminal, wait for it, then reply finished.
+
+⠘⠤ Composing
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+→ Add a follow-up                                      ctrl+c to stop
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+Composer 2.5 Fast · 9.3%
+~/workspace/project
+";
+
+    const CURSOR_TOOL_RUNNING_OUTPUT: &str = "\
+Cursor Agent
+v2026.07.23-e383d2b
+
+Run sleep 10 in the terminal, wait for it, then reply finished.
+
+$ sleep 10 8.3s
+  ctrl+b twice to send to background
+
+⠰⠰ Running  46 tokens
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+→ Add a follow-up                                      ctrl+c to stop
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+1 task
+Composer 2.5 Fast · 9.3%
+~/workspace/project
+";
+
+    const CURSOR_PERMISSION_OUTPUT: &str = "\
+$ sleep 10 Waiting for approval...
+
+Run this command?
+Not in allowlist: sleep
+→ Run (once) (y)
+  Add Shell(sleep) to allowlist? (tab)
+  Run Everything (shift+tab)
+  Skip & tell the agent what to do instead (esc or n)
+";
+
+    const CURSOR_PERMISSION_FOLLOW_UP_OUTPUT: &str = "\
+$ sleep 10 Waiting for approval...
+
+→ Tell the agent what to do instead (Enter to send,    ctrl+c to stop
+  empty to skip, Esc to cancel)
+";
+
+    const CURSOR_TOOL_COMPLETE_OUTPUT: &str = "\
+Cursor Agent
+v2026.07.23-e383d2b
+
+Run sleep 10 in the terminal, wait for it, then reply finished.
+
+$ sleep 10 10s
+
+finished
+
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+→ Add a follow-up
+▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+Composer 2.5 Fast · 9.4%
+~/workspace/project
 ";
 
     const KIRO_REPLY_OUTPUT: &str = "\
