@@ -73,7 +73,7 @@ kill -0 "$daemon_pid" 2>/dev/null || fail 'singleton start replaced or stopped t
 # generation. The old daemon must be identified as an owned incompatible peer,
 # stopped cooperatively, and replaced without needing another plugin reload.
 old_daemon_pid="$daemon_pid"
-tmux -S "$tmux_socket" kill-server
+tmux -S "$tmux_socket" kill-server 2>/dev/null || true
 tmux -S "$tmux_socket" new-session -d -s ilmari-daemon-restarted 'sleep 120'
 refresh_tmux_context
 # Server-global options are intentionally lost with the old server. Restore the
@@ -81,7 +81,9 @@ refresh_tmux_context
 tmux -S "$tmux_socket" set-option -g @ilmari_mcp_url "$popup_mcp_url"
 run_ilmari daemon start --mcp --mcp-port 0 >"$tmp_dir/restarted-daemon.log" 2>&1 &
 daemon_pid="$!"
-for _ in {1..100}; do
+# Loaded CI runners can take longer than the daemon's internal stale-peer
+# recovery window before the replacement publishes its first healthy snapshot.
+for _ in {1..200}; do
   [[ "$(run_ilmari daemon status)" == 'running' ]] && break
   sleep 0.05
 done
