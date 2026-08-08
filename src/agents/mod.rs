@@ -533,7 +533,11 @@ fn classify_muse_session(
         return SessionStatus::WaitingInput;
     }
 
-    adapter.detect(pane).then_some(SessionStatus::WaitingInput).unwrap_or(SessionStatus::Unknown)
+    if adapter.detect(pane) {
+        SessionStatus::WaitingInput
+    } else {
+        SessionStatus::Unknown
+    }
 }
 
 /// Copilot CLI classifier with explicit working-footer and waiting-prompt heuristics.
