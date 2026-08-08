@@ -207,6 +207,7 @@ impl ProcessTree {
                 command_executable_matches(&process.command, "grok")
                     || node_wrapper_path_matches(&process.command, "grok")
             }
+            AgentKind::Muse => command_executable_matches(&process.command, "muse"),
             AgentKind::GitHubCopilotCli => {
                 command_executable_matches(&process.command, "copilot")
                     || node_wrapper_path_matches(&process.command, "copilot")
@@ -607,6 +608,12 @@ mod tests {
                 "grok-macos-aarc",
                 "node /opt/homebrew/bin/grok-macos-aarc",
                 "bun /opt/homebrew/bin/grok-macos-aarc",
+            ),
+            (
+                AgentKind::Muse,
+                "muse-bin-12.34.56-build.789",
+                "/workspace/bin/muse-bin-next-channel",
+                "muse-bin-dev",
             ),
         ];
 

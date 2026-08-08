@@ -55,6 +55,7 @@ output identifies an enabled agent.
 | Pi | `pi`, `pi-agent` |
 | Auggie | `auggie` |
 | Grok | `grok` |
+| Muse | `muse`, opaque-suffixed `muse-*` binaries such as `muse-bin-*` |
 | GitHub Copilot CLI | `copilot` |
 | Cursor CLI | `cursor`, `cursor-agent` |
 | Kiro CLI | `kiro-cli` |

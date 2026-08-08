@@ -23,6 +23,7 @@ pub enum AgentKind {
     AntigravityCli,
     Auggie,
     Grok,
+    Muse,
     GitHubCopilotCli,
     CursorCli,
     Aider,
@@ -41,7 +42,7 @@ pub enum AgentSupport {
 
 impl AgentKind {
     /// Every known agent identity, including planned (disabled) kinds.
-    pub const ALL_KINDS: [Self; 16] = [
+    pub const ALL_KINDS: [Self; 17] = [
         Self::Codex,
         Self::Amp,
         Self::ClaudeCode,
@@ -51,6 +52,7 @@ impl AgentKind {
         Self::AntigravityCli,
         Self::Auggie,
         Self::Grok,
+        Self::Muse,
         Self::GitHubCopilotCli,
         Self::CursorCli,
         Self::Aider,
@@ -72,6 +74,7 @@ impl AgentKind {
             | Self::AntigravityCli
             | Self::Auggie
             | Self::Grok
+            | Self::Muse
             | Self::GitHubCopilotCli
             | Self::CursorCli
             | Self::KiroCli => AgentSupport::Enabled,
@@ -110,6 +113,7 @@ impl AgentKind {
             Self::AntigravityCli => "Antigravity",
             Self::Auggie => "Auggie",
             Self::Grok => "Grok",
+            Self::Muse => "Muse",
             Self::GitHubCopilotCli => "Copilot",
             Self::CursorCli => "Cursor CLI",
             Self::Aider => "Aider",
@@ -379,6 +383,7 @@ mod tests {
         assert_eq!(AgentKind::AntigravityCli.display_name(), "Antigravity");
         assert_eq!(AgentKind::Auggie.display_name(), "Auggie");
         assert_eq!(AgentKind::Grok.display_name(), "Grok");
+        assert_eq!(AgentKind::Muse.display_name(), "Muse");
         assert_eq!(AgentKind::GitHubCopilotCli.display_name(), "Copilot");
         assert_eq!(AgentKind::CursorCli.display_name(), "Cursor CLI");
         assert_eq!(AgentKind::Aider.display_name(), "Aider");
@@ -398,6 +403,7 @@ mod tests {
                 AgentKind::AntigravityCli,
                 AgentKind::Auggie,
                 AgentKind::Grok,
+                AgentKind::Muse,
                 AgentKind::GitHubCopilotCli,
                 AgentKind::CursorCli,
                 AgentKind::KiroCli,
@@ -431,7 +437,7 @@ mod tests {
 
     #[test]
     fn all_agent_kinds_have_support_and_display_metadata() {
-        assert_eq!(AgentKind::ALL_KINDS.len(), 16);
+        assert_eq!(AgentKind::ALL_KINDS.len(), 17);
         for kind in AgentKind::ALL_KINDS {
             assert!(!kind.display_name().is_empty());
             match kind.support() {

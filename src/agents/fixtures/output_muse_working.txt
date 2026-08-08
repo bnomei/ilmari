@@ -1,0 +1,11 @@
+Muse Code 0.1.0
+
+⟩ Run sleep 10 in the terminal, then say exactly: hello from muse
+
+◆ Running command · Run sleep 10 (6s · esc to interrupt)
+└ (ctrl+b to send to background)
+
+─────────────────────────────────────────────────────────────────────────
+⟩
+─────────────────────────────────────────────────────────────────────────
+  muse-spark-1.2 · xhigh · ~/workspace

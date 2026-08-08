@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-08-08
+
+### Added
+
+- Added Meta Muse CLI session detection for opaque-suffixed `muse-*` processes, temporary working blocks, `muse-spark` model/effort footers, and sanitized reply excerpts.
+
 ## 0.10.0 - 2026-08-04
 
 ### Added

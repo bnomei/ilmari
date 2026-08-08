@@ -1771,6 +1771,7 @@ fn agent_slug(kind: AgentKind) -> &'static str {
         AgentKind::AntigravityCli => "antigravity-cli",
         AgentKind::Auggie => "auggie",
         AgentKind::Grok => "grok",
+        AgentKind::Muse => "muse",
         AgentKind::GitHubCopilotCli => "copilot",
         AgentKind::CursorCli => "cursor-cli",
         AgentKind::Aider => "aider",

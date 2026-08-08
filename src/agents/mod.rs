@@ -20,7 +20,8 @@ mod adapters;
 use adapters::{
     AiderAdapter, AmpAdapter, AntigravityAdapter, AuggieAdapter, ClaudeCodeAdapter,
     ClineCliAdapter, CodexAdapter, CursorCliAdapter, GeminiAdapter, GitHubCopilotCliAdapter,
-    GooseCliAdapter, GrokAdapter, KiroCliAdapter, OpenCodeAdapter, OpenHandsCliAdapter, PiAdapter,
+    GooseCliAdapter, GrokAdapter, KiroCliAdapter, MuseAdapter, OpenCodeAdapter,
+    OpenHandsCliAdapter, PiAdapter,
 };
 
 /// How long a finished session remains visible after its pane disappears from tmux.
@@ -102,6 +103,7 @@ fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(AntigravityAdapter),
         Box::new(AuggieAdapter),
         Box::new(GrokAdapter),
+        Box::new(MuseAdapter),
         Box::new(GitHubCopilotCliAdapter),
         Box::new(CursorCliAdapter),
         Box::new(AiderAdapter),
@@ -491,6 +493,47 @@ fn classify_grok_session(
     }
 
     SessionStatus::Unknown
+}
+
+/// Muse-specific classifier: its input prompt remains visible while the temporary
+/// Thinking/Running/Working block indicates active work.
+fn classify_muse_session(
+    adapter: &dyn AgentAdapter,
+    pane: &PaneSnapshot,
+    output_tail: Option<&str>,
+    output_fingerprint: Option<u64>,
+    previous: Option<&SessionRecord>,
+) -> SessionStatus {
+    if pane.pane_dead {
+        return SessionStatus::Terminated;
+    }
+
+    if previous.is_some() && !adapter.detect(pane) && is_shell_command(&pane.pane_current_command) {
+        return SessionStatus::Finished;
+    }
+
+    if let Some(retained_status) = retained_status_without_output_tail(output_tail, previous) {
+        return retained_status;
+    }
+
+    let output_tail = output_tail.unwrap_or_default();
+    if looks_like_muse_active(output_tail) {
+        return SessionStatus::Running;
+    }
+
+    if looks_like_muse_prompt(output_tail) {
+        return SessionStatus::WaitingInput;
+    }
+
+    if output_has_recent_motion(output_fingerprint, previous) {
+        return SessionStatus::Running;
+    }
+
+    if output_is_stable(output_fingerprint, previous) {
+        return SessionStatus::WaitingInput;
+    }
+
+    adapter.detect(pane).then_some(SessionStatus::WaitingInput).unwrap_or(SessionStatus::Unknown)
 }
 
 /// Copilot CLI classifier with explicit working-footer and waiting-prompt heuristics.
@@ -887,6 +930,7 @@ fn command_matches_non_claude_agent(command: &str) -> bool {
         || command_matches(command, "agy")
         || command_matches(command, "auggie")
         || command_matches(command, "grok")
+        || command_matches(command, "muse")
         || command_matches(command, "copilot")
         || command_matches(command, "cursor")
         || command_matches(command, "aider")
@@ -942,6 +986,11 @@ fn looks_like_auggie_output(output_tail: &str) -> bool {
     lower.contains("get started with auggie")
         || lower.contains("for automation, use 'auggie --print")
         || lower.contains("tip: use 'auggie session continue'")
+}
+
+fn looks_like_muse_output(output_tail: &str) -> bool {
+    output_tail.to_ascii_lowercase().contains("muse code")
+        && extract_muse_detail(Some(output_tail)).is_some()
 }
 
 /// Generic waiting/finished prompt patterns shared across many agent CLIs.
@@ -1208,6 +1257,20 @@ fn extract_grok_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
             .filter(|label| !label.is_empty())
     });
     label.map(|label| AgentDetail { label, tone: AgentDetailTone::Grok })
+}
+
+fn extract_muse_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
+    let output_tail = output_tail?;
+    let label = output_tail.lines().rev().find_map(|line| {
+        let normalized = normalize_output_line(line.trim());
+        let mut parts = normalized.split('·').map(str::trim);
+        let model = parts.next()?;
+        let effort = parts.next()?;
+        (model.to_ascii_lowercase().starts_with("muse-") && !effort.is_empty())
+            .then(|| format!("{model} {effort}"))
+    })?;
+
+    Some(AgentDetail { label, tone: AgentDetailTone::Neutral })
 }
 
 fn extract_copilot_detail(output_tail: Option<&str>) -> Option<AgentDetail> {
@@ -1628,6 +1691,28 @@ fn extract_grok_output_excerpt(output_tail: Option<&str>) -> Option<String> {
         .or_else(|| extract_latest_grok_completion_excerpt(output_tail))
 }
 
+fn extract_muse_output_excerpt(output_tail: Option<&str>) -> Option<String> {
+    let output_tail = output_tail?;
+    if looks_like_muse_active(output_tail) {
+        return None;
+    }
+
+    extract_output_excerpt_from_tail(output_tail, |raw, normalized| {
+        let lower = normalized.to_ascii_lowercase();
+        let status = lower.trim_start_matches('◆').trim_start();
+        is_common_output_noise(raw, normalized)
+            || raw.trim_start().starts_with('⟩')
+            || lower.starts_with("muse code")
+            || status.starts_with("ran command")
+            || status.starts_with("thinking")
+            || status.starts_with("running ")
+            || status.starts_with("working")
+            || lower.starts_with("(ctrl+b to send to background)")
+            || extract_muse_detail(Some(normalized)).is_some()
+    })
+    .map(|excerpt| excerpt.strip_prefix("◆ ").unwrap_or(&excerpt).to_string())
+}
+
 fn extract_latest_grok_reply_excerpt(output_tail: &str) -> Option<String> {
     let output_tail = strip_grok_right_aligned_timestamps(output_tail);
     extract_output_excerpt_from_tail(&output_tail, |raw, normalized| {
@@ -2008,6 +2093,25 @@ fn looks_like_gemini_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
         })
         && lower.contains("? for shortcuts"))
         || (lower.contains("action required") && lower.contains("allow execution of"))
+}
+
+fn looks_like_muse_prompt(output_tail: &str) -> bool {
+    !looks_like_muse_active(output_tail)
+        && extract_muse_detail(Some(output_tail)).is_some()
+        && recent_nonempty_lines(output_tail, 8)
+            .iter()
+            .any(|line| line.trim_start().starts_with('⟩'))
+}
+
+fn looks_like_muse_active(output_tail: &str) -> bool {
+    recent_nonempty_lines(output_tail, 10).iter().any(|line| {
+        let normalized = normalize_output_line(line.trim());
+        let status = normalized.trim_start_matches('◆').trim_start().to_ascii_lowercase();
+        let active_label = status.starts_with("thinking")
+            || status.starts_with("running")
+            || status.starts_with("working");
+        active_label && status.contains("esc to interrupt")
+    })
 }
 
 fn looks_like_copilot_prompt(recent_lines: &[&str], output_tail: &str) -> bool {
@@ -2920,6 +3024,53 @@ mod tests {
             assert_eq!(records.len(), 1, "output fixture should produce one record for {kind:?}");
             assert_eq!(records[0].kind, kind, "output fixture should detect {kind:?}");
         }
+    }
+
+    #[test]
+    fn tracker_classifies_sanitized_muse_snapshots() {
+        let pane = snapshot("%45", "muse-bin-preview", false);
+        let now = Instant::now();
+        let mut tracker = SessionTracker::new();
+
+        let idle = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(
+                pane.pane_id.clone(),
+                include_str!("fixtures/output_muse_idle.txt").to_string(),
+            )]),
+            now,
+        );
+        assert_eq!(idle[0].kind, AgentKind::Muse);
+        assert_eq!(idle[0].status, SessionStatus::WaitingInput);
+        assert_eq!(
+            idle[0].detail.as_deref(),
+            Some(&AgentDetail {
+                label: "muse-spark-1.2 xhigh".to_string(),
+                tone: AgentDetailTone::Neutral,
+            })
+        );
+        assert_eq!(idle[0].output_excerpt.as_deref(), Some("Hello! How can I help you today?"));
+
+        let working = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(
+                pane.pane_id.clone(),
+                include_str!("fixtures/output_muse_working.txt").to_string(),
+            )]),
+            now + Duration::from_secs(5),
+        );
+        assert_eq!(working[0].status, SessionStatus::Running);
+
+        let completed = tracker.refresh(
+            std::slice::from_ref(&pane),
+            &HashMap::from([(
+                pane.pane_id.clone(),
+                include_str!("fixtures/output_muse_completed.txt").to_string(),
+            )]),
+            now + Duration::from_secs(15),
+        );
+        assert_eq!(completed[0].status, SessionStatus::WaitingInput);
+        assert_eq!(completed[0].output_excerpt.as_deref(), Some("hello from muse"));
     }
 
     #[test]
@@ -5579,6 +5730,7 @@ shift+tab to accept edits
                 include_str!("fixtures/output_antigravity.txt"),
             ),
             (AgentKind::Grok, "node", "worker", include_str!("fixtures/output_grok.txt")),
+            (AgentKind::Muse, "node", "worker", include_str!("fixtures/output_muse_idle.txt")),
             (AgentKind::GitHubCopilotCli, "node", "worker", COPILOT_FINAL_OUTPUT),
             (AgentKind::CursorCli, "node", "worker", include_str!("fixtures/output_cursor.txt")),
             (AgentKind::KiroCli, "node", "worker", KIRO_LONG_REPLY_OUTPUT),
@@ -5605,6 +5757,7 @@ shift+tab to accept edits
             "AntigravityCli" => AgentKind::AntigravityCli,
             "Auggie" => AgentKind::Auggie,
             "Grok" => AgentKind::Grok,
+            "Muse" => AgentKind::Muse,
             "GitHubCopilotCli" => AgentKind::GitHubCopilotCli,
             "CursorCli" => AgentKind::CursorCli,
             "KiroCli" => AgentKind::KiroCli,
